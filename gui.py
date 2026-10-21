@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import shutil
+import tempfile
 import subprocess
 import sys
 import threading
@@ -54,11 +55,13 @@ class App:
         self.last_out = None
         self.busy = False
         self.cancel = threading.Event()
+        self.thumb = None          # PhotoImage превью — держим ссылку, иначе tk её потеряет
+        self.thumb_n = 0
 
         root.title("AutoClip — нарезка стримов")
         root.configure(bg=BG)
-        root.geometry("640x760")
-        root.minsize(560, 640)
+        root.geometry("640x900")
+        root.minsize(560, 760)
 
         st = ttk.Style()
         st.theme_use("clam")
@@ -197,6 +200,8 @@ class App:
                     self.finish(m[1])
                 elif isinstance(m, tuple) and m[0] == "__prog__":
                     self.show_progress(*m[1:])
+                elif isinstance(m, tuple) and m[0] == "__thumb__":
+                    self.show_thumb(*m[1:])
                 else:
                     self.write(m)
         except queue.Empty:
@@ -236,6 +241,38 @@ class App:
         if len(paths) > 4:
             names += f"\n…и ещё {len(paths) - 4}"
         self.drop.configure(text="🎬 " + names, fg=ACCENT)
+        self.thumb_n += 1
+        threading.Thread(target=self.make_thumb, args=(paths, self.thumb_n), daemon=True).start()
+
+    def make_thumb(self, paths, n):
+        png = os.path.join(tempfile.gettempdir(), f"autoclip_thumb_{os.getpid()}_{n}.png")
+        try:
+            info = autoclip.thumbnail(paths[0], png, box=240)
+        except Exception:
+            return                                   # без превью — останется название
+        self.q.put(("__thumb__", paths, png, info, n))
+
+    def show_thumb(self, paths, png, info, n):
+        if n != self.thumb_n:                        # пока делали кадр, выбрали другой файл
+            return
+        try:
+            self.thumb = tk.PhotoImage(file=png)
+        except tk.TclError:
+            return
+        finally:
+            try:
+                os.remove(png)                       # наш временный кадр
+            except OSError:
+                pass
+        text = (f"{os.path.basename(paths[0])}\n\n{autoclip.fmt_time(info['dur'])}\n"
+                f"{info['w']}×{info['h']}, {info['fps']:g} к/с")
+        if info["w"] > info["h"]:
+            text += "\nгоризонтальное"
+        if len(paths) > 1:
+            text += f"\n\n…и ещё {len(paths) - 1}"
+        self.drop.configure(image=self.thumb, compound="left", text=text, justify="left",
+                            height=0, padx=16, pady=12, anchor="w",
+                            font=("Segoe UI", 11, "bold"))
 
     def on_drop(self, e):
         self.set_files(self.root.tk.splitlist(e.data))

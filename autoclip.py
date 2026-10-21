@@ -178,6 +178,19 @@ def probe(video):
     }
 
 
+def thumbnail(video, out_png, box=240):
+    """Кадр из записи для превью, вписанный в квадрат box×box (около 10% от начала, не дальше 5 минут).
+    Возвращает сведения о видео из probe()."""
+    vinfo = probe(video)
+    at = min(vinfo["dur"] * 0.1, 300.0)
+    p = run(["ffmpeg", "-y", "-v", "error", "-ss", f"{at:.2f}", "-i", video, "-frames:v", "1",
+             "-vf", f"scale={box}:{box}:force_original_aspect_ratio=decrease:flags=lanczos",
+             out_png])
+    if p.returncode != 0 or not os.path.isfile(out_png):
+        raise AutoClipError("❌ Не получилось взять кадр из видео.")
+    return vinfo
+
+
 # ---------------- 1. звук ----------------
 
 def extract_audio(video, wav, cancel=None):
