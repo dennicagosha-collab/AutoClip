@@ -1038,6 +1038,27 @@ def clip_words(segments, s, e):
     return words
 
 
+def bleep_spans(words, total, pad):
+    """Где закрыть мат: [(начало, конец, до_куда_можно_звук)] во времени клипа.
+    Запас pad вокруг слова не залезает на соседние слова без мата, а звук поверх мата
+    должен закончиться до начала следующего такого слова."""
+    ws = sorted(words, key=lambda w: w["s"])
+    spans = []
+    for i, wd in enumerate(ws):
+        if not is_profane(wd["w"]):
+            continue
+        prev_e = max((w["e"] for w in ws[:i] if not is_profane(w["w"])), default=0.0)
+        nxt = next((w["s"] for w in ws[i + 1:] if not is_profane(w["w"])), total)
+        a = max(0.0, wd["s"] - pad, min(prev_e, wd["s"]))
+        b = min(total, wd["e"] + pad, max(nxt, wd["e"]))
+        until = min(total, max(nxt, b))
+        if spans and a <= spans[-1][1]:
+            spans[-1][1:] = [b, until]
+        else:
+            spans.append([a, b, until])
+    return [tuple(x) for x in spans]
+
+
 def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None):
     """clip: {'s', 'e', 'zooms', 'hook': (начало, конец) или None} во времени записи.
     Хук — кусок этого же клипа, ставится в самое начало, затем клип с начала.
@@ -1106,20 +1127,11 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     graph += vin + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
-    bleeps = []
-    if cfg["bleep"]:
-        pad = cfg["bleep_pad"]
-        for wd in words:
-            if is_profane(wd["w"]):
-                a, b = max(0.0, wd["s"] - pad), min(total, wd["e"] + pad)
-                if bleeps and a <= bleeps[-1][1]:
-                    bleeps[-1][1] = b
-                else:
-                    bleeps.append([a, b])
+    bleeps = bleep_spans(words, total, cfg["bleep_pad"]) if cfg["bleep"] else []
     snd = sound_path(cfg["bleep_sound"]) if bleeps else None
     extra_in = []
     if bleeps:
-        E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in bleeps)
+        E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in bleeps)
         agraph = f"{ain}{fmt},volume=0:enable='{E}'[am]"
         if snd:
             sdur = sound_duration(snd)
@@ -1127,10 +1139,12 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             n = len(bleeps)
             agraph += f";[{snd_in}:a]{fmt},volume={cfg['bleep_volume']},asplit={n}" + \
                       "".join(f"[s{i}]" for i in range(n))
-            for i, (a, b) in enumerate(bleeps):
-                L = max(0.12, min(sdur, (b - a) + 0.35))
+            for i, (a, b, until) in enumerate(bleeps):
+                # звук не дольше, чем до следующего слова без мата
+                L = max(0.05, min(sdur, until - a))
+                fd = min(0.06, L / 3)
                 ms = int(a * 1000)
-                agraph += (f";[s{i}]atrim=0:{L:.3f},afade=t=out:st={max(0, L - 0.06):.3f}:d=0.06,"
+                agraph += (f";[s{i}]atrim=0:{L:.3f},afade=t=out:st={L - fd:.3f}:d={fd:.3f},"
                            f"adelay={ms}:all=1[d{i}]")
             agraph += ";[am]" + "".join(f"[d{i}]" for i in range(n)) + \
                       f"amix=inputs={n + 1}:duration=first:normalize=0[aout]"
