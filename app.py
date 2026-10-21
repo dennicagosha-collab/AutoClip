@@ -16,7 +16,7 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 import autoclip  # noqa: E402
 
 from PySide6.QtCore import QByteArray, QObject, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QPalette, QPixmap  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPalette, QPixmap, QShortcut  # noqa: E402
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
@@ -228,8 +228,18 @@ class DropZone(QFrame):
 
 # ---------------- просмотр видео ----------------
 
+class ClickableVideo(QVideoWidget):
+    clicked = Signal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
 class PlayerPanel(QWidget):
-    """Видео с перемоткой. Можно открепить в отдельное окно и вернуть."""
+    """Видео с перемоткой. Можно открепить в отдельное окно и вернуть.
+    Клип открывается на паузе с первым кадром; играет по ▶, клику по видео или пробелу."""
     detach_clicked = Signal()
 
     def __init__(self):
@@ -238,7 +248,10 @@ class PlayerPanel(QWidget):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
-        self.video = QVideoWidget()
+        self.video = ClickableVideo()
+        self.video.setCursor(Qt.PointingHandCursor)
+        self.video.setToolTip("Клик или пробел — пуск и пауза")
+        self.video.clicked.connect(self.toggle)
         self.video.setStyleSheet("background: black;")
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.player.setVideoOutput(self.video)
@@ -267,11 +280,20 @@ class PlayerPanel(QWidget):
         self.player.positionChanged.connect(self._pos)
         self.player.durationChanged.connect(self._dur)
         self.player.playbackStateChanged.connect(self._state)
+        self.player.mediaStatusChanged.connect(self._loaded)
+        self._first_frame = False
 
-    def open(self, path, autoplay=True):
+    def open(self, path, autoplay=False):
+        self._first_frame = not autoplay
         self.player.setSource(QUrl.fromLocalFile(path))
         if autoplay:
             self.player.play()
+
+    def _loaded(self, status):
+        # пауза сразу после загрузки показывает первый кадр без звука
+        if status == QMediaPlayer.LoadedMedia and self._first_frame:
+            self._first_frame = False
+            self.player.pause()
 
     def clear(self):
         self.player.stop()
@@ -304,6 +326,7 @@ class DetachedWindow(QWidget):
         self.setStyleSheet(f"background: {BG};")
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(8, 8, 8, 8)
+        self.space = QShortcut(QKeySequence(Qt.Key_Space), self)
 
     def closeEvent(self, e):
         self.closed.emit()
@@ -619,6 +642,7 @@ class ClipsPage(QWidget):
         self.list = QListWidget()
         self.list.setObjectName("clipList")
         self.list.currentItemChanged.connect(self.select)
+        self.list.itemDoubleClicked.connect(lambda _: self.player.player.play())
         split.addWidget(self.list)
 
         right = QWidget()
@@ -626,6 +650,9 @@ class ClipsPage(QWidget):
         rl.setContentsMargins(12, 0, 0, 0)
         self.player_slot = QVBoxLayout()
         self.player = PlayerPanel()
+        sc = QShortcut(QKeySequence(Qt.Key_Space), self)
+        sc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc.activated.connect(self.player.toggle)
         self.player.detach_clicked.connect(self.win.toggle_detach)
         self.player_slot.addWidget(self.player)
         self.detached_note = QWidget()
@@ -1032,6 +1059,7 @@ class MainWindow(QMainWindow):
         if self.detached is None:
             self.detached = DetachedWindow()
             self.detached.closed.connect(self._reattach)
+            self.detached.space.activated.connect(p.toggle)
             self.detached.lay.addWidget(p)
             p.btn_detach.setText("Вернуть")
             if self.settings.get("player_geometry"):
