@@ -49,3 +49,17 @@ def test_parse_time():
     assert autoclip.parse_time("1:02:10") == 3730
     with pytest.raises(autoclip.AutoClipError):
         autoclip.parse_time("вчера")
+
+
+@pytest.mark.parametrize("text", ["Субтитры делал DimaTorzok", "Субтитры сделал DimaTorzok.",
+                                  "Продолжение следует...", "Редактор субтитров А.Синецкая"])
+def test_whisper_hallucinations_dropped(text):
+    seg = {"s": 0, "e": 1, "text": text, "words": []}
+    assert autoclip.drop_hallucinations([seg]) == []
+
+
+@pytest.mark.parametrize("text", ["субтитры включи", "продолжение следует завтра на стриме",
+                                  "ну вот смотри"])
+def test_normal_speech_kept(text):
+    seg = {"s": 0, "e": 1, "text": text, "words": []}
+    assert autoclip.drop_hallucinations([seg]) == [seg]

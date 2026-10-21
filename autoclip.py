@@ -250,6 +250,24 @@ def _read_wav(wav):
     return x.astype(np.float32) / 32768.0
 
 
+# Whisper на тишине и музыке иногда выдумывает титры из обучающих видео
+_HALLUCINATIONS = re.compile(
+    r"(?:субтитры|титры)\s+(?:делал|сделал|создавал|подготовил|подогнал|сделаны)\b.*"
+    r"|.*dimatorzok.*|редактор субтитров.*|корректор.*|продолжение следует"
+    r"|подписывайтесь на канал.*", re.I)
+
+
+def drop_hallucinations(segments):
+    """Убирает фразы, которые Whisper выдумал, а не услышал."""
+    out = []
+    for seg in segments:
+        text = re.sub(r"[^\w\s]", "", seg["text"].lower().replace("ё", "е")).strip()
+        if text and _HALLUCINATIONS.fullmatch(text):
+            continue
+        out.append(seg)
+    return out
+
+
 def transcribe(wav, cache_path, dur, progress=None, cancel=None):
     if os.path.exists(cache_path):
         log("📝 Расшифровка уже есть, беру из кэша.")
@@ -599,7 +617,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
         if not title:
             first = [w["w"] for seg in segments if seg["e"] > s and seg["s"] < e
                      for w in seg["words"] if s <= w["s"] < e][:6]
-            title = " ".join(first)
+            title = " ".join(first) or f"момент {fmt_time(peak)}"
         # без мата в названии файла и отчёте
         title = " ".join(_censor(w) for w in title.split())
         pk = int(peak)
@@ -1070,7 +1088,7 @@ def load_segments(proj):
     if not os.path.isfile(path):
         raise AutoClipError(f"❌ Нет расшифровки: {path}\n   Нарежь запись заново.")
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return drop_hallucinations(json.load(f))
 
 
 def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None, cancel=None):
@@ -1228,7 +1246,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
         prog("звук", 100)
         t = mark("звук и громкость", t)
         prog("расшифровка", 0)
-        segments = transcribe(wav, cache, vinfo["dur"], progress, cancel)
+        segments = drop_hallucinations(transcribe(wav, cache, vinfo["dur"], progress, cancel))
         prog("расшифровка", 100)
         t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
     n_words = sum(len(s["words"]) for s in segments)

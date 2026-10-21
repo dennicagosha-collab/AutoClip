@@ -8,4 +8,4 @@ for %%V in (3.13 3.12 3.14 3.11) do (
   )
 )
 if not defined PYW set "PYW=pythonw"
-start "" %PYW% "%~dp0gui.py"
+start "" %PYW% "%~dp0app.py"
