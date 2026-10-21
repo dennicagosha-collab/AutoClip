@@ -113,6 +113,13 @@ def fmt_time(sec):
     return f"{sec // 3600:d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
+def fmt_time_exact(sec):
+    """Время с десятыми: 0:01:18.4 — для точного ввода границ клипа."""
+    sec = max(0.0, round(float(sec), 1))
+    whole = int(sec)
+    return f"{whole // 3600:d}:{whole % 3600 // 60:02d}:{whole % 60:02d}.{int(round((sec - whole) * 10)) % 10}"
+
+
 class AutoClipError(Exception):
     """Ошибка, которую можно показать пользователю как есть."""
 
@@ -1391,15 +1398,29 @@ def migrate_user_data():
             pass
 
 
-def trash(path):
-    """Удаление только в корзину Windows — насовсем программа ничего не удаляет."""
-    if not os.path.exists(path):
-        return
+def _send_to_trash(path):
     try:
         from send2trash import send2trash
     except ImportError:
         raise AutoClipError("❌ Не установлен send2trash. Запусти install.bat.")
     send2trash(os.path.abspath(path))
+
+
+def trash(path, wait=3.0):
+    """Удаление только в корзину Windows — насовсем программа ничего не удаляет.
+    Если файл ещё занят (например, проигрыватель не успел его отпустить), пробуем снова."""
+    deadline = time.time() + wait
+    while True:
+        if not os.path.exists(path):
+            return
+        try:
+            _send_to_trash(path)
+            return
+        except OSError:
+            if time.time() >= deadline:
+                raise AutoClipError(f"❌ Файл занят другой программой: {os.path.basename(path)}\n"
+                                    "   Закрой его там и попробуй ещё раз.")
+            time.sleep(0.2)
 
 
 def replace_file(src, dst):
@@ -1541,6 +1562,67 @@ def make_clip_record(c, num, file):
     }
 
 
+QUIET_DB = -35.0              # тише этого — «без звука»
+
+
+def quiet_start(path, seconds=3.0):
+    """True, если в первые seconds секунд готового клипа нет звука («тихое начало»)."""
+    import numpy as np
+    p = subprocess.run(["ffmpeg", "-v", "error", "-t", f"{seconds:.2f}", "-i", path, "-vn",
+                        "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                       capture_output=True, creationflags=_NO_WINDOW)
+    x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if p.returncode != 0 or not len(x):
+        return None
+    win = 8000                                   # по полсекунды
+    levels = [20 * math.log10(float(np.sqrt(np.mean(x[i:i + win] ** 2))) + 1e-6)
+              for i in range(0, len(x), win) if len(x[i:i + win])]
+    return max(levels) < QUIET_DB
+
+
+def clip_tags(c):
+    """Короткие пометки клипа для списка: статус, хук, тихое начало, метка."""
+    tags = [STATUSES.get(c["status"], c["status"]),
+            "хук" if (c.get("hook") or {}).get("on") else "без хука"]
+    if c.get("quiet_start"):
+        tags.append("тихое начало")
+    if c.get("marks"):
+        tags.append("метка")
+    return tags
+
+
+def set_status(path, ref, status):
+    """Новый статус клипа. «Отклонён» — файл клипа уходит в корзину Windows."""
+    if status not in STATUSES:
+        raise AutoClipError(f"❌ Нет такого статуса: {status}")
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    if clip["status"] == "rejected":
+        raise AutoClipError("❌ Клип уже в корзине.")
+    if status == "rejected":
+        trash(os.path.join(os.path.dirname(proj["_path"]), clip["file"]))
+    clip["status"] = status
+    clip["status_date"] = now_iso()
+    save_project(proj)
+    write_report(proj)
+    return clip
+
+
+def save_clip_as(path, ref, dest):
+    """Копия готового клипа в другое место. Файл с тем же именем там уходит в корзину."""
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    src = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    if not os.path.isfile(src):
+        raise AutoClipError("❌ Файла клипа нет.")
+    if os.path.abspath(dest) == os.path.abspath(src):
+        return dest
+    if os.path.exists(dest):
+        trash(dest)
+    shutil.copy2(src, dest)
+    return dest
+
+
 def write_report(proj):
     out_dir = os.path.dirname(proj["_path"])
     vi = proj["source_info"]
@@ -1562,6 +1644,8 @@ def write_report(proj):
         rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
                    f"зумов: {len(c['zooms'])}")
         rep.append("    " + hook_text(c))
+        if c.get("quiet_start"):
+            rep.append("    тихое начало — первые 3 с без звука")
         if c["overrides"]:
             rep.append("    свои настройки: " +
                        ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
@@ -1649,7 +1733,8 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
                          proj["source_info"], out, tmp, cfg, cancel)
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
-    clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso())
+    clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
+                quiet_start=quiet_start(out))
     clip["hook"]["on"] = span is not None
     log("   " + hook_text(clip))
     save_project(proj)
@@ -1867,6 +1952,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
                 num -= 1
                 continue
             rec["rendered"] = now_iso()
+            rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
             proj["clips"].append(rec)
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
     prog("рендер", 100)

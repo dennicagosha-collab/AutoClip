@@ -20,10 +20,10 @@ def fake_trash(tmp_path, monkeypatch):
     bin_dir = tmp_path / "корзина"
     bin_dir.mkdir()
 
-    def trash(path):
-        if os.path.exists(path):
-            n = len(os.listdir(bin_dir))
-            os.replace(path, bin_dir / f"{n}_{os.path.basename(path)}")
+    def send(path):
+        # как корзина Windows: занятый файл не переносится (PermissionError)
+        n = len(os.listdir(bin_dir))
+        os.replace(path, bin_dir / f"{n}_{os.path.basename(path)}")
 
-    monkeypatch.setattr(autoclip, "trash", trash)
+    monkeypatch.setattr(autoclip, "_send_to_trash", send)
     return bin_dir

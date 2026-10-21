@@ -15,7 +15,9 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 
 import autoclip  # noqa: E402
 
-from PySide6.QtCore import QByteArray, QObject, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QByteArray, QEventLoop, QObject, QSize, Qt, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (  # noqa: E402
     QColor, QFont, QKeySequence, QPainter, QPalette, QPixmap, QShortcut,
 )
@@ -69,6 +71,10 @@ QPushButton:disabled {{ color: #5c606b; }}
           padding: 12px; border-radius: 8px; }}
 #accent:hover {{ background: #e23e5b; }}
 #accent[busy="true"] {{ background: #5a3340; }}
+#rebuild {{ background: #3a2a33; color: white; font-weight: 600; padding: 8px 18px; }}
+#rebuild:hover {{ background: #4a3340; }}
+#filter {{ padding: 5px 12px; border-radius: 12px; }}
+#filter:checked {{ background: {ACCENT}; color: white; }}
 QComboBox, QSpinBox, QLineEdit {{ background: {PANEL2}; border: 1px solid #343845;
                                   border-radius: 5px; padding: 4px 8px; min-height: 20px; }}
 QComboBox QAbstractItemView {{ background: {PANEL2}; selection-background-color: {ACCENT}; }}
@@ -134,6 +140,7 @@ class Bus(QObject):
     progress = Signal(str, float, str)
     done = Signal(object)
     thumb = Signal(int, str, object)
+    rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
 
 
 class Stream:
@@ -358,6 +365,14 @@ class PlayerPanel(QWidget):
     def clear(self):
         self.player.stop()
         self.player.setSource(QUrl())
+
+    def release_file(self, ms=300):
+        """Закрыть файл и дать проигрывателю его отпустить: иначе Windows не даст
+        перенести или заменить клип (проигрыватель закрывает файл не сразу)."""
+        self.clear()
+        loop = QEventLoop()
+        QTimer.singleShot(ms, loop.quit)
+        loop.exec()
 
     def toggle(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -721,11 +736,20 @@ class _LeftClick:
 
 # ---------------- раздел «Клипы» ----------------
 
+FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}))
+SHIFT = 2.0          # шаг сдвига начала и конца, сек
+
+
 class ClipsPage(QWidget):
+    """Список клипов нарезки и редактор выбранного клипа."""
+
     def __init__(self, win):
         super().__init__()
         self.win = win
         self.proj = None
+        self.base = {}             # значения выбранного клипа до правок
+        self.busy = False          # идёт пересборка
+        self._row = -1             # выбранная строка — чтобы вернуть, если передумал уходить
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 20)
@@ -743,11 +767,29 @@ class ClipsPage(QWidget):
         lay.addLayout(top)
 
         split = QSplitter(Qt.Horizontal)
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        frow = QHBoxLayout()
+        frow.setSpacing(4)
+        self.filter_btns = []
+        for i, (name, _) in enumerate(FILTERS):
+            fb = QPushButton(name)
+            fb.setCheckable(True)
+            fb.setObjectName("filter")
+            fb.clicked.connect(lambda _, i=i: self.set_filter(i))
+            frow.addWidget(fb)
+            self.filter_btns.append(fb)
+        frow.addStretch(1)
+        ll.addLayout(frow)
+        self.filter = 0
+        self.filter_btns[0].setChecked(True)
         self.list = QListWidget()
         self.list.setObjectName("clipList")
-        self.list.currentItemChanged.connect(self.select)
+        self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
-        split.addWidget(self.list)
+        ll.addWidget(self.list, 1)
+        split.addWidget(left)
 
         right = QWidget()
         rl = QVBoxLayout(right)
@@ -777,20 +819,89 @@ class ClipsPage(QWidget):
         self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         rl.addWidget(self.info)
-        btns = QHBoxLayout()
+
+        # --- редактор клипа ---
+        self.editor = QGroupBox("Этот клип")
+        ed = QVBoxLayout(self.editor)
+        ed.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        self.e_hook = QCheckBox("Хук")
+        self.e_zoom = QCheckBox("Зум")
+        self.e_bleep = QCheckBox("Мат звуком")
+        self.e_subs = QCheckBox("Субтитры")
+        self.e_pos = QComboBox()
+        self.e_pos.addItems(list(autoclip.SUB_POSITIONS))
+        self.e_safe = QCheckBox("Сейф-зона")
+        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs):
+            row.addWidget(w)
+            w.toggled.connect(self._changed)
+        row.addWidget(self.e_pos)
+        row.addWidget(self.e_safe)
+        self.e_pos.currentTextChanged.connect(self._changed)
+        self.e_safe.toggled.connect(self._changed)
+        self.e_subs.toggled.connect(self.e_pos.setEnabled)
+        self.e_subs.toggled.connect(self.e_safe.setEnabled)
+        row.addStretch(1)
+        ed.addLayout(row)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.e_start = QLineEdit()
+        self.e_end = QLineEdit()
+        for label, edit in (("Начало", self.e_start), ("Конец", self.e_end)):
+            row.addWidget(QLabel(label))
+            minus = QPushButton(f"−{SHIFT:g} с")
+            plus = QPushButton(f"+{SHIFT:g} с")
+            minus.clicked.connect(lambda _, e=edit: self.shift(e, -SHIFT))
+            plus.clicked.connect(lambda _, e=edit: self.shift(e, SHIFT))
+            edit.setFixedWidth(92)
+            edit.setToolTip("Время в записи: 1:18 или 0:01:18.5")
+            edit.textChanged.connect(self._changed)
+            row.addWidget(minus)
+            row.addWidget(edit)
+            row.addWidget(plus)
+            row.addSpacing(12)
+        self.e_len = hint("")
+        row.addWidget(self.e_len)
+        row.addStretch(1)
+        ed.addLayout(row)
+
+        row = QHBoxLayout()
+        self.btn_rebuild = QPushButton("🔁  Пересобрать")
+        self.btn_rebuild.setObjectName("rebuild")
+        self.btn_rebuild.clicked.connect(self.rebuild)
+        row.addWidget(self.btn_rebuild)
+        self.state = hint("")
+        row.addWidget(self.state, 1)
+        ed.addLayout(row)
+
+        row = QHBoxLayout()
+        self.btn_good = QPushButton("👍  Хороший")
+        self.btn_good.clicked.connect(self.toggle_good)
+        self.btn_trash = QPushButton("🗑  В корзину")
+        self.btn_trash.clicked.connect(self.to_trash)
+        self.btn_save = QPushButton("Сохранить как…")
+        self.btn_save.clicked.connect(self.save_as)
         self.btn_show = QPushButton("Показать в папке")
         self.btn_show.clicked.connect(self.show_file)
-        btns.addWidget(self.btn_show)
-        btns.addStretch(1)
-        rl.addLayout(btns)
+        for w in (self.btn_good, self.btn_trash, self.btn_save, self.btn_show):
+            row.addWidget(w)
+        row.addStretch(1)
+        ed.addLayout(row)
+        rl.addWidget(self.editor)
+        self.editor.setEnabled(False)
+
         split.addWidget(right)
-        split.setSizes([360, 640])
+        split.setSizes([450, 650])
         lay.addWidget(split, 1)
 
         self.empty = hint("Здесь будут клипы. Нарежь запись или открой папку с клипами.")
         lay.addWidget(self.empty)
+        self.win.bus.rebuilt.connect(self._rebuilt)
         self.refresh_recent()
 
+    # ---------- нарезки ----------
     def refresh_recent(self):
         recent = [p for p in self.win.settings.get("recent", []) if os.path.isfile(p)]
         self.win.settings["recent"] = recent
@@ -817,7 +928,9 @@ class ClipsPage(QWidget):
         if d:
             self.load(d)
 
-    def load(self, path):
+    def load(self, path, select_id=None):
+        if not self._leave_ok():
+            return
         try:
             proj = autoclip.load_project(path)
         except autoclip.AutoClipError as e:
@@ -826,25 +939,60 @@ class ClipsPage(QWidget):
         self.proj = proj
         self.remember(proj["_path"])
         self.projects.setCurrentIndex(0)
+        self.refill(select_id)
+
+    def reload(self, select_id=None):
+        """Перечитать project.json после изменений ядра."""
+        if self.proj:
+            self.proj = autoclip.load_project(self.proj["_path"])
+            self.refill(select_id)
+
+    # ---------- список ----------
+    def set_filter(self, i):
+        for j, b in enumerate(self.filter_btns):
+            b.setChecked(j == i)
+        if i == self.filter:
+            return
+        if not self._leave_ok():
+            self.filter_btns[i].setChecked(False)
+            self.filter_btns[self.filter].setChecked(True)
+            return
+        self.filter = i
+        c = self.current_clip()
+        self.refill(c["id"] if c else None)
+
+    def refill(self, select_id=None):
+        want = FILTERS[self.filter][1]
+        self.list.blockSignals(True)
         self.list.clear()
-        for c in sorted(proj["clips"], key=lambda c: c["num"]):
-            if c["status"] == "rejected":
-                continue
-            st = autoclip.STATUSES.get(c["status"], c["status"])
+        clips = [c for c in sorted(self.proj["clips"], key=lambda c: c["num"])
+                 if c["status"] != "rejected" and (want is None or c["status"] in want)]
+        row = 0
+        for i, c in enumerate(clips):
             it = QListWidgetItem(
                 f"{c['num']:02d}   ★ {c['score']:.1f}   {'📍 ' if c.get('marks') else ''}"
                 f"{c['title']}\n"
-                f"      {st} · {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
-                f" · {c['end'] - c['start']:.0f} с"
-                f" · {'хук' if c.get('hook', {}).get('on') else 'без хука'}")
+                f"      {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
+                f" · {c['end'] - c['start']:.0f} с · " + " · ".join(autoclip.clip_tags(c)))
             if c.get("marks"):
                 it.setToolTip("Клип по метке из OBS")
             it.setData(Qt.UserRole, c["id"])
             it.setSizeHint(QSize(0, 52))
             self.list.addItem(it)
+            if c["id"] == select_id:
+                row = i
+        self.list.blockSignals(False)
+        total = sum(c["status"] != "rejected" for c in self.proj["clips"])
+        self.empty.setText("Здесь будут клипы. Нарежь запись или открой папку с клипами."
+                           if total == 0 else "В этом фильтре клипов нет.")
         self.empty.setVisible(self.list.count() == 0)
+        self._row = -1
         if self.list.count():
-            self.list.setCurrentRow(0)
+            self.list.setCurrentRow(row)
+            if self.list.currentRow() == row and self._row != row:
+                self._row_changed(row)
+        else:
+            self.select()
 
     def current_clip(self):
         it = self.list.currentItem()
@@ -855,28 +1003,219 @@ class ClipsPage(QWidget):
     def clip_path(self, c):
         return os.path.join(os.path.dirname(self.proj["_path"]), c["file"])
 
+    def _row_changed(self, row):
+        if row == self._row:
+            return
+        if self._row >= 0 and not self._leave_ok():
+            self.list.blockSignals(True)
+            self.list.setCurrentRow(self._row)
+            self.list.blockSignals(False)
+            return
+        self._row = row
+        self.select()
+
+    def _leave_ok(self):
+        """Есть непересобранные правки — спросить, бросить ли их."""
+        if not self.pending():
+            return True
+        r = QMessageBox.question(self, "AutoClip",
+                                 "Правки этого клипа ещё не пересобраны и пропадут. Продолжить?")
+        if r == QMessageBox.Yes:
+            self.base = {}
+            return True
+        return False
+
+    # ---------- выбранный клип ----------
     def select(self, *_):
         c = self.current_clip()
+        self.editor.setEnabled(bool(c) and not self.busy)
         if not c:
             self.player.clear()
             self.info.setText("")
+            self.base = {}
             return
         path = self.clip_path(c)
         if os.path.isfile(path):
             self.player.open(path)
+        else:
+            self.player.clear()
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c.get("score_parts", {}).items()
                           if abs(v) >= 0.05)
         lines = [f"<b>{c['title']}</b>",
                  f"Оценка {c['score']:.1f}" + (f" — {parts}" if parts else ""),
-                 f"В записи: {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}, "
-                 f"зумов: {len(c['zooms'])}, запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}"]
+                 f"Зумов: {len(c['zooms'])}, запикано: "
+                 f"{c['bleeps'] if c['bleeps'] is not None else '-'}"]
         if c.get("marks"):
             lines.append("📍 Метка из OBS: " + ", ".join(autoclip.fmt_time(t) for t in c["marks"]))
         ht = autoclip.hook_text(c)
         lines.append(ht[:1].upper() + ht[1:])
+        if c.get("quiet_start"):
+            lines.append("Тихое начало — первые 3 с без звука")
         if c.get("reason"):
             lines.append(f"Почему: {c['reason']}")
         self.info.setText("<br>".join(lines))
+        self.fill_editor(c)
+
+    def fill_editor(self, c):
+        cfg = autoclip.clip_config(self.proj, c)
+        self.base = {"hook": bool((c.get("hook") or {}).get("on")), "zoom": bool(cfg["zoom"]),
+                     "bleep": bool(cfg["bleep"]), "subs": bool(cfg["subs"]),
+                     "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
+                     "safe_zone": bool(cfg.get("safe_zone")),
+                     "start": round(c["start"], 1), "end": round(c["end"], 1)}
+        widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
+                   self.e_start, self.e_end)
+        for w in widgets:
+            w.blockSignals(True)
+        b = self.base
+        self.e_hook.setChecked(b["hook"])
+        self.e_zoom.setChecked(b["zoom"])
+        self.e_bleep.setChecked(b["bleep"])
+        self.e_subs.setChecked(b["subs"])
+        self.e_pos.setCurrentText(autoclip.sub_position_name(b["sub_y"]))
+        self.e_safe.setChecked(b["safe_zone"])
+        self.e_pos.setEnabled(b["subs"])
+        self.e_safe.setEnabled(b["subs"])
+        self.e_start.setText(autoclip.fmt_time_exact(b["start"]))
+        self.e_end.setText(autoclip.fmt_time_exact(b["end"]))
+        for w in widgets:
+            w.blockSignals(False)
+        good = c["status"] == "good"
+        self.btn_good.setText("↩  Убрать из хороших" if good else "👍  Хороший")
+        self._changed()
+
+    def _time(self, edit):
+        try:
+            return round(autoclip.parse_time(edit.text()), 1)
+        except autoclip.AutoClipError:
+            return None
+
+    def edited(self):
+        """Текущие значения редактора (время — None, если введено с ошибкой)."""
+        return {"hook": self.e_hook.isChecked(), "zoom": self.e_zoom.isChecked(),
+                "bleep": self.e_bleep.isChecked(), "subs": self.e_subs.isChecked(),
+                "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
+                "safe_zone": self.e_safe.isChecked(),
+                "start": self._time(self.e_start), "end": self._time(self.e_end)}
+
+    def pending(self):
+        """Что поменяли в редакторе и ещё не пересобрали."""
+        if not self.base:
+            return {}
+        now = self.edited()
+        return {k: v for k, v in now.items() if v != self.base.get(k)}
+
+    def _changed(self, *_):
+        now = self.edited()
+        bad = now["start"] is None or now["end"] is None
+        for edit, val in ((self.e_start, now["start"]), (self.e_end, now["end"])):
+            edit.setStyleSheet("border: 1px solid #ff4f6d;" if val is None else "")
+        if not bad:
+            ln = now["end"] - now["start"]
+            self.e_len.setText(f"длина {ln:.1f} с" if ln > 0 else "конец раньше начала")
+        if self.busy:
+            return
+        p = self.pending()
+        if bad:
+            self.state.setText("Время не понял — пиши как 1:18 или 0:01:18.5")
+        elif p:
+            self.state.setText("Есть правки — нажми «Пересобрать»")
+        else:
+            self.state.setText("")
+        self.btn_rebuild.setEnabled(not bad)
+
+    def shift(self, edit, delta):
+        t = self._time(edit)
+        if t is None:
+            return
+        dur = self.proj["source_info"]["dur"]
+        edit.setText(autoclip.fmt_time_exact(min(dur, max(0.0, t + delta))))
+
+    # ---------- действия ----------
+    def rebuild(self):
+        c = self.current_clip()
+        if not c or self.busy:
+            return
+        now, p = self.edited(), self.pending()
+        if now["start"] is None or now["end"] is None:
+            return
+        if now["end"] - now["start"] < 3:
+            QMessageBox.warning(self, "AutoClip", "Клип получается короче 3 секунд.")
+            return
+        overrides = {k: v for k, v in p.items() if k in autoclip.OVERRIDE_KEYS}
+        start = now["start"] if "start" in p else None
+        end = now["end"] if "end" in p else None
+        self.busy = True
+        self.editor.setEnabled(False)
+        self.state.setText("Пересобираю…")
+        self.player.release_file()               # иначе Windows не даст заменить файл
+        cid, pp = c["id"], self.proj["_path"]
+        bus = self.win.bus
+
+        def work():
+            try:
+                autoclip.rebuild_clip(pp, cid, start, end, overrides)
+                bus.rebuilt.emit(cid, None)
+            except autoclip.AutoClipError as e:
+                bus.rebuilt.emit(cid, str(e))
+            except Exception:
+                bus.rebuilt.emit(cid, "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rebuilt(self, cid, err):
+        self.busy = False
+        self.base = {}
+        self.reload(cid)
+        self.state.setText(err or "Готово ✓")
+        if err:
+            QMessageBox.warning(self, "AutoClip", err)
+
+    def toggle_good(self):
+        c = self.current_clip()
+        if not c:
+            return
+        try:
+            autoclip.set_status(self.proj["_path"], c["id"], "new" if c["status"] == "good" else "good")
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self.base = {}
+        self.reload(c["id"])
+
+    def to_trash(self):
+        c = self.current_clip()
+        if not c:
+            return
+        r = QMessageBox.question(self, "AutoClip", f"Убрать клип «{c['title']}» в корзину?\n"
+                                 "Файл можно будет вернуть из корзины Windows.")
+        if r != QMessageBox.Yes:
+            return
+        row = self.list.currentRow()
+        self.player.release_file()               # иначе Windows не даст перенести файл
+        try:
+            autoclip.set_status(self.proj["_path"], c["id"], "rejected")
+        except Exception as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            self.select()
+            return
+        self.base = {}
+        self.reload()
+        if self.list.count():
+            self.list.setCurrentRow(min(row, self.list.count() - 1))
+
+    def save_as(self):
+        c = self.current_clip()
+        if not c:
+            return
+        dest, _ = QFileDialog.getSaveFileName(self, "Сохранить клип", c["file"], "Видео (*.mp4)")
+        if not dest:
+            return
+        try:
+            autoclip.save_clip_as(self.proj["_path"], c["id"], dest)
+        except Exception as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self.state.setText(f"Сохранено: {os.path.basename(dest)}")
 
     def show_file(self):
         c = self.current_clip()
