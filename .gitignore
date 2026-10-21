@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+звуки/
+настройки.json
+*_clips/
+*.transcript.json
+*.mp4
+*.mkv
+*.mov
