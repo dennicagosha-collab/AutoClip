@@ -31,14 +31,14 @@ def test_all_settings_survive_restart(app_module):
     win.show()
     cut, st = win.cut, win.settings_page
 
-    cut.cb_subs.setChecked(False)
-    cut.cb_zoom.setChecked(False)
-    cut.cb_bleep.setChecked(False)
-    cut.sound.setCurrentText("буп")
+    st.cb_subs.setChecked(False)
+    st.cb_zoom.setChecked(False)
+    st.cb_bleep.setChecked(False)
+    st.sound.setCurrentText("буп")
     cut.count.setValue(7)
-    cut.cam.setCurrentText("Вебка снизу")
-    cut.sub_pos.setCurrentText("Снизу")
-    cut.cb_safe.setChecked(False)
+    st.cam.setCurrentText("Вебка снизу")
+    st.sub_pos.setCurrentText("Снизу")
+    st.cb_safe.setChecked(False)
     st.p_name.setText("Мой 720p30")
     st.p_w.setValue(720)
     st.p_h.setValue(1280)
@@ -66,12 +66,12 @@ def test_all_settings_survive_restart(app_module):
 
     # новое окно показывает сохранённое
     win2 = A.MainWindow()
-    assert not win2.cut.cb_subs.isChecked()
-    assert win2.cut.sound.currentText() == "буп"
+    assert not win2.settings_page.cb_subs.isChecked()
+    assert win2.settings_page.sound.currentText() == "буп"
     assert win2.cut.count.value() == 7
-    assert win2.cut.cam.currentText() == "Вебка снизу"
-    assert win2.cut.sub_pos.currentText() == "Снизу"
-    assert not win2.cut.cb_safe.isChecked()
+    assert win2.settings_page.cam.currentText() == "Вебка снизу"
+    assert win2.settings_page.sub_pos.currentText() == "Снизу"
+    assert not win2.settings_page.cb_safe.isChecked()
     win2.cut.apply_config()
     assert autoclip.CONFIG["sub_y"] == autoclip.SUB_POSITIONS["Снизу"]
     assert autoclip.CONFIG["safe_zone"] is False
@@ -79,3 +79,34 @@ def test_all_settings_survive_restart(app_module):
     assert win2.settings_page.llm.currentText() == "Без модели"
     assert win2.settings_page.nick.text() == "Gosha"
     win2.close()
+
+
+def test_main_page_has_no_clip_options(app_module):
+    """На «Нарезке» только запись, число клипов, пресет и кнопка — без галочек и раскладки."""
+    win = app_module.MainWindow()
+    for name in ("cb_subs", "cb_zoom", "cb_hook", "cb_bleep", "cb_marks", "cb_safe", "sound",
+                 "sub_pos", "cam"):
+        assert not hasattr(win.cut, name), name
+        assert hasattr(win.settings_page, name), name
+    win.close()
+
+
+def test_clips_page_empty_on_start(app_module, tmp_path):
+    """При запуске «Клипы» пустые, даже если нарезки уже были."""
+    out = tmp_path / "запись_clips"
+    out.mkdir()
+    proj = autoclip.new_project(str(tmp_path / "запись.mp4"), {"w": 270, "h": 480, "dur": 10.0,
+                                "fps": 30.0}, str(out), str(tmp_path / "t.json"))
+    autoclip.save_project(proj)
+    with open(autoclip.SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump({"recent": [str(out / "project.json")]}, f)
+    win = app_module.MainWindow()
+    win.show()
+    for _ in range(10):
+        QApplication.processEvents()
+    page = win.clips
+    assert page.proj is None and page.list.count() == 0
+    assert page.projects.currentIndex() == -1 and page.projects.count() == 1
+    page.load(page.projects.itemData(0))                 # выбрал сам — открылась
+    assert page.proj is not None and page.projects.currentIndex() == 0
+    win.close()

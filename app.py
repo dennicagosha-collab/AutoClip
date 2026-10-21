@@ -16,19 +16,19 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 import autoclip  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
-    QByteArray, QEventLoop, QObject, QSize, Qt, QTimer, QUrl, Signal,
+    QByteArray, QEventLoop, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl,
+    QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QKeySequence, QPainter, QPalette, QPixmap, QShortcut,
+    QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox,
+    QAbstractButton, QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
-    QAbstractItemView,
 )
 
 WEBCAM = {"Вебка сверху": 0.30, "Вебка снизу": 0.70, "По центру": 0.50}
@@ -47,55 +47,93 @@ DEFAULTS = {
     "geometry": "", "player_geometry": "",
 }
 
-BG, PANEL, PANEL2, FG, MUTED, ACCENT = "#15161a", "#1e2027", "#272a33", "#eceef2", "#8b8f9a", "#ff4f6d"
+BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
+FG, MUTED, ACCENT = "#eceef2", "#8b8f9a", "#ff4f6d"
+PANEL, PANEL2 = SURFACE, SURFACE2          # старые имена — для схемы субтитров и окна просмотра
 
 STYLE = f"""
-QWidget {{ font-family: "Segoe UI"; font-size: 10pt; color: {FG}; }}
-QMainWindow, #page {{ background: {BG}; }}
-#nav {{ background: {PANEL}; border: none; outline: none; padding-top: 12px; }}
-#nav::item {{ padding: 12px 18px; border-left: 3px solid transparent; }}
-#nav::item:selected {{ background: {PANEL2}; border-left: 3px solid {ACCENT}; color: white; }}
-#nav::item:hover:!selected {{ background: #23252d; }}
-#title {{ font-size: 16pt; font-weight: 600; }}
+QWidget {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {FG}; }}
+QMainWindow, #page, #scrollBody {{ background: {BG}; }}
+QScrollArea {{ background: {BG}; border: none; }}
+#side {{ background: #0c0d10; border-right: 1px solid {BORDER}; }}
+#brand {{ font-size: 14pt; font-weight: 700; color: white; padding: 22px 22px 14px 24px; }}
+#brandDot {{ color: {ACCENT}; }}
+#nav {{ background: transparent; border: none; outline: none; padding: 0 10px; }}
+#nav::item {{ padding: 10px 14px; border-radius: 8px; margin: 2px 0; color: {MUTED}; }}
+#nav::item:selected {{ background: {SURFACE2}; color: white; }}
+#nav::item:hover:!selected {{ background: #16171c; color: {FG}; }}
+#title {{ font-size: 19pt; font-weight: 600; color: white; }}
+#subtitle {{ color: {MUTED}; }}
 #hint {{ color: {MUTED}; font-size: 9pt; }}
-#drop {{ background: {PANEL}; border: 2px dashed #3a3d48; border-radius: 10px; }}
-#drop[hover="true"] {{ border-color: {ACCENT}; }}
-#dropText {{ font-size: 12pt; font-weight: 600; }}
-QGroupBox {{ background: {PANEL}; border: none; border-radius: 10px; margin-top: 14px;
-            padding: 14px 12px 10px 12px; }}
-QGroupBox::title {{ subcontrol-origin: margin; left: 12px; color: {MUTED}; }}
-QPushButton {{ background: {PANEL2}; border: none; border-radius: 6px; padding: 7px 14px; }}
-QPushButton:hover {{ background: #323642; }}
-QPushButton:disabled {{ color: #5c606b; }}
-#accent {{ background: {ACCENT}; color: white; font-size: 13pt; font-weight: 600;
-          padding: 12px; border-radius: 8px; }}
-#accent:hover {{ background: #e23e5b; }}
-#accent[busy="true"] {{ background: #5a3340; }}
-#rebuild {{ background: #3a2a33; color: white; font-weight: 600; padding: 8px 18px; }}
-#rebuild:hover {{ background: #4a3340; }}
-#filter {{ padding: 5px 12px; border-radius: 12px; }}
-#filter:checked {{ background: {ACCENT}; color: white; }}
-QComboBox, QSpinBox, QLineEdit {{ background: {PANEL2}; border: 1px solid #343845;
-                                  border-radius: 5px; padding: 4px 8px; min-height: 20px; }}
-QComboBox QAbstractItemView {{ background: {PANEL2}; selection-background-color: {ACCENT}; }}
-QPlainTextEdit {{ background: {PANEL}; border: none; border-radius: 8px;
-                  font-family: Consolas; font-size: 9pt; padding: 6px; }}
-QProgressBar {{ background: {PANEL}; border: none; border-radius: 4px; height: 8px;
-                text-align: center; color: transparent; }}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
-#clipList {{ background: {PANEL}; border: none; border-radius: 8px; outline: none; }}
-#clipList::item {{ padding: 8px; border-bottom: 1px solid #2a2d36; }}
-#clipList::item:selected {{ background: {PANEL2}; border-left: 3px solid {ACCENT}; }}
+#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
+#cardTitle {{ font-size: 11pt; font-weight: 600; color: white; }}
+#rowLabel {{ color: {FG}; }}
+#rowHint {{ color: {MUTED}; font-size: 9pt; }}
+#sep {{ background: {BORDER}; }}
+#fieldLabel {{ color: {MUTED}; font-size: 9pt; }}
+#drop {{ background: {SURFACE}; border: 2px dashed #2f323c; border-radius: 14px; }}
+#drop[hover="true"] {{ border-color: {ACCENT}; background: #1c1a20; }}
+#dropText {{ font-size: 13pt; font-weight: 600; color: white; }}
+#dropHint {{ color: {MUTED}; }}
+QPushButton {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 8px;
+              padding: 0 14px; min-height: 32px; }}
+QPushButton:hover {{ background: #272a33; border-color: #363946; }}
+QPushButton:pressed {{ background: #1b1d23; }}
+QPushButton:disabled {{ color: #5c606b; background: #17181d; border-color: #22242b; }}
+#accent {{ background: {ACCENT}; border: none; color: white; font-size: 12pt; font-weight: 600;
+          min-height: 46px; border-radius: 10px; padding: 0 28px; }}
+#accent:hover {{ background: #ff6680; }}
+#accent[busy="true"] {{ background: #3b2430; color: #ffb3c0; }}
+#primary {{ background: {ACCENT}; border: none; color: white; font-weight: 600; padding: 0 18px; }}
+#primary:hover {{ background: #ff6680; }}
+#primary:disabled {{ background: #3b2430; color: #a07080; }}
+#ghost {{ background: transparent; border: none; color: {MUTED}; padding: 0 8px; }}
+#ghost:hover {{ color: {FG}; background: {SURFACE2}; }}
+#danger:hover {{ color: #ff8094; border-color: #5a2a35; background: #2a1a20; }}
+#square {{ padding: 0; min-width: 32px; max-width: 32px; font-size: 12pt; }}
+#filter {{ background: transparent; border: 1px solid {BORDER}; border-radius: 14px;
+          padding: 0 14px; min-height: 28px; color: {MUTED}; }}
+#filter:hover {{ color: {FG}; }}
+#filter:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: white; }}
+#stepValue {{ font-size: 12pt; font-weight: 600; min-width: 34px; }}
+QComboBox, QLineEdit, QSpinBox {{ background: {SURFACE2}; border: 1px solid {BORDER};
+    border-radius: 8px; padding: 0 10px; min-height: 32px; }}
+QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{ border-color: #3a3d48; }}
+QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
+QComboBox:disabled, QLineEdit:disabled {{ color: #5c606b; background: #17181d; }}
+QComboBox::drop-down {{ border: none; width: 28px; }}
+QComboBox::down-arrow {{ image: url(@ARROW@); width: 10px; height: 10px; }}
+QComboBox QAbstractItemView {{ background: {SURFACE2}; border: 1px solid {BORDER};
+    padding: 4px; outline: none; selection-background-color: #30333d; }}
+QSpinBox::up-button, QSpinBox::down-button {{ width: 0; border: none; }}
+QPlainTextEdit {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
+    font-family: "Cascadia Mono", Consolas; font-size: 9pt; padding: 10px; color: #b9bcc6; }}
+QProgressBar {{ background: {SURFACE2}; border: none; border-radius: 3px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
+#step {{ color: {MUTED}; font-size: 9pt; padding: 3px 10px; border-radius: 10px;
+        background: {SURFACE}; border: 1px solid {BORDER}; }}
+#step[state="active"] {{ color: white; border-color: {ACCENT}; }}
+#step[state="done"] {{ color: #9fe3b4; border-color: #2c4a37; background: #17221b; }}
+#clipList {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
+    outline: none; padding: 6px; }}
+#clipList::item {{ padding: 8px 10px; border-radius: 8px; margin: 1px 0; color: {FG}; }}
+#clipList::item:selected {{ background: #2a2d37; color: white; }}
+#clipList::item:hover:!selected {{ background: #1e2027; }}
 QSlider::groove:horizontal {{ height: 4px; background: #343845; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: white; width: 12px; margin: -5px 0; border-radius: 6px; }}
 QSplitter::handle {{ background: {BG}; }}
-QCheckBox::indicator {{ width: 16px; height: 16px; }}
-QToolTip {{ background: {PANEL2}; color: {FG}; border: 1px solid #343845; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #2d3039; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: #3a3e4a; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QToolTip {{ background: {SURFACE2}; color: {FG}; border: 1px solid {BORDER}; padding: 4px; }}
 """
 
 
 # ---------------- служебное ----------------
+
 
 def load_settings():
     data = dict(DEFAULTS)
@@ -156,16 +194,18 @@ class Stream:
         pass
 
 
-def page_title(text, hint=""):
+def page_title(text, sub=""):
     box = QVBoxLayout()
+    box.setSpacing(2)
     t = QLabel(text)
     t.setObjectName("title")
     box.addWidget(t)
-    if hint:
-        h = QLabel(hint)
-        h.setObjectName("hint")
+    if sub:
+        h = QLabel(sub)
+        h.setObjectName("subtitle")
         h.setWordWrap(True)
         box.addWidget(h)
+    box.addSpacing(6)
     return box
 
 
@@ -176,7 +216,235 @@ def hint(text):
     return h
 
 
-# ---------------- зона перетаскивания ----------------
+def card(title=None, sub=None):
+    """Карточка: (рамка, раскладка содержимого)."""
+    frame = QFrame()
+    frame.setObjectName("card")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(18, 16, 18, 16)
+    lay.setSpacing(4)
+    if title:
+        t = QLabel(title)
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+    if sub:
+        s = QLabel(sub)
+        s.setObjectName("rowHint")
+        s.setWordWrap(True)
+        lay.addWidget(s)
+    if title or sub:
+        lay.addSpacing(6)
+    return frame, lay
+
+
+def separator():
+    line = QFrame()
+    line.setObjectName("sep")
+    line.setFixedHeight(1)
+    return line
+
+
+def option_row(text, widget, sub=None):
+    """Строка настройки: подпись (и пояснение) слева, переключатель или поле справа."""
+    w = QWidget()
+    h = QHBoxLayout(w)
+    h.setContentsMargins(0, 7, 0, 7)
+    h.setSpacing(16)
+    col = QVBoxLayout()
+    col.setSpacing(1)
+    lbl = QLabel(text)
+    lbl.setObjectName("rowLabel")
+    col.addWidget(lbl)
+    if sub:
+        s = QLabel(sub)
+        s.setObjectName("rowHint")
+        s.setWordWrap(True)
+        col.addWidget(s)
+    col.addStretch(1)                  # у высоких строк подпись остаётся сверху
+    h.addLayout(col, 1)
+    if isinstance(widget, QWidget):
+        h.addWidget(widget, 0, Qt.AlignVCenter)
+    else:
+        h.addLayout(widget)
+    return w
+
+
+def labeled(text, widget):
+    """Маленькая подпись над полем."""
+    box = QVBoxLayout()
+    box.setSpacing(4)
+    lbl = QLabel(text)
+    lbl.setObjectName("fieldLabel")
+    box.addWidget(lbl)
+    box.addWidget(widget)
+    return box
+
+
+class Toggle(QAbstractButton):
+    """Переключатель вместо галочки."""
+
+    W, H = 40, 22
+
+    def __init__(self, checked=False, tip=""):
+        super().__init__()
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(self.W, self.H)
+        if tip:
+            self.setToolTip(tip)
+        self._t = 1.0 if checked else 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(120)
+        self._anim.valueChanged.connect(self._step)
+        self.toggled.connect(self._go)
+
+    def sizeHint(self):
+        return QSize(self.W, self.H)
+
+    def _go(self, on):
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(1.0 if on else 0.0)
+        self._anim.start()
+
+    def _step(self, v):
+        self._t = float(v)
+        self.update()
+
+    def paintEvent(self, e):
+        if self._anim.state() != QVariantAnimation.Running:
+            self._t = 1.0 if self.isChecked() else 0.0      # значение поставили без сигнала
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        off, on = QColor("#3a3d48"), QColor(ACCENT)
+        t = self._t
+        track = QColor(int(off.red() + (on.red() - off.red()) * t),
+                       int(off.green() + (on.green() - off.green()) * t),
+                       int(off.blue() + (on.blue() - off.blue()) * t))
+        if not self.isEnabled():
+            track.setAlpha(80)
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(0, 0, self.W, self.H, self.H / 2, self.H / 2)
+        p.setBrush(QColor("#ffffff") if self.isEnabled() else QColor("#8a8c93"))
+        d = self.H - 6
+        p.drawEllipse(QRectF(3 + t * (self.W - d - 6), 3, d, d))
+        p.end()
+
+
+class Stepper(QWidget):
+    """Число с кнопками − и + (вместо поля со стрелками)."""
+    valueChanged = Signal(int)
+
+    def __init__(self, lo, hi, value):
+        super().__init__()
+        self.lo, self.hi = lo, hi
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        self.minus = QPushButton("−")
+        self.plus = QPushButton("+")
+        for b in (self.minus, self.plus):
+            b.setObjectName("square")
+            b.setAutoRepeat(True)
+        self.label = QLabel()
+        self.label.setObjectName("stepValue")
+        self.label.setAlignment(Qt.AlignCenter)
+        h.addWidget(self.minus)
+        h.addWidget(self.label)
+        h.addWidget(self.plus)
+        self.minus.clicked.connect(lambda: self.setValue(self._v - 1))
+        self.plus.clicked.connect(lambda: self.setValue(self._v + 1))
+        self._v = None
+        self.setValue(value)
+
+    def value(self):
+        return self._v
+
+    def setValue(self, v):
+        v = max(self.lo, min(self.hi, int(v)))
+        if v == self._v:
+            return
+        self._v = v
+        self.label.setText(str(v))
+        self.minus.setEnabled(v > self.lo)
+        self.plus.setEnabled(v < self.hi)
+        self.valueChanged.emit(v)
+
+
+class SoundButton(QPushButton):
+    """▶ — прослушать звук на мат."""
+
+    def __init__(self, combo):
+        super().__init__("▶")
+        self.setObjectName("square")
+        self.setToolTip("Прослушать")
+        self.combo = combo
+        self.player = QMediaPlayer(self)
+        self.out = QAudioOutput(self)
+        self.player.setAudioOutput(self.out)
+        self.clicked.connect(self.play)
+
+    def play(self):
+        path = autoclip.sound_path(self.combo.currentText())
+        if path:
+            self.player.stop()
+            self.player.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
+            self.player.play()
+
+
+def fill_sounds(combo, want):
+    names = autoclip.list_sounds()
+    combo.blockSignals(True)
+    combo.clear()
+    combo.addItems(names)
+    combo.setCurrentText(want if want in names else names[0])
+    combo.blockSignals(False)
+
+
+ICON_FONTS = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
+
+
+def glyph_icon(code, size=18):
+    """Значок из шрифта значков Windows: обычный — серый, выбранный — белый."""
+    from PySide6.QtGui import QFontDatabase, QIcon
+    family = next((f for f in ICON_FONTS if f in QFontDatabase.families()), None)
+    icon = QIcon()
+    if not family:
+        return icon
+    for color, mode in ((MUTED, QIcon.Normal), ("#ffffff", QIcon.Selected)):
+        pm = QPixmap(size * 2, size * 2)
+        pm.setDevicePixelRatio(2)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        f = QFont(family)
+        f.setPixelSize(size - 2)
+        p.setFont(f)
+        p.setPen(QColor(color))
+        p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, code)
+        p.end()
+        icon.addPixmap(pm, mode)
+    return icon
+
+
+def arrow_icon():
+    """Стрелка для выпадающих списков (рисуется один раз во временную папку)."""
+    path = os.path.join(tempfile.gettempdir(), "autoclip_arrow.png")
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(MUTED), 2.2)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.drawPolyline([QPointF(5, 8), QPointF(10, 13), QPointF(15, 8)])
+    p.end()
+    pm.save(path)
+    return path.replace("\\", "/")
+
 
 class SubsPreview(QWidget):
     """Схема кадра 9:16: где будут субтитры и какие поля закрывают кнопки соцсетей."""
@@ -218,64 +486,6 @@ class SubsPreview(QWidget):
         p.setBrush(QColor("#ffe600"))
         p.drawRoundedRect(int(cx - bw / 6), int(cy - 4), int(bw / 3), 8, 3, 3)
         p.end()
-
-
-class DropZone(QFrame):
-    files = Signal(list)
-
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("drop")
-        self.setAcceptDrops(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(150)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(18, 14, 18, 14)
-        lay.setSpacing(18)
-        self.pic = QLabel()
-        self.pic.setFixedSize(0, 0)
-        lay.addWidget(self.pic)
-        self.text = QLabel("Перетащи сюда запись стрима\nили нажми, чтобы выбрать")
-        self.text.setObjectName("dropText")
-        self.text.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.text, 1)
-
-    def set_preview(self, pixmap, text):
-        if pixmap:
-            self.pic.setFixedSize(pixmap.size())
-            self.pic.setPixmap(pixmap)
-            self.text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        else:
-            self.pic.setFixedSize(0, 0)
-            self.pic.clear()
-            self.text.setAlignment(Qt.AlignCenter)
-        self.text.setText(text)
-
-    def _hover(self, on):
-        self.setProperty("hover", on)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.acceptProposedAction()
-            self._hover(True)
-
-    def dragLeaveEvent(self, e):
-        self._hover(False)
-
-    def dropEvent(self, e):
-        self._hover(False)
-        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        paths = [p for p in paths if os.path.isfile(p)]
-        if paths:
-            self.files.emit(paths)
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            paths, _ = QFileDialog.getOpenFileNames(self, "Запись стрима", "", VIDEO_FILTER)
-            if paths:
-                self.files.emit(paths)
 
 
 # ---------------- просмотр видео ----------------
@@ -414,9 +624,84 @@ class DetachedWindow(QWidget):
         super().closeEvent(e)
 
 
+class DropZone(QFrame):
+    files = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("drop")
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(190)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(22)
+        self.pic = QLabel()
+        self.pic.setFixedSize(0, 0)
+        lay.addWidget(self.pic)
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        col.addStretch(1)
+        self.text = QLabel("Перетащи сюда запись стрима")
+        self.text.setObjectName("dropText")
+        self.sub = QLabel("или нажми, чтобы выбрать файл")
+        self.sub.setObjectName("dropHint")
+        col.addWidget(self.text)
+        col.addWidget(self.sub)
+        col.addStretch(1)
+        lay.addLayout(col, 1)
+        self._center(True)
+
+    def _center(self, on):
+        al = Qt.AlignCenter if on else (Qt.AlignLeft | Qt.AlignVCenter)
+        self.text.setAlignment(al)
+        self.sub.setAlignment(al)
+
+    def set_preview(self, pixmap, text, sub=""):
+        if pixmap:
+            self.pic.setFixedSize(pixmap.size())
+            self.pic.setPixmap(pixmap)
+        else:
+            self.pic.setFixedSize(0, 0)
+            self.pic.clear()
+        self._center(not pixmap)
+        self.text.setText(text)
+        self.sub.setText(sub)
+        self.sub.setVisible(bool(sub))
+
+    def _hover(self, on):
+        self.setProperty("hover", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+            self._hover(True)
+
+    def dragLeaveEvent(self, e):
+        self._hover(False)
+
+    def dropEvent(self, e):
+        self._hover(False)
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        paths = [p for p in paths if os.path.isfile(p)]
+        if paths:
+            self.files.emit(paths)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Запись стрима", "", VIDEO_FILTER)
+            if paths:
+                self.files.emit(paths)
+
+
 # ---------------- раздел «Нарезка» ----------------
 
 class CutPage(QWidget):
+    """Главное: выбрать запись, сколько клипов, пресет — и «Нарезать».
+    Как резать (субтитры, хук, мат…) — в «Настройках», у отдельного клипа — в «Клипах»."""
+
     def __init__(self, win):
         super().__init__()
         self.win = win
@@ -424,120 +709,49 @@ class CutPage(QWidget):
         self.files = []
         self.thumb_n = 0
         self.last_out = None
-        self.sfx = QMediaPlayer(self)
-        self.sfx_out = QAudioOutput(self)
-        self.sfx.setAudioOutput(self.sfx_out)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(10)
-        lay.addLayout(page_title("Нарезка"))
+        lay.setContentsMargins(32, 28, 32, 24)
+        lay.setSpacing(14)
+        lay.addLayout(page_title("Нарезка", "Перетащи запись — программа найдёт яркие моменты "
+                                            "и нарежет клипы."))
 
         self.drop = DropZone()
         self.drop.files.connect(self.set_files)
         lay.addWidget(self.drop)
 
-        # --- галочки для всех клипов ---
-        box = QGroupBox("Для всех клипов")
-        g = QGridLayout(box)
-        g.setHorizontalSpacing(24)
-        g.setVerticalSpacing(10)
-        self.cb_subs = self._check("Субтитры", "subs")
-        self.cb_zoom = self._check("Зум на эмоциях", "zoom")
-        self.cb_hook = self._check("Хук в начале", "hook")
-        self.cb_hook.setToolTip("1–2 секунды яркой реакции из этого же клипа в самом начале. "
-                                "Ставится, только где есть сильный момент.")
-        self.cb_marks = self._check("Метки из OBS", "marks")
-        self.cb_marks.setToolTip("Моменты, где ты нажал «Добавить маркер главы» в OBS, "
-                                 "идут первыми. Нужна запись в Hybrid MP4.")
-        self.cb_nick = self._check("Ник в углу", "nick", later=True)
-        self.cb_bleep = self._check("Мат звуком", "bleep")
-        g.addWidget(self.cb_subs, 0, 0)
-        g.addWidget(self.cb_zoom, 0, 1)
-        g.addWidget(self.cb_hook, 0, 2)
-        g.addWidget(self.cb_marks, 1, 0)
-        g.addWidget(self.cb_nick, 1, 1)
-
-        subs = QHBoxLayout()
-        subs.setSpacing(10)
-        subs.addWidget(QLabel("Субтитры"))
-        self.sub_pos = self._combo(autoclip.SUB_POSITIONS, "sub_pos")
-        subs.addWidget(self.sub_pos)
-        self.cb_safe = self._check("Сейф-зона соцсетей", "safe_zone")
-        self.cb_safe.setToolTip("Субтитры не заходят под кнопки, ник и подпись "
-                                "TikTok, Shorts и Reels")
-        subs.addSpacing(8)
-        subs.addWidget(self.cb_safe)
-        subs.addStretch(1)
-        g.addLayout(subs, 2, 0, 1, 3)
-        self.preview = SubsPreview()
-        g.addWidget(self.preview, 0, 3, 5, 1, Qt.AlignRight | Qt.AlignTop)
-        for w in (self.sub_pos, self.cb_safe, self.cb_subs):
-            (w.currentTextChanged if isinstance(w, QComboBox) else w.toggled).connect(
-                self._update_preview)
-        self.cb_subs.toggled.connect(self.sub_pos.setEnabled)
-        self.cb_subs.toggled.connect(self.cb_safe.setEnabled)
-        self.sub_pos.setEnabled(self.cb_subs.isChecked())
-        self.cb_safe.setEnabled(self.cb_subs.isChecked())
-
-        snd = QHBoxLayout()
-        snd.setSpacing(10)
-        snd.addWidget(self.cb_bleep)
-        self.sound = QComboBox()
-        self.sound.setMinimumWidth(170)
-        self.sound.currentTextChanged.connect(lambda t: self._set("sound", t) if t else None)
-        snd.addWidget(self.sound)
-        b = QPushButton("▶")
-        b.setToolTip("Прослушать")
-        b.setFixedWidth(40)
-        b.clicked.connect(self.play_sound)
-        snd.addWidget(b)
-        snd.addStretch(1)
-        g.addLayout(snd, 3, 0, 1, 3)
-        self.cb_bleep.toggled.connect(self.sound.setEnabled)
-
-        form = QHBoxLayout()
-        form.setSpacing(10)
-        form.addWidget(QLabel("Клипов"))
-        self.count = QSpinBox()
-        self.count.setRange(1, 50)
-        self.count.setValue(int(self.s["clips"]))
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        self.count = Stepper(1, 50, int(self.s["clips"]))
         self.count.valueChanged.connect(lambda v: self._set("clips", v))
-        form.addWidget(self.count)
-        form.addSpacing(16)
-        form.addWidget(QLabel("Раскладка"))
-        self.cam = self._combo(WEBCAM, "cam")
-        form.addWidget(self.cam)
-        form.addSpacing(16)
-        form.addWidget(QLabel("Пресет"))
+        row.addLayout(labeled("Клипов", self.count))
         self.preset = QComboBox()
-        self.preset.setMinimumWidth(170)
+        self.preset.setMinimumWidth(200)
         self.preset.setToolTip("Размер, кадры и битрейт клипов. Свой пресет — в «Настройках».")
         self.preset.currentTextChanged.connect(lambda t: self._set("preset", t) if t else None)
-        form.addWidget(self.preset)
-        form.addStretch(1)
-        g.addLayout(form, 4, 0, 1, 3)
-        lay.addWidget(box)
-        self._update_preview()
-
-        # --- запуск и прогресс ---
-        self.btn = QPushButton("✂  Нарезать")
+        row.addLayout(labeled("Пресет", self.preset))
+        row.addStretch(1)
+        self.btn = QPushButton("✂   Нарезать")
         self.btn.setObjectName("accent")
+        self.btn.setMinimumWidth(240)
         self.btn.clicked.connect(self.start_or_stop)
-        lay.addWidget(self.btn)
+        row.addWidget(self.btn, 0, Qt.AlignBottom)
+        lay.addLayout(row)
 
         steps = QHBoxLayout()
+        steps.setSpacing(6)
         self.step_labels = []
         for st in autoclip.STAGES:
-            lb = QLabel("○ " + st)
-            lb.setObjectName("hint")
+            lb = QLabel(st)
+            lb.setObjectName("step")
             steps.addWidget(lb)
             self.step_labels.append(lb)
         steps.addStretch(1)
         lay.addLayout(steps)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
-        self.bar.setFixedHeight(8)
+        self.bar.setFixedHeight(6)
+        self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
 
         self.log = QPlainTextEdit()
@@ -545,7 +759,7 @@ class CutPage(QWidget):
         lay.addWidget(self.log, 1)
 
         row = QHBoxLayout()
-        self.btn_folder = QPushButton("📂  Открыть папку с клипами")
+        self.btn_folder = QPushButton("Открыть папку с клипами")
         self.btn_folder.setEnabled(False)
         self.btn_folder.clicked.connect(lambda: self.last_out and open_path(self.last_out))
         self.btn_clips = QPushButton("К клипам  →")
@@ -556,36 +770,11 @@ class CutPage(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
 
-        self.refresh_sounds()
         self.refresh_presets()
-        self.sound.setEnabled(self.cb_bleep.isChecked())
 
-    def _update_preview(self, *_):
-        self.preview.set_state(autoclip.SUB_POSITIONS.get(self.sub_pos.currentText(), 0.6),
-                               self.cb_safe.isChecked())
-        self.preview.setVisible(self.cb_subs.isChecked())
-
-    # --- виджеты, которые сами запоминают значение ---
     def _set(self, key, value):
         self.s[key] = value
         save_settings(self.s)
-
-    def _check(self, text, key, later=False):
-        cb = QCheckBox(text)
-        cb.setChecked(bool(self.s.get(key)))
-        cb.toggled.connect(lambda v: self._set(key, v))
-        if later:
-            cb.setEnabled(False)
-            cb.setToolTip(LATER)
-        return cb
-
-    def _combo(self, values, key):
-        cb = QComboBox()
-        cb.addItems(list(values))
-        if self.s.get(key) in values:
-            cb.setCurrentText(self.s[key])
-        cb.currentTextChanged.connect(lambda t: self._set(key, t))
-        return cb
 
     def refresh_presets(self):
         names = [p["name"] for p in autoclip.load_presets()]
@@ -597,24 +786,6 @@ class CutPage(QWidget):
         self.preset.blockSignals(False)
         self.s["preset"] = self.preset.currentText()
 
-    # --- звуки ---
-    def refresh_sounds(self):
-        names = autoclip.list_sounds()
-        want = self.s.get("sound")
-        self.sound.blockSignals(True)
-        self.sound.clear()
-        self.sound.addItems(names)
-        self.sound.setCurrentText(want if want in names else names[0])
-        self.sound.blockSignals(False)
-
-    def play_sound(self):
-        self.refresh_sounds()
-        path = autoclip.sound_path(self.sound.currentText())
-        if path:
-            self.sfx.stop()
-            self.sfx.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
-            self.sfx.play()
-
     # --- выбор файла и превью ---
     def set_files(self, paths):
         paths = [p for p in paths if os.path.isfile(p)]
@@ -624,10 +795,8 @@ class CutPage(QWidget):
             self.write("ℹ️  Дождись конца нарезки или останови её.")
             return
         self.files = paths
-        names = "\n".join(os.path.basename(p) for p in paths[:4])
-        if len(paths) > 4:
-            names += f"\n…и ещё {len(paths) - 4}"
-        self.drop.set_preview(None, "🎬 " + names)
+        more = f"…и ещё {len(paths) - 1}" if len(paths) > 1 else ""
+        self.drop.set_preview(None, "🎬  " + os.path.basename(paths[0]), more)
         self.thumb_n += 1
         threading.Thread(target=self._make_thumb, args=(paths, self.thumb_n), daemon=True).start()
 
@@ -649,14 +818,15 @@ class CutPage(QWidget):
         except OSError:
             pass
         paths = info["paths"]
-        text = (f"{os.path.basename(paths[0])}\n\n{autoclip.fmt_time(info['dur'])}\n"
-                f"{info['w']}×{info['h']}, {info['fps']:g} к/с")
-        text += f"\nметок из OBS: {info.get('marks', 0)}"
+        sub = [f"{autoclip.fmt_time(info['dur'])}  ·  {info['w']}×{info['h']}  ·  "
+               f"{info['fps']:g} к/с",
+               f"меток из OBS: {info.get('marks', 0)}"]
         if info["w"] > info["h"]:
-            text += "\nгоризонтальное"
+            sub.append("горизонтальное — возьму середину кадра")
         if len(paths) > 1:
-            text += f"\n\n…и ещё {len(paths) - 1}"
-        self.drop.set_preview(None if pm.isNull() else pm, text)
+            sub.append(f"…и ещё {len(paths) - 1}")
+        self.drop.set_preview(None if pm.isNull() else pm, os.path.basename(paths[0]),
+                              "\n".join(sub))
 
     # --- запуск ---
     def apply_config(self):
@@ -688,18 +858,24 @@ class CutPage(QWidget):
                 return
         self.apply_config()
         self.win.start_cut(list(self.files))
-        self.btn.setText("■  Остановить")
+        self.btn.setText("■   Остановить")
         self._busy_style(True)
         self.btn_folder.setEnabled(False)
         self.btn_clips.setEnabled(False)
         self.bar.setValue(0)
         for lb, st in zip(self.step_labels, autoclip.STAGES):
-            lb.setText("○ " + st)
+            self._step_state(lb, st, "")
 
     def _busy_style(self, on):
         self.btn.setProperty("busy", on)
         self.btn.style().unpolish(self.btn)
         self.btn.style().polish(self.btn)
+
+    def _step_state(self, lb, text, state):
+        lb.setText(text)
+        lb.setProperty("state", state)
+        lb.style().unpolish(lb)
+        lb.style().polish(lb)
 
     def show_progress(self, stage, pct, msg):
         stages = autoclip.STAGES
@@ -709,12 +885,12 @@ class CutPage(QWidget):
         self.bar.setValue(int((i + pct / 100) / len(stages) * 1000))
         for j, (lb, st) in enumerate(zip(self.step_labels, stages)):
             if j < i or (j == i and pct >= 100):
-                lb.setText("✓ " + st)
+                self._step_state(lb, "✓ " + st, "done")
             elif j == i:
-                lb.setText(f"● {st} {pct:.0f}%")
+                self._step_state(lb, f"{st}  {pct:.0f}%", "active")
 
     def finished(self, out):
-        self.btn.setText("✂  Нарезать")
+        self.btn.setText("✂   Нарезать")
         self.btn.setEnabled(True)
         self._busy_style(False)
         if out:
@@ -752,13 +928,14 @@ class ClipsPage(QWidget):
         self._row = -1             # выбранная строка — чтобы вернуть, если передумал уходить
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(10)
+        lay.setContentsMargins(32, 28, 32, 24)
+        lay.setSpacing(12)
         lay.addLayout(page_title("Клипы"))
 
         top = QHBoxLayout()
         self.projects = QComboBox()
         self.projects.setMinimumWidth(360)
+        self.projects.setPlaceholderText("Выбери нарезку")
         self.projects.activated.connect(lambda i: self.load(self.projects.itemData(i)))
         top.addWidget(self.projects, 1)
         b = QPushButton("Открыть папку с клипами…")
@@ -786,6 +963,8 @@ class ClipsPage(QWidget):
         self.filter_btns[0].setChecked(True)
         self.list = QListWidget()
         self.list.setObjectName("clipList")
+        self.list.setWordWrap(True)
+        self.list.setTextElideMode(Qt.ElideNone)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
         ll.addWidget(self.list, 1)
@@ -821,65 +1000,86 @@ class ClipsPage(QWidget):
         rl.addWidget(self.info)
 
         # --- редактор клипа ---
-        self.editor = QGroupBox("Этот клип")
-        ed = QVBoxLayout(self.editor)
-        ed.setSpacing(8)
+        self.editor, ed = card()
+        ed.setSpacing(10)
         row = QHBoxLayout()
-        row.setSpacing(14)
-        self.e_hook = QCheckBox("Хук")
-        self.e_zoom = QCheckBox("Зум")
-        self.e_bleep = QCheckBox("Мат звуком")
-        self.e_subs = QCheckBox("Субтитры")
+        row.setSpacing(18)
+        self.e_hook = Toggle(tip="1–2 с яркой реакции из этого клипа в начале")
+        self.e_zoom = Toggle()
+        self.e_subs = Toggle()
+        self.e_safe = Toggle(tip="Не заходить субтитрами под кнопки соцсетей")
+        for text, w in (("Хук", self.e_hook), ("Зум", self.e_zoom), ("Субтитры", self.e_subs),
+                        ("Сейф-зона", self.e_safe)):
+            pair = QHBoxLayout()
+            pair.setSpacing(8)
+            pair.addWidget(w)
+            pair.addWidget(QLabel(text))
+            row.addLayout(pair)
+            w.toggled.connect(self._changed)
         self.e_pos = QComboBox()
         self.e_pos.addItems(list(autoclip.SUB_POSITIONS))
-        self.e_safe = QCheckBox("Сейф-зона")
-        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs):
-            row.addWidget(w)
-            w.toggled.connect(self._changed)
-        row.addWidget(self.e_pos)
-        row.addWidget(self.e_safe)
+        self.e_pos.setToolTip("Где субтитры")
         self.e_pos.currentTextChanged.connect(self._changed)
-        self.e_safe.toggled.connect(self._changed)
+        row.addWidget(self.e_pos)
         self.e_subs.toggled.connect(self.e_pos.setEnabled)
         self.e_subs.toggled.connect(self.e_safe.setEnabled)
         row.addStretch(1)
         ed.addLayout(row)
 
         row = QHBoxLayout()
+        row.setSpacing(8)
+        self.e_bleep = Toggle()
+        self.e_bleep.toggled.connect(self._changed)
+        row.addWidget(self.e_bleep)
+        row.addWidget(QLabel("Мат звуком"))
+        row.addSpacing(6)
+        self.e_sound = QComboBox()
+        self.e_sound.setMinimumWidth(180)
+        self.e_sound.currentTextChanged.connect(self._changed)
+        self.e_bleep.toggled.connect(self.e_sound.setEnabled)
+        row.addWidget(self.e_sound)
+        row.addWidget(SoundButton(self.e_sound))
+        row.addStretch(1)
+        ed.addLayout(row)
+        ed.addWidget(separator())
+
+        row = QHBoxLayout()
         row.setSpacing(6)
         self.e_start = QLineEdit()
         self.e_end = QLineEdit()
         for label, edit in (("Начало", self.e_start), ("Конец", self.e_end)):
-            row.addWidget(QLabel(label))
+            lbl = QLabel(label)
+            lbl.setObjectName("fieldLabel")
+            row.addWidget(lbl)
             minus = QPushButton(f"−{SHIFT:g} с")
             plus = QPushButton(f"+{SHIFT:g} с")
             minus.clicked.connect(lambda _, e=edit: self.shift(e, -SHIFT))
             plus.clicked.connect(lambda _, e=edit: self.shift(e, SHIFT))
-            edit.setFixedWidth(92)
+            edit.setFixedWidth(96)
+            edit.setAlignment(Qt.AlignCenter)
             edit.setToolTip("Время в записи: 1:18 или 0:01:18.5")
             edit.textChanged.connect(self._changed)
             row.addWidget(minus)
             row.addWidget(edit)
             row.addWidget(plus)
-            row.addSpacing(12)
+            row.addSpacing(14)
         self.e_len = hint("")
         row.addWidget(self.e_len)
         row.addStretch(1)
         ed.addLayout(row)
 
         row = QHBoxLayout()
-        self.btn_rebuild = QPushButton("🔁  Пересобрать")
-        self.btn_rebuild.setObjectName("rebuild")
+        row.setSpacing(8)
+        self.btn_rebuild = QPushButton("Пересобрать")
+        self.btn_rebuild.setObjectName("primary")
         self.btn_rebuild.clicked.connect(self.rebuild)
         row.addWidget(self.btn_rebuild)
         self.state = hint("")
         row.addWidget(self.state, 1)
-        ed.addLayout(row)
-
-        row = QHBoxLayout()
         self.btn_good = QPushButton("👍  Хороший")
         self.btn_good.clicked.connect(self.toggle_good)
-        self.btn_trash = QPushButton("🗑  В корзину")
+        self.btn_trash = QPushButton("В корзину")
+        self.btn_trash.setObjectName("danger")
         self.btn_trash.clicked.connect(self.to_trash)
         self.btn_save = QPushButton("Сохранить как…")
         self.btn_save.clicked.connect(self.save_as)
@@ -887,17 +1087,38 @@ class ClipsPage(QWidget):
         self.btn_show.clicked.connect(self.show_file)
         for w in (self.btn_good, self.btn_trash, self.btn_save, self.btn_show):
             row.addWidget(w)
-        row.addStretch(1)
         ed.addLayout(row)
         rl.addWidget(self.editor)
         self.editor.setEnabled(False)
 
         split.addWidget(right)
-        split.setSizes([450, 650])
+        split.setSizes([440, 700])
+        self.split = split
         lay.addWidget(split, 1)
 
-        self.empty = hint("Здесь будут клипы. Нарежь запись или открой папку с клипами.")
+        # пока нарезка не выбрана — вместо пустого редактора подсказка
+        self.blank = QWidget()
+        bl = QVBoxLayout(self.blank)
+        bl.addStretch(1)
+        bt = QLabel("Нарезка не выбрана")
+        bt.setObjectName("cardTitle")
+        bt.setAlignment(Qt.AlignCenter)
+        bl.addWidget(bt)
+        bs = hint("Выбери нарезку в списке сверху или нарежь новую запись.")
+        bs.setAlignment(Qt.AlignCenter)
+        bl.addWidget(bs)
+        bl.addSpacing(10)
+        go = QPushButton("К нарезке")
+        go.setObjectName("primary")
+        go.clicked.connect(lambda: self.win.go("cut"))
+        bl.addWidget(go, 0, Qt.AlignCenter)
+        bl.addStretch(2)
+        lay.addWidget(self.blank, 1)
+        self.split.hide()
+
+        self.empty = hint("")
         lay.addWidget(self.empty)
+        self.empty.hide()
         self.win.bus.rebuilt.connect(self._rebuilt)
         self.refresh_recent()
 
@@ -916,6 +1137,9 @@ class ClipsPage(QWidget):
             except (OSError, ValueError):
                 pass
             self.projects.addItem(label, p)
+        # пока нарезку не выбрали — список пустой (при запуске «Клипы» пустые)
+        cur = self.proj["_path"] if self.proj else None
+        self.projects.setCurrentIndex(recent.index(cur) if cur in recent else -1)
 
     def remember(self, pp):
         recent = [p for p in self.win.settings.get("recent", []) if p != pp]
@@ -977,15 +1201,16 @@ class ClipsPage(QWidget):
             if c.get("marks"):
                 it.setToolTip("Клип по метке из OBS")
             it.setData(Qt.UserRole, c["id"])
-            it.setSizeHint(QSize(0, 52))
             self.list.addItem(it)
             if c["id"] == select_id:
                 row = i
         self.list.blockSignals(False)
         total = sum(c["status"] != "rejected" for c in self.proj["clips"])
-        self.empty.setText("Здесь будут клипы. Нарежь запись или открой папку с клипами."
-                           if total == 0 else "В этом фильтре клипов нет.")
+        self.empty.setText("В этой нарезке клипов нет." if total == 0
+                           else "В этом фильтре клипов нет.")
         self.empty.setVisible(self.list.count() == 0)
+        self.blank.hide()
+        self.split.show()
         self._row = -1
         if self.list.count():
             self.list.setCurrentRow(row)
@@ -1061,12 +1286,13 @@ class ClipsPage(QWidget):
         self.base = {"hook": bool((c.get("hook") or {}).get("on")), "zoom": bool(cfg["zoom"]),
                      "bleep": bool(cfg["bleep"]), "subs": bool(cfg["subs"]),
                      "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
-                     "safe_zone": bool(cfg.get("safe_zone")),
+                     "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
-                   self.e_start, self.e_end)
+                   self.e_start, self.e_end, self.e_sound)
         for w in widgets:
             w.blockSignals(True)
+        fill_sounds(self.e_sound, cfg["bleep_sound"])
         b = self.base
         self.e_hook.setChecked(b["hook"])
         self.e_zoom.setChecked(b["zoom"])
@@ -1076,6 +1302,9 @@ class ClipsPage(QWidget):
         self.e_safe.setChecked(b["safe_zone"])
         self.e_pos.setEnabled(b["subs"])
         self.e_safe.setEnabled(b["subs"])
+        self.e_sound.setEnabled(b["bleep"])
+        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_safe):
+            w.update()
         self.e_start.setText(autoclip.fmt_time_exact(b["start"]))
         self.e_end.setText(autoclip.fmt_time_exact(b["end"]))
         for w in widgets:
@@ -1095,7 +1324,7 @@ class ClipsPage(QWidget):
         return {"hook": self.e_hook.isChecked(), "zoom": self.e_zoom.isChecked(),
                 "bleep": self.e_bleep.isChecked(), "subs": self.e_subs.isChecked(),
                 "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
-                "safe_zone": self.e_safe.isChecked(),
+                "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -1230,112 +1459,181 @@ class SettingsPage(QWidget):
         super().__init__()
         self.win = win
         self.s = win.settings
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(6)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body.setObjectName("scrollBody")
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(32, 28, 32, 24)
+        lay.setSpacing(16)
         lay.addLayout(page_title("Настройки"))
 
-        # --- языковая модель ---
-        box = QGroupBox("Языковая модель")
-        f = QFormLayout(box)
-        self.llm = QComboBox()
-        self.llm.addItems(list(LLM_MODES))
-        cur = next((k for k, v in LLM_MODES.items() if v == self.s["llm"]), "Авто")
-        self.llm.setCurrentText(cur)
-        self.llm.currentTextChanged.connect(lambda t: self._set("llm", LLM_MODES[t]))
-        f.addRow("Как искать моменты", self.llm)
-        self.ollama = QLineEdit(self.s["ollama_model"])
-        self.ollama.textChanged.connect(lambda t: self._set("ollama_model", t.strip()))
-        f.addRow("Модель Ollama", self.ollama)
-        row = QHBoxLayout()
-        b = QPushButton("Проверить")
-        b.clicked.connect(self.check_llm)
-        row.addWidget(b)
-        self.llm_state = hint("")
-        row.addWidget(self.llm_state, 1)
-        f.addRow("", row)
-        f.addRow(hint("Авто: Ollama, если запущена; иначе Claude API, если задан ключ "
-                      "ANTHROPIC_API_KEY; иначе только по звуку и речи."))
-        lay.addWidget(box)
-
-        # --- звуки ---
-        box = QGroupBox("Звуки для мата")
-        f = QFormLayout(box)
-        b = QPushButton("Открыть папку своих звуков")
+        # --- новые клипы ---
+        box, v = card("Новые клипы", "Так будут нарезаться новые клипы. "
+                                     "У отдельного клипа всё можно поменять в «Клипах».")
+        self.cb_subs = self._toggle("subs")
+        v.addWidget(option_row("Субтитры", self.cb_subs))
+        self.sub_pos = self._combo(autoclip.SUB_POSITIONS, "sub_pos")
+        v.addWidget(option_row("Где субтитры", self.sub_pos))
+        self.cb_safe = self._toggle("safe_zone")
+        v.addWidget(option_row("Сейф-зона соцсетей", self.cb_safe,
+                               "Субтитры не заходят под кнопки, ник и подпись "
+                               "TikTok, Shorts и Reels"))
+        self.preview = SubsPreview()
+        v.addWidget(option_row("Как это выглядит", self.preview,
+                               "Белое — субтитры, красное — зона кнопок соцсетей"))
+        v.addWidget(separator())
+        self.cb_zoom = self._toggle("zoom")
+        v.addWidget(option_row("Зум на эмоциях", self.cb_zoom))
+        self.cb_hook = self._toggle("hook")
+        v.addWidget(option_row("Хук в начале", self.cb_hook,
+                               "1–2 секунды яркой реакции из этого же клипа в самом начале"))
+        self.cam = self._combo(WEBCAM, "cam")
+        v.addWidget(option_row("Раскладка записи", self.cam, "Куда приближать зум"))
+        v.addWidget(separator())
+        self.cb_bleep = self._toggle("bleep")
+        v.addWidget(option_row("Мат звуком", self.cb_bleep))
+        snd = QHBoxLayout()
+        snd.setSpacing(6)
+        self.sound = QComboBox()
+        self.sound.setMinimumWidth(190)
+        self.sound.currentTextChanged.connect(lambda t: self._set("sound", t) if t else None)
+        snd.addWidget(self.sound)
+        snd.addWidget(SoundButton(self.sound))
+        b = QPushButton("Свои звуки…")
+        b.setToolTip("Положи в эту папку свой mp3 или wav — он появится в списке")
         b.clicked.connect(self.open_sounds)
-        f.addRow(b)
-        f.addRow(hint("Положи туда свой mp3 или wav — он появится в списке на «Нарезке»."))
+        snd.addWidget(b)
+        v.addWidget(option_row("Звук на мат", snd))
+        v.addWidget(separator())
+        self.cb_marks = self._toggle("marks")
+        v.addWidget(option_row("Метки из OBS", self.cb_marks,
+                               "Моменты, где ты нажал «Добавить маркер главы», идут первыми"))
+        self.cb_nick = Toggle(False, LATER)
+        self.cb_nick.setEnabled(False)
+        v.addWidget(option_row("Ник в углу", self.cb_nick, LATER))
         lay.addWidget(box)
+        for w in (self.cb_subs, self.cb_safe):
+            w.toggled.connect(self._update_preview)
+        self.sub_pos.currentTextChanged.connect(self._update_preview)
+        self.cb_subs.toggled.connect(self.sub_pos.setEnabled)
+        self.cb_subs.toggled.connect(self.cb_safe.setEnabled)
+        self.cb_bleep.toggled.connect(self.sound.setEnabled)
+        self.sub_pos.setEnabled(self.cb_subs.isChecked())
+        self.cb_safe.setEnabled(self.cb_subs.isChecked())
+        self.refresh_sounds()
+        self.sound.setEnabled(self.cb_bleep.isChecked())
+        self._update_preview()
 
-        # --- экспорт ---
-        box = QGroupBox("Пресеты экспорта")
-        v = QVBoxLayout(box)
+        # --- пресеты экспорта ---
+        box, v = card("Пресеты экспорта", "H.264, постоянный битрейт, MP4, цвет Rec. 709, "
+                                          "звук AAC 320 кбит/с.")
         self.presets = QListWidget()
         self.presets.setObjectName("clipList")
         self.presets.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.presets.setFixedHeight(96)
+        self.presets.setFixedHeight(56)
         v.addWidget(self.presets)
         row = QHBoxLayout()
+        row.setSpacing(8)
         self.p_name = QLineEdit()
         self.p_name.setPlaceholderText("Название, например «Shorts 1080p30»")
-        row.addWidget(self.p_name, 1)
+        row.addLayout(labeled("Свой пресет", self.p_name), 1)
         self.p_w = self._spin(240, 4320, 1080, 2, "Ширина")
         self.p_h = self._spin(240, 4320, 1920, 2, "Высота")
         self.p_fps = self._spin(24, 120, 60, 1, "Кадров в секунду")
         self.p_kbps = self._spin(1000, 100000, 18000, 500, "Битрейт, Кбит/с")
-        for label, w in (("", self.p_w), ("×", self.p_h), ("к/с", self.p_fps),
+        for label, w in (("Ширина", self.p_w), ("Высота", self.p_h), ("Кадров/с", self.p_fps),
                          ("Кбит/с", self.p_kbps)):
-            if label and label != "×":
-                row.addWidget(w)
-                row.addWidget(QLabel(label))
-            else:
-                if label:
-                    row.addWidget(QLabel(label))
-                row.addWidget(w)
+            w.setFixedWidth(84)
+            row.addLayout(labeled(label, w))
         b = QPushButton("Добавить")
+        b.setObjectName("primary")
         b.clicked.connect(self.add_preset)
-        row.addWidget(b)
+        row.addWidget(b, 0, Qt.AlignBottom)
         v.addLayout(row)
         row = QHBoxLayout()
         self.btn_del = QPushButton("Удалить выбранный")
+        self.btn_del.setObjectName("danger")
         self.btn_del.clicked.connect(self.delete_preset)
         row.addWidget(self.btn_del)
-        self.p_state = hint("H.264, постоянный битрейт, MP4, цвет Rec. 709, звук AAC 320 кбит/с.")
+        self.p_state = hint("")
         row.addWidget(self.p_state, 1)
         v.addLayout(row)
         self.presets.currentRowChanged.connect(self._preset_selected)
         lay.addWidget(box)
         self.refresh_presets()
 
-        # --- на будущее ---
-        box = QGroupBox("Канал и OBS")
-        f = QFormLayout(box)
+        # --- языковая модель ---
+        box, v = card("Языковая модель", "Авто: Ollama, если запущена; иначе Claude API, если "
+                                         "задан ключ ANTHROPIC_API_KEY; иначе только по звуку и речи.")
+        self.llm = QComboBox()
+        self.llm.addItems(list(LLM_MODES))
+        cur = next((k for k, val in LLM_MODES.items() if val == self.s["llm"]), "Авто")
+        self.llm.setCurrentText(cur)
+        self.llm.currentTextChanged.connect(lambda t: self._set("llm", LLM_MODES[t]))
+        v.addWidget(option_row("Как искать моменты", self.llm))
+        self.ollama = QLineEdit(self.s["ollama_model"])
+        self.ollama.setMinimumWidth(220)
+        self.ollama.textChanged.connect(lambda t: self._set("ollama_model", t.strip()))
+        v.addWidget(option_row("Модель Ollama", self.ollama))
+        row = QHBoxLayout()
+        b = QPushButton("Проверить")
+        b.clicked.connect(self.check_llm)
+        row.addWidget(b)
+        self.llm_state = hint("")
+        row.addWidget(self.llm_state, 1)
+        v.addLayout(row)
+        lay.addWidget(box)
+
+        # --- канал и OBS ---
+        box, v = card("Канал и OBS", "Запоминается уже сейчас. Слежка за папкой, ник в углу "
+                                     "и хэштеги — " + LATER.lower() + ".")
         obs = QHBoxLayout()
+        obs.setSpacing(6)
         self.obs = QLineEdit(self.s["obs_dir"])
         self.obs.setPlaceholderText("Папка, куда OBS пишет записи")
+        self.obs.setMinimumWidth(300)
         self.obs.textChanged.connect(lambda t: self._set("obs_dir", t.strip()))
-        obs.addWidget(self.obs, 1)
+        obs.addWidget(self.obs)
         b = QPushButton("Выбрать…")
         b.clicked.connect(self.pick_obs)
         obs.addWidget(b)
-        f.addRow("Папка OBS", obs)
+        v.addWidget(option_row("Папка OBS", obs))
         self.nick = QLineEdit(self.s["nick_text"])
+        self.nick.setMinimumWidth(300)
         self.nick.textChanged.connect(lambda t: self._set("nick_text", t.strip()))
-        f.addRow("Ник", self.nick)
+        v.addWidget(option_row("Ник", self.nick))
         self.tags = QLineEdit(self.s["hashtags"])
         self.tags.setPlaceholderText("#стрим #игры")
+        self.tags.setMinimumWidth(300)
         self.tags.textChanged.connect(lambda t: self._set("hashtags", t.strip()))
-        f.addRow("Хэштеги", self.tags)
-        f.addRow(hint("Запоминается уже сейчас. Слежка за папкой, ник в углу и хэштеги — "
-                      + LATER.lower() + "."))
+        v.addWidget(option_row("Хэштеги", self.tags))
         lay.addWidget(box)
 
-        lay.addStretch(1)
         lay.addWidget(hint(f"Настройки хранятся в {autoclip.user_dir()}"))
+        lay.addStretch(1)
 
     def _set(self, key, value):
         self.s[key] = value
         save_settings(self.s)
+
+    def _toggle(self, key):
+        t = Toggle(bool(self.s.get(key)))
+        t.toggled.connect(lambda v: self._set(key, v))
+        return t
+
+    def _combo(self, values, key):
+        cb = QComboBox()
+        cb.setMinimumWidth(190)
+        cb.addItems(list(values))
+        if self.s.get(key) in values:
+            cb.setCurrentText(self.s[key])
+        cb.currentTextChanged.connect(lambda t: self._set(key, t))
+        return cb
 
     def _spin(self, lo, hi, val, step, tip):
         sp = QSpinBox()
@@ -1345,15 +1643,24 @@ class SettingsPage(QWidget):
         sp.setToolTip(tip)
         return sp
 
+    def _update_preview(self, *_):
+        self.preview.set_state(autoclip.SUB_POSITIONS.get(self.sub_pos.currentText(), 0.6),
+                               self.cb_safe.isChecked())
+        self.preview.setVisible(self.cb_subs.isChecked())
+
+    def refresh_sounds(self):
+        fill_sounds(self.sound, self.s.get("sound"))
+
     # --- пресеты ---
     def refresh_presets(self, select=None):
         self.all_presets = autoclip.load_presets()
         self.presets.clear()
         for p in self.all_presets:
-            extra = " · встроенный" if p.get("builtin") else ""
-            self.presets.addItem(f"{p['name']} — {p['w']}×{p['h']}, {p['fps']} к/с, "
+            extra = "   ·   встроенный" if p.get("builtin") else ""
+            self.presets.addItem(f"{p['name']}   —   {p['w']}×{p['h']}, {p['fps']} к/с, "
                                  f"{p['kbps']} Кбит/с{extra}")
         names = [p["name"] for p in self.all_presets]
+        self.presets.setFixedHeight(min(220, 20 + 38 * len(self.all_presets)))
         self.presets.setCurrentRow(names.index(select) if select in names else 0)
         self.win.cut.refresh_presets()
 
@@ -1406,9 +1713,10 @@ class SettingsPage(QWidget):
 
 # ---------------- главное окно ----------------
 
+
 class MainWindow(QMainWindow):
-    PAGES = (("cut", "✂   Нарезка"), ("clips", "🎬   Клипы"), ("weekly", "📅   Подборка"),
-             ("settings", "⚙   Настройки"))
+    PAGES = (("cut", "Нарезка", "\ue8c6"), ("clips", "Клипы", "\ue714"),
+             ("weekly", "Подборка", "\ue8f1"), ("settings", "Настройки", "\ue713"))
 
     def __init__(self):
         super().__init__()
@@ -1428,22 +1736,32 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        side = QFrame()
+        side.setObjectName("side")
+        side.setFixedWidth(210)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(0, 0, 0, 12)
+        sl.setSpacing(0)
+        brand = QLabel('Auto<span style="color:%s">Clip</span>' % ACCENT)
+        brand.setObjectName("brand")
+        sl.addWidget(brand)
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
-        self.nav.setFixedWidth(190)
-        f = QFont("Segoe UI", 11)
-        for _, text in self.PAGES:
-            it = QListWidgetItem(text)
+        f = QFont("Segoe UI", 10)
+        self.nav.setIconSize(QSize(18, 18))
+        for _, text, icon in self.PAGES:
+            it = QListWidgetItem(glyph_icon(icon), "  " + text)
             it.setFont(f)
             self.nav.addItem(it)
-        root.addWidget(self.nav)
+        sl.addWidget(self.nav, 1)
+        root.addWidget(side)
 
         self.stack = QStackedWidget()
         self.cut = CutPage(self)
         self.clips = ClipsPage(self)
         weekly = QWidget()
         wl = QVBoxLayout(weekly)
-        wl.setContentsMargins(24, 20, 24, 20)
+        wl.setContentsMargins(32, 28, 32, 24)
         wl.addLayout(page_title("Подборка", "Ролик из хороших клипов за неделю. " + LATER + "."))
         wl.addStretch(1)
         self.settings_page = SettingsPage(self)
@@ -1466,12 +1784,10 @@ class MainWindow(QMainWindow):
         try:
             autoclip.need_ffmpeg()
             autoclip.prepare_sounds()
-            self.cut.refresh_sounds()
+            self.settings_page.refresh_sounds()
             self.cut.write("Выбери запись и нажми «Нарезать».")
         except autoclip.AutoClipError as e:
             self.cut.write(str(e))
-        if self.settings["recent"]:
-            QTimer.singleShot(0, lambda: self.clips.load(self.settings["recent"][0]))
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
@@ -1479,7 +1795,7 @@ class MainWindow(QMainWindow):
             self.clips.player.player.pause()
 
     def go(self, key):
-        self.nav.setCurrentRow([k for k, _ in self.PAGES].index(key))
+        self.nav.setCurrentRow([p[0] for p in self.PAGES].index(key))
 
     # --- нарезка в фоне ---
     def start_cut(self, files):
@@ -1573,7 +1889,7 @@ def dark_palette(app):
     pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#5c606b"))
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#5c606b"))
     app.setPalette(pal)
-    app.setStyleSheet(STYLE)
+    app.setStyleSheet(STYLE.replace("@ARROW@", arrow_icon()))
 
 
 def main():
