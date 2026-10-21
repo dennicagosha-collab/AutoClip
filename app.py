@@ -38,7 +38,7 @@ LATER = "Появится в следующих версиях"
 
 DEFAULTS = {
     "clips": 10, "subs": True, "zoom": True, "hook": True, "bleep": True,
-    "sound": "перелистывание", "marks": False, "nick": False, "cam": "Вебка сверху",
+    "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
@@ -432,7 +432,9 @@ class CutPage(QWidget):
         self.cb_hook = self._check("Хук в начале", "hook")
         self.cb_hook.setToolTip("1–2 секунды яркой реакции из этого же клипа в самом начале. "
                                 "Ставится, только где есть сильный момент.")
-        self.cb_marks = self._check("Метки из OBS", "marks", later=True)
+        self.cb_marks = self._check("Метки из OBS", "marks")
+        self.cb_marks.setToolTip("Моменты, где ты нажал «Добавить маркер главы» в OBS, "
+                                 "идут первыми. Нужна запись в Hybrid MP4.")
         self.cb_nick = self._check("Ник в углу", "nick", later=True)
         self.cb_bleep = self._check("Мат звуком", "bleep")
         g.addWidget(self.cb_subs, 0, 0)
@@ -618,6 +620,7 @@ class CutPage(QWidget):
         png = os.path.join(tempfile.gettempdir(), f"autoclip_thumb_{os.getpid()}_{n}.png")
         try:
             info = autoclip.thumbnail(paths[0], png, box=200)
+            info["marks"] = len(autoclip.read_markers(paths[0]))
         except Exception:
             return                                   # без превью — останется название
         self.win.bus.thumb.emit(n, png, {"paths": paths, **info})
@@ -633,6 +636,7 @@ class CutPage(QWidget):
         paths = info["paths"]
         text = (f"{os.path.basename(paths[0])}\n\n{autoclip.fmt_time(info['dur'])}\n"
                 f"{info['w']}×{info['h']}, {info['fps']:g} к/с")
+        text += f"\nметок из OBS: {info.get('marks', 0)}"
         if info["w"] > info["h"]:
             text += "\nгоризонтальное"
         if len(paths) > 1:
@@ -648,6 +652,7 @@ class CutPage(QWidget):
         c["zoom"] = bool(s["zoom"])
         c["bleep"] = bool(s["bleep"])
         c["hook"] = bool(s["hook"])
+        c["marks"] = bool(s["marks"])
         c["sub_y"] = autoclip.SUB_POSITIONS.get(s["sub_pos"], autoclip.CONFIG["sub_y"])
         c["safe_zone"] = bool(s["safe_zone"])
         c["bleep_sound"] = s["sound"]
@@ -827,10 +832,13 @@ class ClipsPage(QWidget):
                 continue
             st = autoclip.STATUSES.get(c["status"], c["status"])
             it = QListWidgetItem(
-                f"{c['num']:02d}   ★ {c['score']:.1f}   {c['title']}\n"
+                f"{c['num']:02d}   ★ {c['score']:.1f}   {'📍 ' if c.get('marks') else ''}"
+                f"{c['title']}\n"
                 f"      {st} · {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
                 f" · {c['end'] - c['start']:.0f} с"
                 f" · {'хук' if c.get('hook', {}).get('on') else 'без хука'}")
+            if c.get("marks"):
+                it.setToolTip("Клип по метке из OBS")
             it.setData(Qt.UserRole, c["id"])
             it.setSizeHint(QSize(0, 52))
             self.list.addItem(it)
@@ -862,6 +870,8 @@ class ClipsPage(QWidget):
                  f"Оценка {c['score']:.1f}" + (f" — {parts}" if parts else ""),
                  f"В записи: {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}, "
                  f"зумов: {len(c['zooms'])}, запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}"]
+        if c.get("marks"):
+            lines.append("📍 Метка из OBS: " + ", ".join(autoclip.fmt_time(t) for t in c["marks"]))
         ht = autoclip.hook_text(c)
         lines.append(ht[:1].upper() + ht[1:])
         if c.get("reason"):

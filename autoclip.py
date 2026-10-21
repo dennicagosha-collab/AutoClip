@@ -86,6 +86,11 @@ CONFIG = {
     "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче
     "bleep_pad": 0.06,        # запас вокруг слова, сек
 
+    # --- метки из OBS (горячая клавиша «Добавить маркер главы», запись в Hybrid MP4) ---
+    "marks": True,
+    "mark_window": 30.0,      # метку ставят после момента: ищем момент за 30 с до неё
+    "mark_bonus": 3.0,        # прибавка к оценке клипа с меткой
+
     # --- хук: 1–2 с яркой реакции из этого же клипа в самом начале ---
     "hook": True,
     "hook_min_reaction": 1.0,     # реакция для хука — не слабее этого
@@ -195,6 +200,28 @@ def thumbnail(video, out_png, box=240):
     if p.returncode != 0 or not os.path.isfile(out_png):
         raise AutoClipError("❌ Не получилось взять кадр из видео.")
     return vinfo
+
+
+def read_markers(video):
+    """Метки, которые стример поставил в OBS горячей клавишей «Добавить маркер главы».
+    OBS (Hybrid MP4) пишет их главами — читаем через ffprobe. [{"t": сек, "name": ...}].
+    Глава в самом начале записи — не метка, а начало файла."""
+    p = run(["ffprobe", "-v", "error", "-show_chapters", "-print_format", "json", video])
+    if p.returncode != 0:
+        return []
+    try:
+        chapters = json.loads(p.stdout).get("chapters", [])
+    except ValueError:
+        return []
+    out = []
+    for ch in chapters:
+        try:
+            t = float(ch["start_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t >= 1.0:
+            out.append({"t": round(t, 2), "name": str(ch.get("tags", {}).get("title", ""))})
+    return sorted(out, key=lambda m: m["t"])
 
 
 # ---------------- 1. звук ----------------
@@ -787,20 +814,44 @@ def snap_start(t, words, lo, hi, before=6.0, after=5.0):
     return _not_inside_word(t, words, lo, hi)
 
 
-def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
-    """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём."""
+def mark_peaks(smooth, marks, window=None):
+    """Для каждой метки — самая яркая секунда за window секунд до неё (метку ставят после
+    смешного момента) и пара секунд после. [(секунда пика, метка)]."""
+    import numpy as np
+    window = CONFIG["mark_window"] if window is None else window
+    n = len(smooth)
+    out = []
+    for m in marks:
+        a, b = max(0, int(m["t"] - window)), min(n, int(m["t"]) + 3)
+        if b > a:
+            out.append((a + int(np.argmax(smooth[a:b])), m))
+    return out
+
+
+def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=()):
+    """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
+    marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо."""
     import numpy as np
     order = np.argsort(-smooth)
     clips = []
     busy = [{"s": a, "e": b} for a, b in taken]
     words = all_words(segments)
     min_len, max_len = CONFIG["min_len"], CONFIG["max_len"]
-    for peak in order:
-        if len(clips) >= CONFIG["clips"]:
+    marked = mark_peaks(smooth, marks) if marks else []
+    limit = max(CONFIG["clips"], len(marked))
+    candidates = marked + [(int(p), None) for p in order]
+    for peak, mark in candidates:
+        if len(clips) >= limit:
             break
-        if smooth[peak] <= 0.5:
+        if mark is None and smooth[peak] <= 0.5:
             break
         peak = float(peak)
+        if mark is not None:
+            # вторая метка про тот же момент — просто добавляем её к клипу
+            host = next((c for c in clips if c["s"] <= peak <= c["e"]), None)
+            if host:
+                host["marks"].append(mark["t"])
+                continue
         if any(c["s"] - CONFIG["min_gap"] < peak < c["e"] + CONFIG["min_gap"]
                for c in clips + busy):
             continue
@@ -850,10 +901,15 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
         # без мата в названии файла и отчёте
         title = " ".join(_censor(w) for w in title.split())
         pk = int(peak)
+        clip_parts = {k: round(float(v[pk]), 2) for k, v in (parts or {}).items()}
+        score = float(smooth[pk])
+        if mark is not None:                   # метка из OBS — большой приоритет
+            clip_parts["метка"] = CONFIG["mark_bonus"]
+            score += CONFIG["mark_bonus"]
         clips.append({"s": round(s, 2), "e": round(e, 2), "peak": peak,
-                      "score": float(smooth[pk]), "zooms": sorted(zooms),
-                      "parts": {k: round(float(v[pk]), 2) for k, v in (parts or {}).items()},
-                      "title": title, "reason": reason})
+                      "score": score, "zooms": sorted(zooms), "parts": clip_parts,
+                      "title": title, "reason": reason,
+                      "marks": [mark["t"]] if mark is not None else []})
     return sorted(clips, key=lambda c: -c["score"])
 
 
@@ -1476,6 +1532,7 @@ def make_clip_record(c, num, file):
         "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
+        "marks": c.get("marks", []),           # метки из OBS, по которым найден клип
         "hook": c.get("hook") or {"on": False, "auto": False, "start": None, "end": None,
                                   "why": "нет данных для хука"},
         "status": "new", "overrides": {}, "bleeps": None,
@@ -1495,6 +1552,8 @@ def write_report(proj):
                    f"({c['end'] - c['start']:.0f} с), оценка {c['score']:.1f}, "
                    f"{STATUSES.get(c['status'], c['status'])}")
         rep += [f"    файл: {c['file']}", f"    про что: {c['title']}"]
+        if c.get("marks"):
+            rep.append("    📍 метка из OBS: " + ", ".join(fmt_time(t) for t in c["marks"]))
         if c["reason"]:
             rep.append(f"    почему: {c['reason']}")
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c["score_parts"].items() if abs(v) >= 0.05)
@@ -1725,6 +1784,9 @@ def process(video, analyze_only=False, progress=None, cancel=None):
         segments = drop_hallucinations(transcribe(wav, cache, vinfo["dur"], progress, cancel))
         prog("расшифровка", 100)
         t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
+    marks = read_markers(video) if CONFIG["marks"] else []
+    if marks:
+        log(f"📍 Меток из OBS: {len(marks)} — эти моменты пойдут первыми")
     n_words = sum(len(s["words"]) for s in segments)
     n_mat = sum(is_profane(w["w"]) for s in segments for w in s["words"])
     log(f"   слов: {n_words}, из них мата: {n_mat}")
@@ -1744,9 +1806,10 @@ def process(video, analyze_only=False, progress=None, cancel=None):
 
     prog("поиск", 0)
     proj = new_project(video, vinfo, out_dir, cache)
+    proj["marks"] = marks
 
     smooth, loud_z, parts = score_timeline(loud, segments, moments)
-    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts)
+    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks)
     if not clips:
         prog("поиск", 100)
         log("😕 Ярких моментов не нашлось. Попробуй уменьшить min_len или подключить модель.")
