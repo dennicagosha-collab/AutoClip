@@ -15,12 +15,17 @@ AutoClip — нарезка длинной вертикальной записи
 
 Запуск:  python autoclip.py запись.mp4
          python autoclip.py запись.mp4 --clips 15 --llm none
-Результат: папка "<имя видео>_clips" рядом с видео + отчёт.txt
+         python autoclip.py запись_clips --rebuild 3 --start 1:02:10 --no-zoom
+Результат: папка "<имя видео>_clips" рядом с видео: клипы, project.json, отчёт.txt
+
+Из другого кода: process(video, progress=..., cancel=...) и rebuild_clip(...).
+Ошибки приходят как AutoClipError (текст уже понятный), остановка — Cancelled.
 
 Настройки — в блоке CONFIG ниже.
 """
 
 import argparse
+import datetime
 import glob
 import json
 import math
@@ -97,9 +102,45 @@ def fmt_time(sec):
     return f"{sec // 3600:d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
-def run(cmd, cwd=None, quiet=True):
-    p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       encoding="utf-8", errors="replace")
+class AutoClipError(Exception):
+    """Ошибка, которую можно показать пользователю как есть."""
+
+
+class Cancelled(AutoClipError):
+    def __init__(self, msg="⛔ Остановлено."):
+        super().__init__(msg)
+
+
+def _is_cancelled(cancel):
+    """cancel — threading.Event или функция, которая возвращает True, когда пора остановиться."""
+    if cancel is None:
+        return False
+    if hasattr(cancel, "is_set"):
+        return cancel.is_set()
+    return bool(cancel())
+
+
+def check_cancel(cancel):
+    if _is_cancelled(cancel):
+        raise Cancelled()
+
+
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # без мигающих консолей под pythonw
+
+
+def run(cmd, cwd=None, quiet=True, cancel=None):
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+    while True:
+        try:
+            out, err = proc.communicate(timeout=0.3)
+            break
+        except subprocess.TimeoutExpired:
+            if _is_cancelled(cancel):
+                proc.kill()
+                proc.communicate()
+                raise Cancelled()
+    p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     if p.returncode != 0 and not quiet:
         log(p.stderr[-3000:])
     return p
@@ -111,39 +152,40 @@ def need_ffmpeg():
     os.environ["PATH"] = here + os.pathsep + os.environ.get("PATH", "")
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
-            log(f"❌ Не найден {tool}. Установи ffmpeg (install.bat) и перезапусти окно.")
-            sys.exit(1)
+            raise AutoClipError(f"❌ Не найден {tool}. Установи ffmpeg (install.bat) и перезапусти окно.")
 
 
 def probe(video):
     p = run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams",
              "-show_format", video])
     if p.returncode != 0:
-        log("❌ ffprobe не смог прочитать видео:\n" + p.stderr)
-        sys.exit(1)
+        raise AutoClipError("❌ ffprobe не смог прочитать видео:\n" + p.stderr)
     info = json.loads(p.stdout)
     v = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
     a = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
     if not v:
-        log("❌ В файле нет видеодорожки.")
-        sys.exit(1)
+        raise AutoClipError("❌ В файле нет видеодорожки.")
     if not a:
-        log("❌ В файле нет звука — без звука искать моменты нечем.")
-        sys.exit(1)
+        raise AutoClipError("❌ В файле нет звука — без звука искать моменты нечем.")
+    try:
+        num, den = v.get("avg_frame_rate", "0/1").split("/")
+        fps = round(float(num) / float(den), 3)
+    except (ValueError, ZeroDivisionError):
+        fps = 0.0
     return {
         "w": int(v["width"]), "h": int(v["height"]),
-        "dur": float(info["format"]["duration"]),
+        "dur": float(info["format"]["duration"]), "fps": fps,
     }
 
 
 # ---------------- 1. звук ----------------
 
-def extract_audio(video, wav):
+def extract_audio(video, wav, cancel=None):
     log("🔊 Достаю звук...")
     p = run(["ffmpeg", "-y", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
-             "-c:a", "pcm_s16le", wav], quiet=False)
+             "-c:a", "pcm_s16le", wav], quiet=False, cancel=cancel)
     if p.returncode != 0:
-        sys.exit(1)
+        raise AutoClipError("❌ Не получилось достать звук из видео.")
 
 
 def loudness_per_second(wav):
@@ -195,7 +237,7 @@ def _read_wav(wav):
     return x.astype(np.float32) / 32768.0
 
 
-def transcribe(wav, cache_path, dur):
+def transcribe(wav, cache_path, dur, progress=None, cancel=None):
     if os.path.exists(cache_path):
         log("📝 Расшифровка уже есть, беру из кэша.")
         with open(cache_path, "r", encoding="utf-8") as f:
@@ -205,8 +247,7 @@ def transcribe(wav, cache_path, dur):
     try:
         from faster_whisper import WhisperModel
     except ImportError:
-        log("❌ Не установлен faster-whisper. Запусти install.bat.")
-        sys.exit(1)
+        raise AutoClipError("❌ Не установлен faster-whisper. Запусти install.bat.")
 
     global WHISPER_DEVICE
     name = CONFIG["whisper_model"]
@@ -222,8 +263,7 @@ def transcribe(wav, cache_path, dur):
         except Exception as e:
             log(f"   не вышло на {device}: {e}")
     if model is None:
-        log("❌ Whisper не запустился.")
-        sys.exit(1)
+        raise AutoClipError("❌ Whisper не запустился.")
 
     log("📝 Расшифровываю речь (на 3 часа записи — примерно 10–25 минут на видеокарте)...")
     t0 = time.time()
@@ -242,18 +282,22 @@ def transcribe(wav, cache_path, dur):
         result = []
         last_print = 0
         for s in segments:
+            check_cancel(cancel)
             words = [{"s": round(w.start, 2), "e": round(w.end, 2), "w": w.word.strip()}
                      for w in (s.words or []) if w.word.strip()]
             result.append({"s": round(s.start, 2), "e": round(s.end, 2),
                            "text": s.text.strip(), "words": words})
+            pct = min(100, s.end / dur * 100)
+            if progress:
+                progress("расшифровка", pct, f"{fmt_time(s.end)} из {fmt_time(dur)}")
             if s.end - last_print > 120:
                 last_print = s.end
-                pct = min(100, s.end / dur * 100)
                 log(f"   {fmt_time(s.end)} из {fmt_time(dur)} ({pct:.0f}%)")
+    except AutoClipError:
+        raise
     except Exception as e:
-        log(f"❌ Ошибка расшифровки: {e}")
-        log("   Если ошибка про cublas/cudnn — запусти install.bat ещё раз.")
-        sys.exit(1)
+        raise AutoClipError(f"❌ Ошибка расшифровки: {e}\n"
+                            "   Если ошибка про cublas/cudnn — запусти install.bat ещё раз.")
 
     log(f"   готово за {(time.time() - t0) / 60:.1f} мин")
     with open(cache_path, "w", encoding="utf-8") as f:
@@ -376,7 +420,7 @@ def _parse_moments(text):
     return out
 
 
-def llm_moments(segments, mode):
+def llm_moments(segments, mode, progress=None, cancel=None):
     if mode == "none" or not segments:
         return []
     chunk_len, overlap = 600.0, 30.0
@@ -391,7 +435,10 @@ def llm_moments(segments, mode):
         start += chunk_len - overlap
         if len(lines) < 3:
             continue
+        check_cancel(cancel)
         log(f"   кусок {i}/{n_chunks}")
+        if progress:
+            progress("модель", (i - 1) / n_chunks * 100, f"кусок {i} из {n_chunks}")
         prompt = LLM_PROMPT + "\n".join(lines)
         try:
             if mode == "ollama":
@@ -456,15 +503,19 @@ def score_timeline(loud, segments, moments):
         a, b = max(0, int(m["s"])), min(n, int(m["e"]) + 1)
         llm[a:b] = np.maximum(llm[a:b], m["score"] / 10.0)
 
-    score = (1.0 * loud_z
-             + 1.5 * np.minimum(laugh, 3)
-             + 0.4 * np.minimum(excl, 1)
-             + 0.6 * np.minimum(mat, 2)
-             + 0.15 * np.minimum(words, 6)
-             + 3.0 * llm)
     k = np.ones(5) / 5
-    smooth = np.convolve(score, k, mode="same")
-    return smooth, loud_z
+    # разбор оценки: вклад каждого признака (сглаженный); их сумма = итоговая оценка
+    parts = {
+        "громкость": 1.0 * loud_z,
+        "смех": 1.5 * np.minimum(laugh, 3),
+        "восклицания": 0.4 * np.minimum(excl, 1),
+        "мат": 0.6 * np.minimum(mat, 2),
+        "речь": 0.15 * np.minimum(words, 6),
+        "модель": 3.0 * llm,
+    }
+    parts = {name: np.convolve(arr, k, mode="same") for name, arr in parts.items()}
+    smooth = sum(parts.values())
+    return smooth, loud_z, parts
 
 
 def _snap_start(t, segments):
@@ -481,17 +532,20 @@ def _snap_end(t, segments):
     return t
 
 
-def pick_clips(smooth, loud_z, segments, moments, dur):
+def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
+    """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём."""
     import numpy as np
     order = np.argsort(-smooth)
     clips = []
+    busy = [{"s": a, "e": b} for a, b in taken]
     for peak in order:
         if len(clips) >= CONFIG["clips"]:
             break
         if smooth[peak] <= 0.5:
             break
         peak = float(peak)
-        if any(c["s"] - CONFIG["min_gap"] < peak < c["e"] + CONFIG["min_gap"] for c in clips):
+        if any(c["s"] - CONFIG["min_gap"] < peak < c["e"] + CONFIG["min_gap"]
+               for c in clips + busy):
             continue
 
         m = next((m for m in moments if m["s"] - 3 <= peak <= m["e"] + 3), None)
@@ -512,7 +566,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur):
             e = min(dur, s + CONFIG["min_len"])
         if e - s < CONFIG["min_len"] * 0.8:
             continue
-        if any(not (e <= c["s"] or s >= c["e"]) for c in clips):
+        if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
 
         # точки зума: самые громкие пики внутри клипа
@@ -535,16 +589,26 @@ def pick_clips(smooth, loud_z, segments, moments, dur):
             title = " ".join(first)
         # без мата в названии файла и отчёте
         title = " ".join(_censor(w) for w in title.split())
+        pk = int(peak)
         clips.append({"s": round(s, 2), "e": round(e, 2), "peak": peak,
-                      "score": float(smooth[int(peak)]), "zooms": sorted(zooms),
+                      "score": float(smooth[pk]), "zooms": sorted(zooms),
+                      "parts": {k: round(float(v[pk]), 2) for k, v in (parts or {}).items()},
                       "title": title, "reason": reason})
     return sorted(clips, key=lambda c: -c["score"])
 
 
 # ---------------- звуки для мата ----------------
 
+def user_dir():
+    """%APPDATA%\\AutoClip — настройки, свои звуки, история; обновление программы их не трогает."""
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    d = os.path.join(base, "AutoClip")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SOUNDS_DIR = os.path.join(SCRIPT_DIR, "звуки")
+SOUNDS_DIR = os.path.join(user_dir(), "звуки")
 SOUND_EXT = (".wav", ".mp3", ".ogg", ".m4a", ".flac", ".aac")
 
 # встроенные звуки генерируются через ffmpeg, без чужих файлов
@@ -566,6 +630,7 @@ BUILTIN_SOUNDS = {
 
 def prepare_sounds():
     """Создаёт папку «звуки» со встроенными звуками (один раз)."""
+    migrate_user_data()
     os.makedirs(SOUNDS_DIR, exist_ok=True)
     for name, spec in BUILTIN_SOUNDS.items():
         path = os.path.join(SOUNDS_DIR, name + ".wav")
@@ -625,18 +690,20 @@ def _censor(w):
     return (letters[:1] or "*") + "*" * max(2, len(letters) - 1)
 
 
-def _display_word(w):
+def _display_word(w, cfg=None):
+    cfg = cfg or CONFIG
     w = w.strip()
     w = re.sub(r"^[\"«(]+|[\"»),.;:]+$", "", w)
     w = _censor(w)
-    if CONFIG["sub_uppercase"]:
+    if cfg["sub_uppercase"]:
         w = w.upper()
     return _ass_escape(w)
 
 
-def build_ass(words, w, h, path):
+def build_ass(words, w, h, path, cfg=None):
     """words: [{'s','e','w'}] со временем относительно начала клипа."""
-    fs = int(CONFIG["sub_size"] * w / 1080)
+    cfg = cfg or CONFIG
+    fs = int(cfg["sub_size"] * w / 1080)
     outline = max(3, int(fs * 0.09))
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -647,7 +714,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{CONFIG["sub_font"]},{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},2,5,40,40,0,204
+Style: Main,{cfg["sub_font"]},{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},2,5,40,40,0,204
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -658,7 +725,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if cur:
             prev = cur[-1]
             chars = sum(len(x["w"]) + 1 for x in cur) + len(wd["w"])
-            if (len(cur) >= CONFIG["sub_max_words"] or chars > CONFIG["sub_max_chars"]
+            if (len(cur) >= cfg["sub_max_words"] or chars > cfg["sub_max_chars"]
                     or wd["s"] - prev["e"] > 0.45 or re.search(r"[.!?…]$", prev["w"])):
                 chunks.append(cur)
                 cur = []
@@ -666,10 +733,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if cur:
         chunks.append(cur)
 
-    x, y = w // 2, int(h * CONFIG["sub_y"])
+    x, y = w // 2, int(h * cfg["sub_y"])
     lines = []
     for ci, ch in enumerate(chunks):
-        disp = [_display_word(x_["w"]) for x_ in ch]
+        disp = [_display_word(x_["w"], cfg) for x_ in ch]
         if not any(disp):
             continue
         next_start = chunks[ci + 1][0]["s"] if ci + 1 < len(chunks) else ch[-1]["e"] + 0.3
@@ -692,22 +759,37 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ---------------- 7. рендер ----------------
 
-_ENCODER = None
+_ENCODER = None            # какой кодек сработал: h264_nvenc или libx264
 WHISPER_DEVICE = "кэш"     # на чём шла расшифровка: cuda / cpu / кэш
 
 
-def _encoders():
-    q = str(CONFIG["quality"])
-    return [
-        ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", q,
-         "-b:v", "0", "-maxrate", "60M", "-bufsize", "120M", "-spatial-aq", "1",
-         "-temporal-aq", "1", "-profile:v", "high"],
-        ["-c:v", "libx264", "-preset", "slow", "-crf", q, "-profile:v", "high"],
-    ]
+def _encoders(cfg):
+    q = str(cfg["quality"])
+    return {
+        "h264_nvenc": ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr",
+                       "-cq", q, "-b:v", "0", "-maxrate", "60M", "-bufsize", "120M",
+                       "-spatial-aq", "1", "-temporal-aq", "1", "-profile:v", "high"],
+        "libx264": ["-c:v", "libx264", "-preset", "slow", "-crf", q, "-profile:v", "high"],
+    }
 
 
-def render_clip(video, clip, segments, vinfo, out_path, tmpdir):
+def clip_words(segments, s, e):
+    """Слова клипа со временем относительно его начала."""
+    words = []
+    for seg in segments:
+        if seg["e"] < s or seg["s"] > e:
+            continue
+        for wd in seg["words"]:
+            if wd["s"] >= s - 0.05 and wd["e"] <= e + 0.05:
+                words.append({"s": round(wd["s"] - s, 3), "e": round(wd["e"] - s, 3), "w": wd["w"]})
+    return words
+
+
+def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None):
+    """clip: {'s', 'e', 'zooms'} во времени записи. Возвращает число запиканных мест или None.
+    Клип сначала собирается во временной папке и только потом встаёт на место out_path."""
     global _ENCODER
+    cfg = cfg or CONFIG
     s, e = clip["s"], clip["e"]
     dur = e - s
     # родное разрешение записи — без пережатия в меньшее
@@ -717,41 +799,34 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir):
     else:
         W, H = vinfo["w"] - vinfo["w"] % 2, vinfo["h"] - vinfo["h"] % 2
 
-    # слова клипа (время относительно начала клипа)
-    words = []
-    for seg in segments:
-        if seg["e"] < s or seg["s"] > e:
-            continue
-        for wd in seg["words"]:
-            if wd["s"] >= s - 0.05 and wd["e"] <= e + 0.05:
-                words.append({"s": round(wd["s"] - s, 3), "e": round(wd["e"] - s, 3), "w": wd["w"]})
+    words = clip_words(segments, s, e)
+    zooms = [z for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
 
     # --- видео ---
     vf = []
     if vinfo["w"] > vinfo["h"]:                       # если вдруг запись горизонтальная
         vf.append(f"crop={W}:{H}")
     vf.append("setsar=1")
-    if CONFIG["zoom"] and clip["zooms"]:
-        A = CONFIG["zoom_amount"]
+    if cfg["zoom"] and zooms:
+        A = cfg["zoom_amount"]
         env = "+".join(
             f"clip((t-{z - s - 0.12:.2f})/0.12,0,1)*clip(({z - s + 1.6:.2f}-t)/0.35,0,1)"
-            for z in clip["zooms"])
+            for z in zooms)
         Z = f"(1+{A}*min(1,{env}))"
-        fy = CONFIG["zoom_focus_y"]
+        fy = cfg["zoom_focus_y"]
         vf.append(f"scale=w='2*trunc({W}*{Z}/2)':h='2*trunc({H}*{Z}/2)':eval=frame:flags=lanczos")
         vf.append(f"crop={W}:{H}:x='(iw-ow)/2':y='(ih-oh)*{fy}'")
-    ass_name = None
-    if CONFIG["subs"] and words:
-        ass_name = f"subs_{os.getpid()}.ass"
-        build_ass(words, W, H, os.path.join(tmpdir, ass_name))
+    if cfg["subs"] and words:
+        ass_name = "subs.ass"
+        build_ass(words, W, H, os.path.join(tmpdir, ass_name), cfg)
         vf.append(f"ass={ass_name}")
     vf.append("format=yuv420p")
     vgraph = "[0:v]" + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
     bleeps = []
-    if CONFIG["bleep"]:
-        pad = CONFIG["bleep_pad"]
+    if cfg["bleep"]:
+        pad = cfg["bleep_pad"]
         for wd in words:
             if is_profane(wd["w"]):
                 a, b = max(0.0, wd["s"] - pad), min(dur, wd["e"] + pad)
@@ -760,7 +835,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir):
                 else:
                     bleeps.append([a, b])
     fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
-    snd = sound_path(CONFIG["bleep_sound"]) if bleeps else None
+    snd = sound_path(cfg["bleep_sound"]) if bleeps else None
     extra_in = []
     if bleeps:
         E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in bleeps)
@@ -769,7 +844,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir):
             sdur = sound_duration(snd)
             extra_in = ["-i", os.path.abspath(snd)]
             n = len(bleeps)
-            agraph += f";[1:a]{fmt},volume={CONFIG['bleep_volume']},asplit={n}" + \
+            agraph += f";[1:a]{fmt},volume={cfg['bleep_volume']},asplit={n}" + \
                       "".join(f"[s{i}]" for i in range(n))
             for i, (a, b) in enumerate(bleeps):
                 L = max(0.12, min(sdur, (b - a) + 0.35))
@@ -783,23 +858,253 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir):
     else:
         agraph = f"[0:a]{fmt}[aout]"
 
+    tmp_out = os.path.join(tmpdir, "render.mp4")
     graph = vgraph + ";" + agraph
     base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{s:.3f}", "-t", f"{dur:.3f}",
             "-i", os.path.abspath(video)] + extra_in + ["-filter_complex", graph,
             "-map", "[vout]", "-map", "[aout]"]
-    tail = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-movflags", "+faststart",
-            os.path.abspath(out_path)]
+    tail = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-movflags", "+faststart", tmp_out]
 
-    encs = [_ENCODER] if _ENCODER else _encoders()
+    encs = _encoders(cfg)
+    names = [_ENCODER] if _ENCODER else list(encs)
     last_err = ""
-    for enc in encs:
-        p = run(base + enc + tail, cwd=tmpdir)
+    for name in names:
+        p = run(base + encs[name] + tail, cwd=tmpdir, cancel=cancel)
         if p.returncode == 0:
-            _ENCODER = enc
+            _ENCODER = name
+            replace_file(tmp_out, out_path)
             return len(bleeps)
         last_err = p.stderr
     log("   ❌ ffmpeg:\n" + last_err[-1500:])
     return None
+
+
+# ---------------- 8. файлы и папка пользователя ----------------
+
+SETTINGS_PATH = os.path.join(user_dir(), "настройки.json")
+
+
+def migrate_user_data():
+    """Переносит настройки и свои звуки из папки программы (версия 1) в %APPDATA%\\AutoClip."""
+    old = os.path.join(SCRIPT_DIR, "настройки.json")
+    if os.path.isfile(old) and not os.path.exists(SETTINGS_PATH):
+        shutil.move(old, SETTINGS_PATH)
+    old_sounds = os.path.join(SCRIPT_DIR, "звуки")
+    if os.path.isdir(old_sounds) and os.path.abspath(old_sounds) != os.path.abspath(SOUNDS_DIR):
+        os.makedirs(SOUNDS_DIR, exist_ok=True)
+        for f in os.listdir(old_sounds):
+            src, dst = os.path.join(old_sounds, f), os.path.join(SOUNDS_DIR, f)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                shutil.move(src, dst)
+        try:
+            os.rmdir(old_sounds)        # только если папка опустела
+        except OSError:
+            pass
+
+
+def trash(path):
+    """Удаление только в корзину Windows — насовсем программа ничего не удаляет."""
+    if not os.path.exists(path):
+        return
+    try:
+        from send2trash import send2trash
+    except ImportError:
+        raise AutoClipError("❌ Не установлен send2trash. Запусти install.bat.")
+    send2trash(os.path.abspath(path))
+
+
+def replace_file(src, dst):
+    """Ставит новый файл на место старого; старый уходит в корзину."""
+    if os.path.exists(dst):
+        trash(dst)
+    shutil.move(src, dst)
+
+
+def now_iso():
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def parse_time(t):
+    """'95.5', '1:35', '1:02:10' → секунды."""
+    if isinstance(t, (int, float)):
+        return float(t)
+    parts = str(t).strip().replace(",", ".").split(":")
+    try:
+        sec = 0.0
+        for x in parts:
+            sec = sec * 60 + float(x)
+        return sec
+    except ValueError:
+        raise AutoClipError(f"❌ Не понял время «{t}». Пиши секундами или как 1:02:10.")
+
+
+# ---------------- 9. проект записи (project.json) ----------------
+
+PROJECT_FILE = "project.json"
+PROJECT_VERSION = 1
+STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
+# что можно переопределить у отдельного клипа
+OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook")
+# настройки, которые запоминаются в проекте и нужны для пересборки
+RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "sub_max_words", "sub_max_chars",
+               "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
+               "bleep_sound", "bleep_volume", "bleep_pad", "quality", "hook")
+
+
+def project_path(path):
+    """Запись, папка «_clips» или сам project.json → путь к project.json."""
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        return os.path.join(path, PROJECT_FILE)
+    if path.lower().endswith(".json"):
+        return path
+    return os.path.splitext(path)[0] + "_clips" + os.sep + PROJECT_FILE
+
+
+def load_project(path):
+    pp = project_path(path)
+    if not os.path.isfile(pp):
+        raise AutoClipError(f"❌ Нет проекта: {pp}\n   Сначала нарежь запись.")
+    with open(pp, encoding="utf-8") as f:
+        proj = json.load(f)
+    proj["_path"] = pp
+    return proj
+
+
+def save_project(proj):
+    """Пишет project.json через временный файл, чтобы при сбое не остался обрывок."""
+    pp = proj["_path"]
+    data = {k: v for k, v in proj.items() if not k.startswith("_")}
+    tmp = pp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, pp)
+
+
+def new_project(video, vinfo, out_dir, transcript):
+    return {"_path": os.path.join(out_dir, PROJECT_FILE), "version": PROJECT_VERSION,
+            "source": os.path.abspath(video), "source_info": vinfo,
+            "transcript": os.path.abspath(transcript), "created": now_iso(),
+            "settings": {}, "run": {}, "clips": []}
+
+
+def find_clip(proj, ref):
+    """Клип по id («c03»), номеру («3») или имени файла."""
+    ref = str(ref).strip()
+    for c in proj["clips"]:
+        if ref in (c["id"], c["file"]) or (ref.isdigit() and int(ref) == c["num"]):
+            return c
+    raise AutoClipError(f"❌ В проекте нет клипа «{ref}».")
+
+
+def clip_config(proj, clip):
+    """Настройки рендера клипа: общие → сохранённые в проекте → личные клипа."""
+    cfg = dict(CONFIG)
+    cfg.update(proj.get("settings", {}))
+    cfg.update({k: v for k, v in clip.get("overrides", {}).items() if k in OVERRIDE_KEYS})
+    return cfg
+
+
+def make_clip_record(c, num, file):
+    return {
+        "id": f"c{num:02d}", "num": num, "file": file,
+        "start": c["s"], "end": c["e"], "peak": c["peak"],
+        "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
+        "title": c["title"], "reason": c["reason"],
+        "zooms": c["zooms"],
+        "hook": {"on": False, "start": None, "end": None, "why": "хук ещё не сделан (этап 4)"},
+        "status": "new", "overrides": {}, "bleeps": None,
+        "created": now_iso(), "rendered": None,
+        "published": {},       # площадка → {"date", "url", "views": [...]}
+    }
+
+
+def write_report(proj):
+    out_dir = os.path.dirname(proj["_path"])
+    vi = proj["source_info"]
+    rep = [f"Источник: {proj['source']}", ""]
+    clips = sorted((c for c in proj["clips"] if c["status"] != "rejected"),
+                   key=lambda c: -c["score"])
+    for c in clips:
+        rep.append(f"{c['num']:02d}. {fmt_time(c['start'])}–{fmt_time(c['end'])} "
+                   f"({c['end'] - c['start']:.0f} с), оценка {c['score']:.1f}, "
+                   f"{STATUSES.get(c['status'], c['status'])}")
+        rep += [f"    файл: {c['file']}", f"    про что: {c['title']}"]
+        if c["reason"]:
+            rep.append(f"    почему: {c['reason']}")
+        parts = ", ".join(f"{k} {v:+.1f}" for k, v in c["score_parts"].items() if abs(v) >= 0.05)
+        if parts:
+            rep.append(f"    из чего оценка: {parts}")
+        rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
+                   f"зумов: {len(c['zooms'])}")
+        if c["overrides"]:
+            rep.append("    свои настройки: " +
+                       ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
+        rep.append("")
+    run_info = proj.get("run", {})
+    rep += [f"Запись: {fmt_time(vi['dur'])}, {vi['w']}x{vi['h']}"]
+    if run_info:
+        rep.append(f"Время работы: {run_info.get('minutes', 0):.1f} мин")
+        rep += [f"    {n}: {sec:.0f} с" for n, sec in run_info.get("timings", [])]
+        if run_info.get("encoder"):
+            rep.append(f"    кодек: {run_info['encoder']}")
+    with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(rep))
+
+
+def load_segments(proj):
+    path = proj.get("transcript", "")
+    if not os.path.isfile(path):
+        raise AutoClipError(f"❌ Нет расшифровки: {path}\n   Нарежь запись заново.")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None, cancel=None):
+    """Пересобирает один клип по записи в project.json, без повторной расшифровки.
+    start/end — новое начало/конец в секундах записи; overrides — личные настройки клипа
+    (значение None убирает переопределение). Возвращает обновлённую запись клипа."""
+    need_ffmpeg()
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    if clip["status"] == "rejected":
+        raise AutoClipError("❌ Клип отклонён, его файл в корзине.")
+    src = proj["source"]
+    if not os.path.isfile(src):
+        raise AutoClipError(f"❌ Не найдена исходная запись: {src}")
+    dur = proj["source_info"]["dur"]
+    s = clip["start"] if start is None else parse_time(start)
+    e = clip["end"] if end is None else parse_time(end)
+    s, e = max(0.0, s), min(dur, e)
+    if e - s < 3:
+        raise AutoClipError("❌ Клип получается короче 3 секунд.")
+    for k, v in (overrides or {}).items():
+        if k not in OVERRIDE_KEYS:
+            raise AutoClipError(f"❌ Настройку «{k}» нельзя менять у отдельного клипа.")
+        if v is None:
+            clip["overrides"].pop(k, None)
+        else:
+            clip["overrides"][k] = v
+
+    segments = load_segments(proj)
+    cfg = clip_config(proj, clip)
+    out = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    log(f"🔁 Пересобираю {clip['file']} ({fmt_time(s)}–{fmt_time(e)})")
+    if progress:
+        progress("рендер", 0, clip["file"])
+    t0 = time.time()
+    with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
+        bl = render_clip(src, {"s": s, "e": e, "zooms": clip["zooms"]}, segments,
+                         proj["source_info"], out, tmp, cfg, cancel)
+    if bl is None:
+        raise AutoClipError("❌ ffmpeg не смог собрать клип.")
+    clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso())
+    save_project(proj)
+    write_report(proj)
+    if progress:
+        progress("рендер", 100, clip["file"])
+    log(f"✅ Готово за {time.time() - t0:.1f} с")
+    return clip
 
 
 # ---------------- main ----------------
@@ -818,50 +1123,72 @@ def main():
             pass
 
     ap = argparse.ArgumentParser(description="Нарезка стрима на клипы для TikTok/Shorts/Reels")
-    ap.add_argument("video", nargs="?", help="путь к видео")
+    ap.add_argument("video", nargs="?",
+                    help="путь к видео (для --rebuild можно папку _clips или project.json)")
     ap.add_argument("--clips", type=int, help="сколько клипов")
     ap.add_argument("--llm", choices=["auto", "ollama", "anthropic", "none"])
     ap.add_argument("--model", help="модель Whisper (large-v3 / medium / small)")
-    ap.add_argument("--no-subs", action="store_true")
-    ap.add_argument("--no-zoom", action="store_true")
-    ap.add_argument("--no-bleep", action="store_true")
+    ap.add_argument("--subs", action=argparse.BooleanOptionalAction, default=None)
+    ap.add_argument("--zoom", action=argparse.BooleanOptionalAction, default=None)
+    ap.add_argument("--bleep", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--sound", help="звук на мат: перелистывание / буп / свист / бип / тишина / свой файл")
     ap.add_argument("--analyze-only", action="store_true", help="только найти моменты, без рендера")
+    ap.add_argument("--rebuild", metavar="КЛИП",
+                    help="пересобрать один клип (номер или id) без повторной расшифровки")
+    ap.add_argument("--start", help="для --rebuild: новое начало в записи (сек или 1:02:10)")
+    ap.add_argument("--end", help="для --rebuild: новый конец в записи")
     args = ap.parse_args()
 
     video = args.video
     if not video:
         video = input("Перетащи сюда видео и нажми Enter: ").strip().strip('"').strip("'")
-    if not os.path.isfile(video):
+    if not os.path.exists(video):
         log(f"❌ Файл не найден: {video}")
         sys.exit(1)
-    if args.clips:
-        CONFIG["clips"] = args.clips
-    if args.llm:
-        CONFIG["llm"] = args.llm
-    if args.model:
-        CONFIG["whisper_model"] = args.model
-    if args.no_subs:
-        CONFIG["subs"] = False
-    if args.no_zoom:
-        CONFIG["zoom"] = False
-    if args.no_bleep:
-        CONFIG["bleep"] = False
-    if args.sound:
-        CONFIG["bleep_sound"] = args.sound
+    migrate_user_data()
+    flags = {"subs": args.subs, "zoom": args.zoom, "bleep": args.bleep,
+             "bleep_sound": args.sound}
+    try:
+        if args.rebuild:
+            # флаги становятся личными настройками этого клипа
+            rebuild_clip(video, args.rebuild, args.start, args.end,
+                         {k: v for k, v in flags.items() if v is not None})
+            return
+        if args.clips:
+            CONFIG["clips"] = args.clips
+        if args.llm:
+            CONFIG["llm"] = args.llm
+        if args.model:
+            CONFIG["whisper_model"] = args.model
+        CONFIG.update({k: v for k, v in flags.items() if v is not None})
+        process(video, analyze_only=args.analyze_only)
+    except AutoClipError as e:
+        log(str(e))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        log("⛔ Остановлено.")
+        sys.exit(1)
 
-    process(video, analyze_only=args.analyze_only)
+
+STAGES = ("звук", "расшифровка", "модель", "поиск", "рендер")
 
 
-def process(video, analyze_only=False):
-    """Вся обработка одного видео. Возвращает папку с клипами (или None)."""
+def process(video, analyze_only=False, progress=None, cancel=None):
+    """Вся обработка одного видео. Возвращает папку с клипами (или None).
+    progress(этап, процент 0–100 внутри этапа, сообщение) — этапы из STAGES;
+    cancel — threading.Event или функция; при остановке — исключение Cancelled.
+    Уже нарезанные клипы со статусом «хороший»/«выложен»/«отклонён» сохраняются,
+    новые моменты рядом с ними не берутся; старые «новые» клипы уходят в корзину."""
+    def prog(stage, pct, msg=""):
+        if progress:
+            progress(stage, pct, msg)
+
     need_ffmpeg()
     prepare_sounds()
     try:
         import numpy  # noqa: F401
     except ImportError:
-        log("❌ Не установлен numpy. Запусти install.bat.")
-        sys.exit(1)
+        raise AutoClipError("❌ Не установлен numpy. Запусти install.bat.")
 
     t_start = time.time()
     vinfo = probe(video)
@@ -871,78 +1198,102 @@ def process(video, analyze_only=False):
 
     stem = os.path.splitext(os.path.abspath(video))[0]
     out_dir = stem + "_clips"
-    os.makedirs(out_dir, exist_ok=True)
     cache = stem + ".transcript.json"
 
     timings = []
 
     def mark(name, t0):
-        timings.append((name, time.time() - t0))
+        timings.append((name, round(time.time() - t0, 1)))
         return time.time()
 
     with tempfile.TemporaryDirectory(prefix="autoclip_") as tmp:
         wav = os.path.join(tmp, "audio.wav")
         t = time.time()
-        extract_audio(video, wav)
+        prog("звук", 0, "достаю звук")
+        extract_audio(video, wav, cancel)
         loud = loudness_per_second(wav)
+        prog("звук", 100)
         t = mark("звук и громкость", t)
-        segments = transcribe(wav, cache, vinfo["dur"])
+        prog("расшифровка", 0)
+        segments = transcribe(wav, cache, vinfo["dur"], progress, cancel)
+        prog("расшифровка", 100)
         t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
     n_words = sum(len(s["words"]) for s in segments)
     n_mat = sum(is_profane(w["w"]) for s in segments for w in s["words"])
     log(f"   слов: {n_words}, из них мата: {n_mat}")
 
+    check_cancel(cancel)
     mode = pick_llm(CONFIG["llm"])
     moments = []
+    prog("модель", 0)
     if mode != "none":
         log(f"🤖 Оцениваю моменты через {mode}...")
-        moments = llm_moments(segments, mode)
+        moments = llm_moments(segments, mode, progress, cancel)
         log(f"   модель предложила {len(moments)} моментов")
     else:
         log("🤖 Без языковой модели — ищу по звуку и речи.")
-
+    prog("модель", 100)
     t = mark("языковая модель", t)
-    smooth, loud_z = score_timeline(loud, segments, moments)
-    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"])
+
+    prog("поиск", 0)
+    proj = new_project(video, vinfo, out_dir, cache)
+    if os.path.isfile(os.path.join(out_dir, PROJECT_FILE)):
+        old = load_project(out_dir)
+        proj["clips"] = old["clips"]
+        proj["created"] = old.get("created", proj["created"])
+    kept = [c for c in proj["clips"] if c["status"] != "new"]
+    stale = [c for c in proj["clips"] if c["status"] == "new"]
+    if kept:
+        log(f"   оставляю {len(kept)} уже разобранных клипов")
+
+    smooth, loud_z, parts = score_timeline(loud, segments, moments)
+    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts,
+                       taken=[(c["start"], c["end"]) for c in kept])
+    prog("поиск", 100)
     if not clips:
         log("😕 Ярких моментов не нашлось. Попробуй уменьшить min_len или подключить модель.")
         return None
     log(f"✂️  Нашёл {len(clips)} клипов")
-
     t = mark("поиск моментов", t)
-    report = [f"Источник: {video}", ""]
-    made = []
+
+    if analyze_only:
+        for i, c in enumerate(clips, 1):
+            log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
+                f"оценка {c['score']:.1f} — {c['title']}")
+        return out_dir
+
+    os.makedirs(out_dir, exist_ok=True)
+    for c in stale:                              # прошлая нарезка, которую ещё не смотрели
+        trash(os.path.join(out_dir, c["file"]))
+    proj["clips"] = kept
+    proj["settings"] = {k: CONFIG[k] for k in RENDER_KEYS if k in CONFIG}
+    proj["run"] = {"date": now_iso(), "timings": timings}
+    save_project(proj)
+
+    num = max((c["num"] for c in kept), default=0)
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
         for i, c in enumerate(clips, 1):
-            name = f"{i:02d}_{safe_name(c['title'])}.mp4"
-            out = os.path.join(out_dir, name)
-            line = (f"{i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} "
-                    f"({c['e'] - c['s']:.0f} с), оценка {c['score']:.1f}")
-            if analyze_only:
-                log("   " + line + f" — {c['title']}")
-                bl = "-"
-            else:
-                log(f"   [{i}/{len(clips)}] {name}")
-                bl = render_clip(video, c, segments, vinfo, out, tmp)
-                if bl is None:
-                    continue
-            made.append({"file": name, "title": c["title"], "start": c["s"], "end": c["e"]})
-            report += [line, f"    файл: {name}", f"    про что: {c['title']}"]
-            if c["reason"]:
-                report.append(f"    почему: {c['reason']}")
-            report.append(f"    запикано: {bl}, зумов: {len(c['zooms'])}")
-            report.append("")
+            check_cancel(cancel)
+            num += 1
+            name = f"{num:02d}_{safe_name(c['title'])}.mp4"
+            log(f"   [{i}/{len(clips)}] {name}")
+            prog("рендер", (i - 1) / len(clips) * 100, name)
+            rec = make_clip_record(c, num, name)
+            rec["bleeps"] = render_clip(video, c, segments, vinfo, os.path.join(out_dir, name),
+                                        tmp, clip_config(proj, rec), cancel)
+            if rec["bleeps"] is None:
+                num -= 1
+                continue
+            rec["rendered"] = now_iso()
+            proj["clips"].append(rec)
+            save_project(proj)                   # после каждого клипа: остановка ничего не теряет
+    prog("рендер", 100)
 
     mark("рендер клипов", t)
-    if made and _ENCODER:
-        timings.append((f"кодек: {_ENCODER[1]}", None))
-    report += [f"Запись: {fmt_time(vinfo['dur'])}, {vinfo['w']}x{vinfo['h']}",
-               f"Время работы: {(time.time() - t_start) / 60:.1f} мин"]
-    report += [f"    {n}: {sec:.0f} с" if sec is not None else f"    {n}" for n, sec in timings]
-    with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(report))
-    with open(os.path.join(out_dir, "clips.json"), "w", encoding="utf-8") as f:
-        json.dump(made, f, ensure_ascii=False, indent=1)
+    proj["run"].update(timings=timings, minutes=round((time.time() - t_start) / 60, 2),
+                       whisper=WHISPER_DEVICE, encoder=_ENCODER)
+    save_project(proj)
+    write_report(proj)
     log(f"✅ Готово за {(time.time() - t_start) / 60:.1f} мин → {out_dir}")
     return out_dir
 

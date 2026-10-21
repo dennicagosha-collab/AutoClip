@@ -24,7 +24,8 @@ try:
 except Exception:
     HAS_DND = False
 
-SETTINGS = os.path.join(HERE, "настройки.json")
+autoclip.migrate_user_data()
+SETTINGS = autoclip.SETTINGS_PATH
 QUALITY = {"Максимальное": 14, "Высокое": 16, "Файлы полегче": 19}
 WEBCAM = {"Вебка сверху": 0.30, "Вебка снизу": 0.70, "По центру": 0.50}
 VIDEO_TYPES = [("Видео", "*.mp4 *.mkv *.mov *.flv *.ts *.webm"), ("Все файлы", "*.*")]
@@ -52,6 +53,7 @@ class App:
         self.files = []
         self.last_out = None
         self.busy = False
+        self.cancel = threading.Event()
 
         root.title("AutoClip — нарезка стримов")
         root.configure(bg=BG)
@@ -146,8 +148,10 @@ class App:
                              activebackground="#e23e5b", activeforeground="white",
                              cursor="hand2", height=2)
         self.btn.pack(fill="x", padx=16, pady=(8, 6))
-        self.prog = ttk.Progressbar(left, mode="determinate", value=0)
+        self.prog = ttk.Progressbar(left, mode="determinate", value=0, maximum=100)
         self.prog.pack(fill="x", padx=16)
+        self.stage = tk.Label(left, text="", bg=BG, fg=MUTED, font=("Segoe UI", 9), anchor="w")
+        self.stage.pack(fill="x", padx=16)
 
         # --- лог ---
         self.logbox = tk.Text(left, bg=PANEL, fg=FG, bd=0, wrap="word", height=12,
@@ -191,6 +195,8 @@ class App:
                 m = self.q.get_nowait()
                 if isinstance(m, tuple) and m[0] == "__done__":
                     self.finish(m[1])
+                elif isinstance(m, tuple) and m[0] == "__prog__":
+                    self.show_progress(*m[1:])
                 else:
                     self.write(m)
         except queue.Empty:
@@ -267,8 +273,16 @@ class App:
             self.open_path(self.last_out)
 
     # ---------- запуск ----------
+    def show_progress(self, stage, pct, msg):
+        stages = autoclip.STAGES
+        i = stages.index(stage) if stage in stages else 0
+        self.prog.configure(value=(i + pct / 100) / len(stages) * 100)
+        self.stage.configure(text=f"Шаг {i + 1} из {len(stages)}: {stage}  {msg}")
+
     def start(self):
         if self.busy:
+            self.cancel.set()
+            self.btn.configure(text="Останавливаю…", state="disabled")
             return
         if not self.ffmpeg_ok:
             messagebox.showerror("AutoClip", "Не найден ffmpeg — смотри сообщение внизу.")
@@ -291,10 +305,10 @@ class App:
         self.save_settings()
 
         self.busy = True
-        self.btn.configure(text="Работаю…", state="disabled", bg="#5a3340")
+        self.cancel.clear()
+        self.btn.configure(text="■  Остановить", bg="#5a3340")
         self.btn_open.configure(state="disabled")
-        self.prog.configure(mode="indeterminate")
-        self.prog.start(12)
+        self.prog.configure(value=0)
         threading.Thread(target=self.worker, args=(list(self.files),), daemon=True).start()
 
     def worker(self, files):
@@ -303,17 +317,22 @@ class App:
             if len(files) > 1:
                 self.q.put(f"\n===== {i}/{len(files)}: {os.path.basename(f)} =====")
             try:
-                out = autoclip.process(f) or out
-            except SystemExit:
-                self.q.put("⛔ Остановлено из-за ошибки выше.")
+                out = autoclip.process(
+                    f, progress=lambda st, pct, msg: self.q.put(("__prog__", st, pct, msg)),
+                    cancel=self.cancel) or out
+            except autoclip.Cancelled as e:
+                self.q.put(str(e))
+                break
+            except autoclip.AutoClipError as e:
+                self.q.put(str(e))
             except Exception:
                 self.q.put("❌ Неожиданная ошибка:\n" + traceback.format_exc()[-1500:])
         self.q.put(("__done__", out))
 
     def finish(self, out):
         self.busy = False
-        self.prog.stop()
-        self.prog.configure(mode="determinate", value=0)
+        self.prog.configure(value=0)
+        self.stage.configure(text="")
         self.btn.configure(text="✂  Нарезать", state="normal", bg=ACCENT)
         if out:
             self.last_out = out

@@ -14,12 +14,12 @@ if errorlevel 1 goto badpython
 echo.
 echo [1/3] Ставлю библиотеки, это несколько минут...
 %PY% -m pip install --upgrade pip
-%PY% -m pip install --only-binary=:all: faster-whisper numpy tkinterdnd2 nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+%PY% -m pip install --only-binary=:all: faster-whisper numpy tkinterdnd2 send2trash pytest nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 if errorlevel 1 goto pipfail
 
 echo.
 echo [2/3] Проверяю, что всё встало...
-%PY% -c "import faster_whisper, av, ctranslate2, numpy, tkinterdnd2; print('Библиотеки на месте')"
+%PY% -c "import faster_whisper, av, ctranslate2, numpy, tkinterdnd2, send2trash; print('Библиотеки на месте')"
 if errorlevel 1 goto pipfail
 
 echo.
