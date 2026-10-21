@@ -187,6 +187,14 @@ def _windows_cuda_dlls():
             os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
 
+def _read_wav(wav):
+    """WAV 16 кГц моно → float32 для Whisper (3 часа ≈ 0,7 ГБ памяти)."""
+    import numpy as np
+    with wave.open(wav, "rb") as wf:
+        x = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+    return x.astype(np.float32) / 32768.0
+
+
 def transcribe(wav, cache_path, dur):
     if os.path.exists(cache_path):
         log("📝 Расшифровка уже есть, беру из кэша.")
@@ -200,12 +208,14 @@ def transcribe(wav, cache_path, dur):
         log("❌ Не установлен faster-whisper. Запусти install.bat.")
         sys.exit(1)
 
+    global WHISPER_DEVICE
     name = CONFIG["whisper_model"]
     model = None
     for device, ctype in (("cuda", "float16"), ("cpu", "int8")):
         try:
             log(f"🧠 Загружаю Whisper {name} ({device})... первый раз скачается ~3 ГБ")
             model = WhisperModel(name, device=device, compute_type=ctype)
+            WHISPER_DEVICE = f"{device} {ctype}"
             if device == "cpu":
                 log("⚠️  Видеокарта не подхватилась, считаю на процессоре — будет в разы медленнее.")
             break
@@ -218,8 +228,9 @@ def transcribe(wav, cache_path, dur):
     log("📝 Расшифровываю речь (на 3 часа записи — примерно 10–25 минут на видеокарте)...")
     t0 = time.time()
     try:
+        # звук отдаём массивом: так faster-whisper не зависит от версии PyAV
         segments, _info = model.transcribe(
-            wav,
+            _read_wav(wav),
             language=CONFIG["language"],
             word_timestamps=True,
             vad_filter=True,
@@ -520,7 +531,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur):
 
         if not title:
             first = [w["w"] for seg in segments if seg["e"] > s and seg["s"] < e
-                     for w in seg["words"]][:6]
+                     for w in seg["words"] if s <= w["s"] < e][:6]
             title = " ".join(first)
         # без мата в названии файла и отчёте
         title = " ".join(_censor(w) for w in title.split())
@@ -682,6 +693,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # ---------------- 7. рендер ----------------
 
 _ENCODER = None
+WHISPER_DEVICE = "кэш"     # на чём шла расшифровка: cuda / cpu / кэш
 
 
 def _encoders():
@@ -862,11 +874,20 @@ def process(video, analyze_only=False):
     os.makedirs(out_dir, exist_ok=True)
     cache = stem + ".transcript.json"
 
+    timings = []
+
+    def mark(name, t0):
+        timings.append((name, time.time() - t0))
+        return time.time()
+
     with tempfile.TemporaryDirectory(prefix="autoclip_") as tmp:
         wav = os.path.join(tmp, "audio.wav")
+        t = time.time()
         extract_audio(video, wav)
         loud = loudness_per_second(wav)
+        t = mark("звук и громкость", t)
         segments = transcribe(wav, cache, vinfo["dur"])
+        t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
     n_words = sum(len(s["words"]) for s in segments)
     n_mat = sum(is_profane(w["w"]) for s in segments for w in s["words"])
     log(f"   слов: {n_words}, из них мата: {n_mat}")
@@ -880,6 +901,7 @@ def process(video, analyze_only=False):
     else:
         log("🤖 Без языковой модели — ищу по звуку и речи.")
 
+    t = mark("языковая модель", t)
     smooth, loud_z = score_timeline(loud, segments, moments)
     clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"])
     if not clips:
@@ -887,6 +909,7 @@ def process(video, analyze_only=False):
         return None
     log(f"✂️  Нашёл {len(clips)} клипов")
 
+    t = mark("поиск моментов", t)
     report = [f"Источник: {video}", ""]
     made = []
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
@@ -910,6 +933,12 @@ def process(video, analyze_only=False):
             report.append(f"    запикано: {bl}, зумов: {len(c['zooms'])}")
             report.append("")
 
+    mark("рендер клипов", t)
+    if made and _ENCODER:
+        timings.append((f"кодек: {_ENCODER[1]}", None))
+    report += [f"Запись: {fmt_time(vinfo['dur'])}, {vinfo['w']}x{vinfo['h']}",
+               f"Время работы: {(time.time() - t_start) / 60:.1f} мин"]
+    report += [f"    {n}: {sec:.0f} с" if sec is not None else f"    {n}" for n, sec in timings]
     with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(report))
     with open(os.path.join(out_dir, "clips.json"), "w", encoding="utf-8") as f:
