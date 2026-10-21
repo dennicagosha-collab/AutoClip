@@ -2159,9 +2159,23 @@ def dark_palette(app):
     app.setStyleSheet(STYLE.replace("@ARROW@", arrow_icon()))
 
 
+ICON = os.path.join(HERE, "icon", "autoclip.ico")
+
+
 def main():
     autoclip.migrate_user_data()
+    if os.name == "nt":
+        # своя иконка на панели задач, а не значок Python
+        import ctypes
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("FinalKFCBoss.AutoClip")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
+    app.setApplicationName("AutoClip")
+    if os.path.isfile(ICON):
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(ICON))
     dark_palette(app)
     win = MainWindow()
     win.show()
