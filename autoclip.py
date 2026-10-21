@@ -1745,6 +1745,161 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     return clip
 
 
+# ---------------- 10. все нарезки и еженедельная подборка ----------------
+
+PROJECTS_INDEX = os.path.join(user_dir(), "нарезки.json")
+WEEKLY_DIR = os.path.join(os.path.expanduser("~"), "Videos", "AutoClip подборки")
+WEEKLY_FORMATS = {
+    "vertical": {"name": "Вертикальная", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000},
+    "horizontal": {"name": "Горизонтальная", "w": 1920, "h": 1080, "fps": 60, "kbps": 12000},
+}
+FADE = 0.15          # затемнение на стыке: 0,15 с в чёрный + 0,15 с из чёрного
+
+
+def known_projects():
+    try:
+        with open(PROJECTS_INDEX, encoding="utf-8") as f:
+            data = json.load(f)
+        return [p for p in data if isinstance(p, str)]
+    except (OSError, ValueError):
+        return []
+
+
+def register_project(path):
+    """Запоминает нарезку в общем списке — по нему подборка ищет клипы всех записей."""
+    pp = os.path.abspath(project_path(path))
+    items = [p for p in known_projects() if os.path.abspath(p) != pp]
+    items.append(pp)
+    tmp = PROJECTS_INDEX + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, PROJECTS_INDEX)
+
+
+def _clip_date(c):
+    """Когда клип в последний раз «стал интересен»: нарезан, одобрен или выложен."""
+    dates = [c.get("created"), c.get("status_date")]
+    dates += [p.get("date") for p in (c.get("published") or {}).values() if isinstance(p, dict)]
+    return max((d for d in dates if d), default="")
+
+
+def weekly_candidates(days=7, now=None):
+    """Клипы «хороший» и «выложен» за последние days дней из всех нарезок,
+    по убыванию оценки: [{"project", "id", "path", "title", "score", "dur", "date", "status"}]."""
+    now = now or datetime.datetime.now()
+    since = (now - datetime.timedelta(days=days)).isoformat(timespec="seconds")
+    out = []
+    for pp in known_projects():
+        try:
+            proj = load_project(pp)
+        except (AutoClipError, OSError, ValueError):
+            continue
+        folder = os.path.dirname(proj["_path"])
+        for c in proj["clips"]:
+            path = os.path.join(folder, c["file"])
+            date = _clip_date(c)
+            if c["status"] in ("good", "published") and date >= since and os.path.isfile(path):
+                h = c.get("hook") or {}
+                hook = (h["end"] - h["start"]) if h.get("on") and h.get("start") is not None else 0
+                out.append({"project": proj["_path"], "id": c["id"], "path": path,
+                            "title": c["title"], "score": c["score"], "status": c["status"],
+                            "dur": round(c["end"] - c["start"] + hook, 2), "date": date,
+                            "source": os.path.basename(proj.get("source", ""))})
+    return sorted(out, key=lambda x: -x["score"])
+
+
+def _segment_filter(fmt, dur):
+    """Кадр подборки из одного клипа + затемнение в начале и в конце."""
+    W, H, fps = fmt["w"], fmt["h"], fmt["fps"]
+    fade = (f"fade=t=in:d={FADE},fade=t=out:st={max(0.0, dur - FADE):.3f}:d={FADE}")
+    if W > H:
+        # горизонтально: клип по центру, по бокам — он же, размытый и притушенный
+        v = (f"[0:v]fps={fps},split=2[bg][fg];"
+             f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+             f"boxblur=30:3,eq=brightness=-0.12[bgb];"
+             f"[fg]scale=-2:{H}:flags=lanczos[fgs];"
+             f"[bgb][fgs]overlay=(W-w)/2:0,setsar=1,{fade},")
+    else:
+        v = (f"[0:v]fps={fps},scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,{fade},")
+    v += ("scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+          "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[v]")
+    a = (f"[0:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+         f"afade=t=in:d={FADE},afade=t=out:st={max(0.0, dur - FADE):.3f}:d={FADE}[a]")
+    return v + ";" + a
+
+
+def _probe_dur(path):
+    p = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path])
+    try:
+        return float(p.stdout.strip())
+    except ValueError:
+        raise AutoClipError(f"❌ Не читается клип: {os.path.basename(path)}")
+
+
+def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cancel=None):
+    """Склеивает готовые клипы (в заданном порядке) в одну подборку с затемнением на стыках.
+    fmt — "vertical" (1080×1920) или "horizontal" (1920×1080). Возвращает путь к файлу."""
+    global _ENCODER
+    need_ffmpeg()
+    if not paths:
+        raise AutoClipError("❌ Нет клипов для подборки.")
+    spec = WEEKLY_FORMATS[fmt]
+    if out_path is None:
+        os.makedirs(WEEKLY_DIR, exist_ok=True)
+        stamp = datetime.date.today().isoformat()
+        base = os.path.join(WEEKLY_DIR, f"подборка_{stamp}_{spec['name'].lower()}")
+        out_path, n = base + ".mp4", 2
+        while os.path.exists(out_path):              # старые подборки не перезаписываем
+            out_path, n = f"{base}_{n}.mp4", n + 1
+    log(f"🎞  Подборка: {len(paths)} клипов, {spec['name'].lower()} {spec['w']}×{spec['h']}")
+    t0 = time.time()
+    encs = _encoders(spec)
+    with tempfile.TemporaryDirectory(prefix="autoclip_w_") as tmp:
+        parts = []
+        for i, src in enumerate(paths, 1):
+            check_cancel(cancel)
+            if progress:
+                progress("подборка", (i - 1) / len(paths) * 100, os.path.basename(src))
+            dur = _probe_dur(src)
+            part = os.path.join(tmp, f"{i:03d}.mp4")
+            base = ["ffmpeg", "-y", "-v", "error", "-i", os.path.abspath(src),
+                    "-filter_complex", _segment_filter(spec, dur), "-map", "[v]", "-map", "[a]"]
+            tail = COLOR_FLAGS + ["-fps_mode", "cfr", "-r", str(spec["fps"]), "-c:a", "aac",
+                                  "-b:a", "320k", "-ar", "48000", part]
+            names = [_ENCODER] if _ENCODER else list(encs)
+            err = ""
+            for name in names:
+                p = run(base + encs[name] + tail, cancel=cancel)
+                if p.returncode == 0:
+                    _ENCODER = name
+                    break
+                err = p.stderr
+            else:
+                raise AutoClipError("❌ ffmpeg не смог подготовить клип для подборки:\n" + err[-800:])
+            parts.append(part)
+        # все куски одного формата — склеиваем без пережатия
+        lst = os.path.join(tmp, "list.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            for part in parts:
+                f.write("file '" + part.replace("\\", "/").replace("'", "'\\''") + "'\n")
+        tmp_out = os.path.join(tmp, "out.mp4")
+        p = run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
+                 "-c", "copy", "-movflags", "+faststart", tmp_out], cancel=cancel)
+        if p.returncode != 0:
+            raise AutoClipError("❌ Не получилось склеить подборку:\n" + p.stderr[-800:])
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        replace_file(tmp_out, out_path)
+    with open(os.path.splitext(out_path)[0] + ".json", "w", encoding="utf-8") as f:
+        json.dump({"created": now_iso(), "format": fmt, "clips": list(paths)}, f,
+                  ensure_ascii=False, indent=1)
+    if progress:
+        progress("подборка", 100, os.path.basename(out_path))
+    log(f"✅ Подборка готова за {time.time() - t0:.0f} с → {out_path}")
+    return out_path
+
+
 # ---------------- main ----------------
 
 def safe_name(s):
@@ -1933,6 +2088,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     proj["settings"]["preset"] = preset          # сам пресет: пересборка не зависит от списка
     proj["run"] = {"date": now_iso(), "timings": timings}
     save_project(proj)
+    register_project(proj["_path"])
 
     num = 0
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:

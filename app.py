@@ -45,6 +45,7 @@ DEFAULTS = {
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "geometry": "", "player_geometry": "",
+    "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
 
 BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
@@ -179,6 +180,8 @@ class Bus(QObject):
     done = Signal(object)
     thumb = Signal(int, str, object)
     rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
+    weekly_progress = Signal(float, str)
+    weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
 
 
 class Stream:
@@ -1162,6 +1165,10 @@ class ClipsPage(QWidget):
             return
         self.proj = proj
         self.remember(proj["_path"])
+        try:
+            autoclip.register_project(proj["_path"])
+        except OSError:
+            pass
         self.projects.setCurrentIndex(0)
         self.refill(select_id)
 
@@ -1450,6 +1457,262 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         if c:
             show_in_folder(self.clip_path(c))
+
+
+# ---------------- раздел «Подборка» ----------------
+
+class WeeklyPage(QWidget):
+    """Один ролик из «хороших» и «выложенных» клипов за последние дни.
+    Клипы можно убрать галочкой и переставить (перетаскиванием или ↑ ↓)."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.s = win.settings
+        self.busy = False
+        self.last = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(32, 28, 32, 24)
+        lay.setSpacing(14)
+        lay.addLayout(page_title("Подборка", "Один ролик из «хороших» и «выложенных» клипов "
+                                             "за последние дни. Лучшие — первыми."))
+
+        row = QHBoxLayout()
+        row.setSpacing(18)
+        self.days = Stepper(1, 30, int(self.s["weekly_days"]))
+        self.days.valueChanged.connect(self._days_changed)
+        row.addLayout(labeled("За последние дней", self.days))
+        fmt = QHBoxLayout()
+        fmt.setSpacing(6)
+        self.fmt_btns = {}
+        for key, text in (("vertical", "Вертикальная  1080×1920"),
+                          ("horizontal", "Горизонтальная  1920×1080")):
+            b = QPushButton(text)
+            b.setObjectName("filter")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, k=key: self.set_format(k))
+            fmt.addWidget(b)
+            self.fmt_btns[key] = b
+        box = QVBoxLayout()
+        box.setSpacing(4)
+        lbl = QLabel("Формат")
+        lbl.setObjectName("fieldLabel")
+        box.addWidget(lbl)
+        box.addLayout(fmt)
+        row.addLayout(box)
+        row.addStretch(1)
+        b = QPushButton("Обновить список")
+        b.clicked.connect(self.refresh)
+        row.addWidget(b, 0, Qt.AlignBottom)
+        lay.addLayout(row)
+        self.set_format(self.s["weekly_format"])
+
+        body = QHBoxLayout()
+        body.setSpacing(10)
+        self.list = QListWidget()
+        self.list.setObjectName("clipList")
+        self.list.setWordWrap(True)
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.itemChanged.connect(self._summary)
+        self.list.model().rowsMoved.connect(self._summary)
+        body.addWidget(self.list, 1)
+        side = QVBoxLayout()
+        side.setSpacing(6)
+        self.up = QPushButton("↑")
+        self.down = QPushButton("↓")
+        for b, d in ((self.up, -1), (self.down, 1)):
+            b.setObjectName("square")
+            b.setToolTip("Выше" if d < 0 else "Ниже")
+            b.clicked.connect(lambda _, d=d: self.move(d))
+            side.addWidget(b)
+        side.addStretch(1)
+        body.addLayout(side)
+        lay.addLayout(body, 1)
+
+        self.empty = QWidget()
+        el = QVBoxLayout(self.empty)
+        el.addStretch(1)
+        t = QLabel("Клипов для подборки нет")
+        t.setObjectName("cardTitle")
+        t.setAlignment(Qt.AlignCenter)
+        el.addWidget(t)
+        self.empty_hint = hint("")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        el.addWidget(self.empty_hint)
+        el.addSpacing(10)
+        go = QPushButton("К клипам")
+        go.setObjectName("primary")
+        go.clicked.connect(lambda: self.win.go("clips"))
+        el.addWidget(go, 0, Qt.AlignCenter)
+        el.addStretch(2)
+        lay.addWidget(self.empty, 1)
+
+        self.summary = hint("")
+        lay.addWidget(self.summary)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.btn = QPushButton("🎞   Собрать подборку")
+        self.btn.setObjectName("accent")
+        self.btn.setMinimumWidth(260)
+        self.btn.clicked.connect(self.build)
+        row.addWidget(self.btn)
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setFixedHeight(6)
+        self.bar.setTextVisible(False)
+        col.addWidget(self.bar)
+        self.state = hint("")
+        col.addWidget(self.state)
+        row.addLayout(col, 1)
+        self.btn_open = QPushButton("Открыть")
+        self.btn_open.clicked.connect(lambda: self.last and open_path(self.last))
+        self.btn_show = QPushButton("Показать в папке")
+        self.btn_show.clicked.connect(lambda: self.last and show_in_folder(self.last))
+        for b in (self.btn_open, self.btn_show):
+            b.setEnabled(False)
+            row.addWidget(b)
+        lay.addLayout(row)
+
+        row = QHBoxLayout()
+        self.dir_hint = hint("")
+        row.addWidget(self.dir_hint, 1)
+        b = QPushButton("Папка…")
+        b.setObjectName("ghost")
+        b.clicked.connect(self.pick_dir)
+        row.addWidget(b)
+        lay.addLayout(row)
+        self._show_dir()
+
+        win.bus.weekly_progress.connect(self._progress)
+        win.bus.weekly_done.connect(self._done)
+
+    # ---------- настройки страницы ----------
+    def _days_changed(self, v):
+        self.s["weekly_days"] = v
+        save_settings(self.s)
+        self.refresh()
+
+    def set_format(self, key):
+        if key not in self.fmt_btns:
+            key = "vertical"
+        for k, b in self.fmt_btns.items():
+            b.setChecked(k == key)
+        self.s["weekly_format"] = key
+        save_settings(self.s)
+
+    def _show_dir(self):
+        self.dir_hint.setText(f"Подборки сохраняются в {self.s['weekly_dir']}")
+
+    def pick_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Куда сохранять подборки", self.s["weekly_dir"])
+        if d:
+            self.s["weekly_dir"] = os.path.normpath(d)
+            save_settings(self.s)
+            self._show_dir()
+
+    # ---------- список ----------
+    def refresh(self):
+        if self.busy:
+            return
+        items = autoclip.weekly_candidates(self.days.value())
+        self.list.blockSignals(True)
+        self.list.clear()
+        for c in items:
+            date = f"{c['date'][8:10]}.{c['date'][5:7]}" if c["date"] else ""
+            it = QListWidgetItem(
+                f"★ {c['score']:.1f}   {c['title']}\n"
+                f"{c['dur']:.0f} с  ·  {autoclip.STATUSES.get(c['status'], c['status'])}"
+                f"  ·  {date}  ·  {c['source']}")
+            it.setData(Qt.UserRole, c["path"])
+            it.setData(Qt.UserRole + 1, c["dur"])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
+            it.setCheckState(Qt.Checked)
+            self.list.addItem(it)
+        self.list.blockSignals(False)
+        has = self.list.count() > 0
+        self.list.setVisible(has)
+        self.up.setVisible(has)
+        self.down.setVisible(has)
+        self.empty.setVisible(not has)
+        self.empty_hint.setText(f"За последние {self.days.value()} дн. нет клипов со статусом "
+                                "«хороший» или «выложен». Отметь клипы в разделе «Клипы».")
+        if has:
+            self.list.setCurrentRow(0)
+        self._summary()
+
+    def chosen(self):
+        """Отмеченные клипы в нынешнем порядке: [(путь, длина)]."""
+        out = []
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it.checkState() == Qt.Checked:
+                out.append((it.data(Qt.UserRole), float(it.data(Qt.UserRole + 1) or 0)))
+        return out
+
+    def _summary(self, *_):
+        ch = self.chosen()
+        total = sum(d for _, d in ch)
+        self.summary.setText(f"В подборке {len(ch)} из {self.list.count()} клипов  ·  "
+                             f"{autoclip.fmt_time(total)}" if self.list.count() else "")
+        self.btn.setEnabled(bool(ch) and not self.busy)
+
+    def move(self, d):
+        row = self.list.currentRow()
+        new = row + d
+        if row < 0 or not (0 <= new < self.list.count()):
+            return
+        it = self.list.takeItem(row)
+        self.list.insertItem(new, it)
+        self.list.setCurrentRow(new)
+        self._summary()
+
+    # ---------- сборка ----------
+    def build(self):
+        paths = [p for p, _ in self.chosen()]
+        if not paths or self.busy:
+            return
+        self.busy = True
+        self.btn.setEnabled(False)
+        self.btn_open.setEnabled(False)
+        self.btn_show.setEnabled(False)
+        self.bar.setValue(0)
+        self.state.setText("Собираю…")
+        fmt = self.s["weekly_format"]
+        autoclip.WEEKLY_DIR = self.s["weekly_dir"]
+        bus = self.win.bus
+
+        def work():
+            try:
+                out = autoclip.build_compilation(
+                    paths, fmt, progress=lambda st, pct, msg: bus.weekly_progress.emit(float(pct), msg))
+                bus.weekly_done.emit(out, None)
+            except autoclip.AutoClipError as e:
+                bus.weekly_done.emit("", str(e))
+            except Exception:
+                bus.weekly_done.emit("", "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _progress(self, pct, msg):
+        self.bar.setValue(int(pct * 10))
+        self.state.setText(f"Собираю… {pct:.0f}%  {msg}")
+
+    def _done(self, out, err):
+        self.busy = False
+        self._summary()
+        if err:
+            self.bar.setValue(0)
+            self.state.setText(err)
+            return
+        self.last = out
+        self.bar.setValue(1000)
+        self.state.setText(f"Готово: {os.path.basename(out)}")
+        self.btn_open.setEnabled(True)
+        self.btn_show.setEnabled(True)
 
 
 # ---------------- раздел «Настройки» ----------------
@@ -1759,13 +2022,9 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.cut = CutPage(self)
         self.clips = ClipsPage(self)
-        weekly = QWidget()
-        wl = QVBoxLayout(weekly)
-        wl.setContentsMargins(32, 28, 32, 24)
-        wl.addLayout(page_title("Подборка", "Ролик из хороших клипов за неделю. " + LATER + "."))
-        wl.addStretch(1)
+        self.weekly = WeeklyPage(self)
         self.settings_page = SettingsPage(self)
-        for w in (self.cut, self.clips, weekly, self.settings_page):
+        for w in (self.cut, self.clips, self.weekly, self.settings_page):
             w.setObjectName("page")
             self.stack.addWidget(w)
         root.addWidget(self.stack, 1)
@@ -1788,9 +2047,17 @@ class MainWindow(QMainWindow):
             self.cut.write("Выбери запись и нажми «Нарезать».")
         except autoclip.AutoClipError as e:
             self.cut.write(str(e))
+        for pp in self.settings.get("recent", []):
+            try:
+                if os.path.isfile(pp) and pp not in autoclip.known_projects():
+                    autoclip.register_project(pp)
+            except OSError:
+                pass
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
+        if self.PAGES[i][0] == "weekly":
+            self.weekly.refresh()
         if self.PAGES[i][0] != "clips" and not self.detached:
             self.clips.player.player.pause()
 

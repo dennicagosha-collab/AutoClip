@@ -9,9 +9,11 @@ import autoclip  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def clean_config(monkeypatch):
-    """Каждый тест видит исходный CONFIG."""
+def clean_config(monkeypatch, tmp_path):
+    """Каждый тест видит исходный CONFIG, свой список нарезок и свою папку подборок."""
     monkeypatch.setattr(autoclip, "CONFIG", dict(autoclip.CONFIG))
+    monkeypatch.setattr(autoclip, "PROJECTS_INDEX", str(tmp_path / "нарезки.json"))
+    monkeypatch.setattr(autoclip, "WEEKLY_DIR", str(tmp_path / "подборки"))
 
 
 @pytest.fixture
