@@ -85,22 +85,29 @@ def test_process_writes_project_and_rebuild_works(video, fake_trash):
     assert rec["overrides"] == {}
 
 
-def test_recut_keeps_reviewed_clips(video, fake_trash):
-    autoclip.CONFIG.update(llm="none", clips=3)
-    out_dir = autoclip.process(str(video))
-    proj = autoclip.load_project(out_dir)
-    good = proj["clips"][0]
-    good["status"] = "good"
-    autoclip.save_project(proj)
-    n_new = len(proj["clips"]) - 1
+def _snapshot(folder):
+    return {f: (os.path.getsize(os.path.join(folder, f)), os.path.getmtime(os.path.join(folder, f)))
+            for f in os.listdir(folder)}
 
-    autoclip.process(str(video))
-    proj = autoclip.load_project(out_dir)
-    assert autoclip.find_clip(proj, good["id"])["status"] == "good"
-    assert os.path.isfile(os.path.join(out_dir, good["file"]))
-    others = [c for c in proj["clips"] if c["id"] != good["id"]]
-    assert all(c["end"] <= good["start"] or c["start"] >= good["end"] for c in others)
-    assert len(os.listdir(fake_trash)) == n_new       # прежние «новые» клипы — в корзине
+
+def test_recut_goes_to_new_folder(video, fake_trash):
+    autoclip.CONFIG.update(llm="none", clips=3)
+    first = autoclip.process(str(video))
+    assert first.endswith("запись_clips")
+    before = _snapshot(first)
+
+    second = autoclip.process(str(video))
+    third = autoclip.process(str(video))
+    assert second.endswith("запись_clips_2") and third.endswith("запись_clips_3")
+    assert _snapshot(first) == before                 # прошлая нарезка не тронута
+    assert os.listdir(fake_trash) == []               # и ничего не ушло в корзину
+    for d in (second, third):
+        proj = autoclip.load_project(d)
+        assert proj["clips"] and all(os.path.isfile(os.path.join(d, c["file"]))
+                                     for c in proj["clips"])
+    # путь к записи ведёт к последней нарезке
+    assert autoclip.project_path(str(video)) == os.path.join(third, "project.json")
+    assert autoclip.clip_dirs(str(video)) == [first, second, third]
 
 
 def test_cancel_stops_processing(video, fake_trash):

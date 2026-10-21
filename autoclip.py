@@ -1343,14 +1343,45 @@ RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "sub_max_words", "sub_ma
                "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook")
 
 
+def clip_dirs(video):
+    """Папки нарезок записи по порядку: «<запись>_clips», «<запись>_clips_2», …"""
+    base = os.path.splitext(os.path.abspath(video))[0] + "_clips"
+    found = []
+    if os.path.isdir(base):
+        found.append((1, base))
+    folder = os.path.dirname(base)
+    name = os.path.basename(base)
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        entries = []
+    for d in entries:
+        m = re.fullmatch(re.escape(name) + r"_(\d+)", d)
+        if m and os.path.isdir(os.path.join(folder, d)):
+            found.append((int(m.group(1)), os.path.join(folder, d)))
+    return [d for _, d in sorted(found)]
+
+
+def new_clip_dir(video):
+    """Папка для новой нарезки: каждая нарезка — в свою папку, старые не трогаются."""
+    base = os.path.splitext(os.path.abspath(video))[0] + "_clips"
+    dirs = clip_dirs(video)
+    if not dirs:
+        return base
+    n = max(int(d.rsplit("_", 1)[1]) if d != base else 1 for d in dirs) + 1
+    return f"{base}_{n}"
+
+
 def project_path(path):
-    """Запись, папка «_clips» или сам project.json → путь к project.json."""
+    """Запись (её последняя нарезка), папка нарезки или сам project.json → project.json."""
     path = os.path.abspath(path)
     if os.path.isdir(path):
         return os.path.join(path, PROJECT_FILE)
     if path.lower().endswith(".json"):
         return path
-    return os.path.splitext(path)[0] + "_clips" + os.sep + PROJECT_FILE
+    dirs = clip_dirs(path)
+    last = dirs[-1] if dirs else os.path.splitext(path)[0] + "_clips"
+    return os.path.join(last, PROJECT_FILE)
 
 
 def load_project(path):
@@ -1601,8 +1632,8 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     """Вся обработка одного видео. Возвращает папку с клипами (или None).
     progress(этап, процент 0–100 внутри этапа, сообщение) — этапы из STAGES;
     cancel — threading.Event или функция; при остановке — исключение Cancelled.
-    Уже нарезанные клипы со статусом «хороший»/«выложен»/«отклонён» сохраняются,
-    новые моменты рядом с ними не берутся; старые «новые» клипы уходят в корзину."""
+    Каждая нарезка идёт в новую папку («_clips», «_clips_2», …); прошлые нарезки
+    не трогаются."""
     def prog(stage, pct, msg=""):
         if progress:
             progress(stage, pct, msg)
@@ -1628,7 +1659,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
             f"этого не станет — лучше сразу писать в OBS {preset['fps']} кадров/с.")
 
     stem = os.path.splitext(os.path.abspath(video))[0]
-    out_dir = stem + "_clips"
+    out_dir = new_clip_dir(video)                # каждая нарезка — в свою папку
     cache = stem + ".transcript.json"
 
     timings = []
@@ -1668,18 +1699,9 @@ def process(video, analyze_only=False, progress=None, cancel=None):
 
     prog("поиск", 0)
     proj = new_project(video, vinfo, out_dir, cache)
-    if os.path.isfile(os.path.join(out_dir, PROJECT_FILE)):
-        old = load_project(out_dir)
-        proj["clips"] = old["clips"]
-        proj["created"] = old.get("created", proj["created"])
-    kept = [c for c in proj["clips"] if c["status"] != "new"]
-    stale = [c for c in proj["clips"] if c["status"] == "new"]
-    if kept:
-        log(f"   оставляю {len(kept)} уже разобранных клипов")
 
     smooth, loud_z, parts = score_timeline(loud, segments, moments)
-    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts,
-                       taken=[(c["start"], c["end"]) for c in kept])
+    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts)
     if not clips:
         prog("поиск", 100)
         log("😕 Ярких моментов не нашлось. Попробуй уменьшить min_len или подключить модель.")
@@ -1713,15 +1735,13 @@ def process(video, analyze_only=False, progress=None, cancel=None):
         return out_dir
 
     os.makedirs(out_dir, exist_ok=True)
-    for c in stale:                              # прошлая нарезка, которую ещё не смотрели
-        trash(os.path.join(out_dir, c["file"]))
-    proj["clips"] = kept
+    log(f"📁 Клипы будут в папке {os.path.basename(out_dir)}")
     proj["settings"] = {k: CONFIG[k] for k in RENDER_KEYS if k in CONFIG}
     proj["settings"]["preset"] = preset          # сам пресет: пересборка не зависит от списка
     proj["run"] = {"date": now_iso(), "timings": timings}
     save_project(proj)
 
-    num = max((c["num"] for c in kept), default=0)
+    num = 0
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
         for i, c in enumerate(clips, 1):
             check_cancel(cancel)

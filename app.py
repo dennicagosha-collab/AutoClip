@@ -695,7 +695,15 @@ class ClipsPage(QWidget):
         self.win.settings["recent"] = recent
         self.projects.clear()
         for p in recent:
-            self.projects.addItem(os.path.basename(os.path.dirname(p)), p)
+            label = os.path.basename(os.path.dirname(p))
+            try:
+                with open(p, encoding="utf-8") as f:
+                    run = json.load(f).get("run", {}).get("date", "")
+                if run:                              # «2026-10-21T23:15:02» → «21.10 23:15»
+                    label += f"  ·  нарезка {run[8:10]}.{run[5:7]} {run[11:16]}"
+            except (OSError, ValueError):
+                pass
+            self.projects.addItem(label, p)
 
     def remember(self, pp):
         recent = [p for p in self.win.settings.get("recent", []) if p != pp]
