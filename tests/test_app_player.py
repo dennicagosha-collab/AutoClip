@@ -64,8 +64,13 @@ def test_clip_opens_paused_on_first_frame(win, project):
     assert pl.player.playbackState() != QMediaPlayer.PlayingState
     assert pl.player.position() < 200
 
-    win.clips.list.setFocus()
-    QTest.keyClick(win.clips.list, Qt.Key_Space)
+    win.activateWindow()
+    win.raise_()
+    if QTest.qWaitForWindowActive(win, 2000):
+        win.clips.list.setFocus()
+        QTest.keyClick(win.clips.list, Qt.Key_Space)    # пробел — только в активном окне
+    else:
+        QTest.mouseClick(pl.btn_play, Qt.LeftButton)
     assert wait_for(lambda: pl.player.playbackState() == QMediaPlayer.PlayingState)
     QTest.mouseClick(pl.video, Qt.LeftButton)
     assert wait_for(lambda: pl.player.playbackState() == QMediaPlayer.PausedState)

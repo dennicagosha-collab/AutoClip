@@ -16,7 +16,9 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 import autoclip  # noqa: E402
 
 from PySide6.QtCore import QByteArray, QObject, QSize, Qt, QTimer, QUrl, Signal  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QKeySequence, QPalette, QPixmap, QShortcut  # noqa: E402
+from PySide6.QtGui import (  # noqa: E402
+    QColor, QFont, QKeySequence, QPainter, QPalette, QPixmap, QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
@@ -37,6 +39,7 @@ LATER = "Появится в следующих версиях"
 DEFAULTS = {
     "clips": 10, "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": False, "nick": False, "cam": "Вебка сверху",
+    "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "geometry": "", "player_geometry": "",
@@ -168,6 +171,48 @@ def hint(text):
 
 # ---------------- зона перетаскивания ----------------
 
+class SubsPreview(QWidget):
+    """Схема кадра 9:16: где будут субтитры и какие поля закрывают кнопки соцсетей."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(72, 128)
+        self.setToolTip("Где будут субтитры. Красным — зона кнопок и подписей соцсетей.")
+        self.sub_y, self.safe = 0.6, True
+
+    def set_state(self, sub_y, safe):
+        self.sub_y, self.safe = sub_y, safe
+        self.update()
+
+    def paintEvent(self, e):
+        w, h = self.width(), self.height()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(0, 0, w, h, QColor("#0d0e11"))
+        p.setPen(QColor("#3a3d48"))
+        p.drawRect(0, 0, w - 1, h - 1)
+        if self.safe:
+            z = autoclip.SAFE_ZONE
+            red = QColor(255, 79, 109, 70)
+            p.fillRect(0, 0, w, int(z["top"] * h), red)
+            p.fillRect(0, h - int(z["bottom"] * h), w, int(z["bottom"] * h), red)
+            p.fillRect(w - int(z["right"] * w), int(z["top"] * h), int(z["right"] * w),
+                       h - int((z["top"] + z["bottom"]) * h), red)
+            p.fillRect(0, int(z["top"] * h), int(z["left"] * w),
+                       h - int((z["top"] + z["bottom"]) * h), red)
+        lay = autoclip.subs_layout(1080, 1920, dict(autoclip.CONFIG, sub_y=self.sub_y,
+                                                    safe_zone=self.safe))
+        l, _, r, _ = lay["box"]
+        bw = (r - l) / 1080 * w * 0.8
+        cx, cy = lay["x"] / 1080 * w, lay["y"] / 1920 * h
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(int(cx - bw / 2), int(cy - 4), int(bw), 8, 3, 3)
+        p.setBrush(QColor("#ffe600"))
+        p.drawRoundedRect(int(cx - bw / 6), int(cy - 4), int(bw / 3), 8, 3, 3)
+        p.end()
+
+
 class DropZone(QFrame):
     files = Signal(list)
 
@@ -282,17 +327,32 @@ class PlayerPanel(QWidget):
         self.player.playbackStateChanged.connect(self._state)
         self.player.mediaStatusChanged.connect(self._loaded)
         self._first_frame = False
+        self._may_play = False         # играть можно только после действия пользователя
 
     def open(self, path, autoplay=False):
         self._first_frame = not autoplay
+        self._may_play = autoplay
+        self.audio.setMuted(not autoplay)    # пока показываем первый кадр — без звука
         self.player.setSource(QUrl.fromLocalFile(path))
         if autoplay:
-            self.player.play()
+            self.play()
+
+    def play(self):
+        self._may_play = True
+        self.audio.setMuted(False)
+        self.player.play()
 
     def _loaded(self, status):
         # пауза сразу после загрузки показывает первый кадр без звука
         if status == QMediaPlayer.LoadedMedia and self._first_frame:
             self._first_frame = False
+            self.player.pause()
+            QTimer.singleShot(400, self._ensure_frame)
+
+    def _ensure_frame(self):
+        # бывает, что первый кадр не пришёл — просим его ещё раз
+        if not self._may_play and not self.video.videoSink().videoFrame().isValid():
+            self.player.setPosition(0)
             self.player.pause()
 
     def clear(self):
@@ -301,9 +361,10 @@ class PlayerPanel(QWidget):
 
     def toggle(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
+            self._may_play = False
             self.player.pause()
         else:
-            self.player.play()
+            self.play()
 
     def _pos(self, ms):
         if not self.slider.isSliderDown():
@@ -314,6 +375,11 @@ class PlayerPanel(QWidget):
         self.slider.setRange(0, ms)
 
     def _state(self, st):
+        if st == QMediaPlayer.PlayingState and not self._may_play:
+            # проигрыватель Qt иногда сам уходит из паузы в воспроизведение — не даём
+            self.player.pause()
+            self.player.setPosition(0)
+            return
         self.btn_play.setText("❚❚" if st == QMediaPlayer.PlayingState else "▶")
 
 
@@ -375,6 +441,28 @@ class CutPage(QWidget):
         g.addWidget(self.cb_marks, 1, 0)
         g.addWidget(self.cb_nick, 1, 1)
 
+        subs = QHBoxLayout()
+        subs.setSpacing(10)
+        subs.addWidget(QLabel("Субтитры"))
+        self.sub_pos = self._combo(autoclip.SUB_POSITIONS, "sub_pos")
+        subs.addWidget(self.sub_pos)
+        self.cb_safe = self._check("Сейф-зона соцсетей", "safe_zone")
+        self.cb_safe.setToolTip("Субтитры не заходят под кнопки, ник и подпись "
+                                "TikTok, Shorts и Reels")
+        subs.addSpacing(8)
+        subs.addWidget(self.cb_safe)
+        subs.addStretch(1)
+        g.addLayout(subs, 2, 0, 1, 3)
+        self.preview = SubsPreview()
+        g.addWidget(self.preview, 0, 3, 5, 1, Qt.AlignRight | Qt.AlignTop)
+        for w in (self.sub_pos, self.cb_safe, self.cb_subs):
+            (w.currentTextChanged if isinstance(w, QComboBox) else w.toggled).connect(
+                self._update_preview)
+        self.cb_subs.toggled.connect(self.sub_pos.setEnabled)
+        self.cb_subs.toggled.connect(self.cb_safe.setEnabled)
+        self.sub_pos.setEnabled(self.cb_subs.isChecked())
+        self.cb_safe.setEnabled(self.cb_subs.isChecked())
+
         snd = QHBoxLayout()
         snd.setSpacing(10)
         snd.addWidget(self.cb_bleep)
@@ -388,7 +476,7 @@ class CutPage(QWidget):
         b.clicked.connect(self.play_sound)
         snd.addWidget(b)
         snd.addStretch(1)
-        g.addLayout(snd, 2, 0, 1, 3)
+        g.addLayout(snd, 3, 0, 1, 3)
         self.cb_bleep.toggled.connect(self.sound.setEnabled)
 
         form = QHBoxLayout()
@@ -411,8 +499,9 @@ class CutPage(QWidget):
         self.preset.currentTextChanged.connect(lambda t: self._set("preset", t) if t else None)
         form.addWidget(self.preset)
         form.addStretch(1)
-        g.addLayout(form, 3, 0, 1, 3)
+        g.addLayout(form, 4, 0, 1, 3)
         lay.addWidget(box)
+        self._update_preview()
 
         # --- запуск и прогресс ---
         self.btn = QPushButton("✂  Нарезать")
@@ -453,6 +542,11 @@ class CutPage(QWidget):
         self.refresh_sounds()
         self.refresh_presets()
         self.sound.setEnabled(self.cb_bleep.isChecked())
+
+    def _update_preview(self, *_):
+        self.preview.set_state(autoclip.SUB_POSITIONS.get(self.sub_pos.currentText(), 0.6),
+                               self.cb_safe.isChecked())
+        self.preview.setVisible(self.cb_subs.isChecked())
 
     # --- виджеты, которые сами запоминают значение ---
     def _set(self, key, value):
@@ -554,6 +648,8 @@ class CutPage(QWidget):
         c["zoom"] = bool(s["zoom"])
         c["bleep"] = bool(s["bleep"])
         c["hook"] = bool(s["hook"])
+        c["sub_y"] = autoclip.SUB_POSITIONS.get(s["sub_pos"], autoclip.CONFIG["sub_y"])
+        c["safe_zone"] = bool(s["safe_zone"])
         c["bleep_sound"] = s["sound"]
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -645,7 +741,7 @@ class ClipsPage(QWidget):
         self.list = QListWidget()
         self.list.setObjectName("clipList")
         self.list.currentItemChanged.connect(self.select)
-        self.list.itemDoubleClicked.connect(lambda _: self.player.player.play())
+        self.list.itemDoubleClicked.connect(lambda _: self.player.play())
         split.addWidget(self.list)
 
         right = QWidget()

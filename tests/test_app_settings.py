@@ -37,6 +37,8 @@ def test_all_settings_survive_restart(app_module):
     cut.sound.setCurrentText("буп")
     cut.count.setValue(7)
     cut.cam.setCurrentText("Вебка снизу")
+    cut.sub_pos.setCurrentText("Снизу")
+    cut.cb_safe.setChecked(False)
     st.p_name.setText("Мой 720p30")
     st.p_w.setValue(720)
     st.p_h.setValue(1280)
@@ -56,7 +58,7 @@ def test_all_settings_survive_restart(app_module):
     with open(autoclip.SETTINGS_PATH, encoding="utf-8") as f:
         saved = json.load(f)
     expect = {"subs": False, "zoom": False, "bleep": False, "sound": "буп", "clips": 7,
-              "cam": "Вебка снизу", "preset": "Мой 720p30", "llm": "none",
+              "cam": "Вебка снизу", "sub_pos": "Снизу", "safe_zone": False, "preset": "Мой 720p30", "llm": "none",
               "ollama_model": "llama3:8b", "obs_dir": r"D:\OBS", "nick_text": "Gosha",
               "hashtags": "#стрим #игры"}
     assert {k: saved.get(k) for k in expect} == expect
@@ -68,6 +70,11 @@ def test_all_settings_survive_restart(app_module):
     assert win2.cut.sound.currentText() == "буп"
     assert win2.cut.count.value() == 7
     assert win2.cut.cam.currentText() == "Вебка снизу"
+    assert win2.cut.sub_pos.currentText() == "Снизу"
+    assert not win2.cut.cb_safe.isChecked()
+    win2.cut.apply_config()
+    assert autoclip.CONFIG["sub_y"] == autoclip.SUB_POSITIONS["Снизу"]
+    assert autoclip.CONFIG["safe_zone"] is False
     assert win2.cut.preset.currentText() == "Мой 720p30"
     assert win2.settings_page.llm.currentText() == "Без модели"
     assert win2.settings_page.nick.text() == "Gosha"

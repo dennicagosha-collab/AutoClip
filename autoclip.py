@@ -65,7 +65,8 @@ CONFIG = {
     "subs": True,
     "sub_font": "Arial Black",
     "sub_size": 82,
-    "sub_y": 0.50,            # высота субтитров: 0 = верх кадра, 1 = низ (0.5 — стык вебки и игры)
+    "sub_y": 0.60,            # высота субтитров: 0 = верх кадра, 1 = низ (см. SUB_POSITIONS)
+    "safe_zone": True,        # не заходить под кнопки и подписи TikTok / Shorts / Reels
     "sub_max_words": 3,
     "sub_max_chars": 18,
     "sub_uppercase": True,
@@ -959,16 +960,48 @@ def _display_word(w, cfg=None):
     return _ass_escape(w)
 
 
+# где субтитры: доля высоты кадра для центра строки
+SUB_POSITIONS = {"Сверху": 0.18, "Выше середины": 0.38, "Середина": 0.50,
+                 "Ниже середины": 0.60, "Снизу": 0.85}
+# поля кадра, которые закрывают кнопки, ник и подпись площадок — общий осторожный вариант
+# для TikTok, YouTube Shorts и Instagram Reels (доли кадра 1080×1920)
+SAFE_ZONE = {"top": 0.15, "bottom": 0.30, "left": 0.06, "right": 0.18}
+CHAR_W = 0.62                 # ширина заглавной буквы Arial Black в долях размера шрифта (с запасом)
+
+
+def sub_position_name(y):
+    """Ближайшее название позиции для доли высоты."""
+    return min(SUB_POSITIONS, key=lambda k: abs(SUB_POSITIONS[k] - y))
+
+
+def subs_layout(w, h, cfg=None):
+    """Куда и каким размером ставить субтитры: центр (x, y), размер шрифта, сколько букв
+    влезает в строку и границы области. С сейф-зоной — внутри неё."""
+    cfg = cfg or CONFIG
+    fs = int(cfg["sub_size"] * w / 1080)
+    if cfg.get("safe_zone"):
+        left, right = SAFE_ZONE["left"] * w, w - SAFE_ZONE["right"] * w
+        top, bottom = SAFE_ZONE["top"] * h, h - SAFE_ZONE["bottom"] * h
+    else:
+        left, right, top, bottom = 40.0, w - 40.0, 40.0, h - 40.0
+    half = 0.6 * fs                                  # половина строки с обводкой и тенью
+    y = min(max(h * cfg["sub_y"], top + half), bottom - half)
+    max_chars = max(4, min(cfg["sub_max_chars"], int((right - left) / (CHAR_W * fs))))
+    return {"x": int((left + right) / 2), "y": int(y), "fs": fs, "max_chars": max_chars,
+            "box": (left, top, right, bottom)}
+
+
 def build_ass(words, w, h, path, cfg=None):
     """words: [{'s','e','w'}] со временем относительно начала клипа."""
     cfg = cfg or CONFIG
-    fs = int(cfg["sub_size"] * w / 1080)
+    lay = subs_layout(w, h, cfg)
+    fs = lay["fs"]
     outline = max(3, int(fs * 0.09))
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
 PlayResY: {h}
-WrapStyle: 0
+WrapStyle: 2
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
@@ -984,7 +1017,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if cur:
             prev = cur[-1]
             chars = sum(len(x["w"]) + 1 for x in cur) + len(wd["w"])
-            if (len(cur) >= cfg["sub_max_words"] or chars > cfg["sub_max_chars"]
+            if (len(cur) >= cfg["sub_max_words"] or chars > lay["max_chars"]
                     or wd["s"] - prev["e"] > 0.45 or re.search(r"[.!?…]$", prev["w"])
                     or wd.get("part") != prev.get("part")):
                 chunks.append(cur)
@@ -993,7 +1026,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if cur:
         chunks.append(cur)
 
-    x, y = w // 2, int(h * cfg["sub_y"])
+    x, y = lay["x"], lay["y"]
+    room = lay["box"][2] - lay["box"][0]
     lines = []
     for ci, ch in enumerate(chunks):
         disp = [_display_word(x_["w"], cfg) for x_ in ch]
@@ -1009,7 +1043,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             parts = []
             for j, d in enumerate(disp):
                 parts.append("{\\c&H00E6FF&}" + d + "{\\c&HFFFFFF&}" if j == wi else d)
-            pop = "{\\fscx85\\fscy85\\t(0,90,\\fscx100\\fscy100)}" if wi == 0 else ""
+            # одно длинное слово шире области — уменьшаем строку, а не вылезаем за край
+            width = CHAR_W * fs * len(" ".join(disp))
+            k = min(100, int(100 * room / width)) if width else 100
+            if wi == 0:
+                pop = "{\\fscx%d\\fscy%d\\t(0,90,\\fscx%d\\fscy%d)}" % (
+                    k * 85 // 100, k * 85 // 100, k, k)
+            else:
+                pop = "{\\fscx%d\\fscy%d}" % (k, k) if k < 100 else ""
             text = "{\\an5\\pos(%d,%d)}" % (x, y) + pop + " ".join(parts)
             lines.append(f"Dialogue: 0,{_ass_time(st)},{_ass_time(en)},Main,,0,0,0,,{text}")
 
@@ -1336,9 +1377,9 @@ PROJECT_FILE = "project.json"
 PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
-OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook")
+OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone")
 # настройки, которые запоминаются в проекте и нужны для пересборки
-RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "sub_max_words", "sub_max_chars",
+RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
                "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook")
 
@@ -1584,6 +1625,9 @@ def main():
     ap.add_argument("--subs", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--zoom", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--bleep", action=argparse.BooleanOptionalAction, default=None)
+    ap.add_argument("--sub-pos", choices=list(SUB_POSITIONS), help="где субтитры")
+    ap.add_argument("--safe-zone", action=argparse.BooleanOptionalAction, default=None,
+                    help="не заходить субтитрами под кнопки соцсетей")
     ap.add_argument("--hook", action=argparse.BooleanOptionalAction, default=None,
                     help="хук в начале; с --rebuild — только для этого клипа")
     ap.add_argument("--sound", help="звук на мат: перелистывание / буп / свист / бип / тишина / свой файл")
@@ -1602,7 +1646,8 @@ def main():
         sys.exit(1)
     migrate_user_data()
     flags = {"subs": args.subs, "zoom": args.zoom, "bleep": args.bleep,
-             "bleep_sound": args.sound, "hook": args.hook}
+             "bleep_sound": args.sound, "hook": args.hook, "safe_zone": args.safe_zone,
+             "sub_y": SUB_POSITIONS[args.sub_pos] if args.sub_pos else None}
     try:
         if args.rebuild:
             # флаги становятся личными настройками этого клипа
