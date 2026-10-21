@@ -681,18 +681,109 @@ def hook_span(rec, cfg):
     return None
 
 
-def _snap_start(t, segments):
-    for s in segments:
-        if s["s"] <= t < s["e"]:
-            return s["s"] if t - s["s"] <= 4 else t
+PAUSE = 0.3            # пауза между словами, в которой можно резать клип, сек
+_SENTENCE_END = re.compile(r"[.!?…]$")
+
+
+def all_words(segments):
+    return sorted((w for seg in segments for w in seg["words"]), key=lambda w: w["s"])
+
+
+def _stretch(w):
+    """Насколько слово длиннее, чем нужно на его буквы. В сплошной речи Whisper ставит
+    слова встык и прячет паузу внутрь слова — «команд» у него длится 3 секунды."""
+    letters = len(re.sub(r"[^\w]", "", w["w"]))
+    return (w["e"] - w["s"]) - (0.08 * letters + 0.15)
+
+
+# после этих слов фраза явно продолжается — заканчивать на них клип нельзя
+_CONTINUES = set("""и а но или что чтобы это эта этот эти на в во с со к ко по за из у о об от до
+для при без не ни ну как если когда потому типа короче то же бы ли чё че там тут где который
+которая которые его её ее их мой моя твой твоя же ведь даже уже ещё еще очень""".split())
+
+
+# эти слова приклеены к предыдущему («стоит ли», «кто же») — резать перед ними нельзя
+_ATTACHED = {"ли", "же", "ж", "бы", "б", "то", "таки"}
+
+
+def _cut_score(pause, last_word, next_word, dist, preferred_side):
+    """Чем выше, тем лучше место для разреза: длинная пауза, конец предложения,
+    не на союзе или предлоге, ближе к задуманной границе."""
+    sc = min(pause, 1.0)                 # пауза дольше секунды — уже чистая пауза
+    if last_word is not None:
+        if _SENTENCE_END.search(last_word["w"]):
+            sc += 1.0
+        if clean_word(last_word["w"]) in _CONTINUES:
+            sc -= 1.5
+    if next_word is not None and clean_word(next_word["w"]).lstrip("-") in _ATTACHED:
+        sc -= 1.5
+    return sc - 0.1 * abs(dist) + (0.15 if preferred_side else 0.0)
+
+
+def _end_points(words):
+    """Где можно закончить клип: после слова, за которым пауза (в том числе спрятанная
+    внутрь растянутого слова) или конец предложения. [(время, пауза, последнее слово)]."""
+    pts = []
+    for i, w in enumerate(words):
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        gap = (nxt["s"] - w["e"]) if nxt else math.inf
+        # пауза, спрятанная в растянутом слове, — менее надёжна, чем настоящая
+        pause = gap if gap >= PAUSE else max(gap, 0.6 * _stretch(w))
+        if pause >= PAUSE or _SENTENCE_END.search(w["w"]):
+            # чуть позже конца слова, чтобы не съесть последний звук, но не на следующем слове
+            pts.append((w["e"] + min(0.3, max(0.0, gap) / 2), pause, w, nxt))
+    return pts
+
+
+def _start_points(words):
+    """Где можно начать клип: перед словом, до которого пауза или конец предложения.
+    [(время, пауза, слово перед разрезом)]."""
+    pts = []
+    for i, w in enumerate(words):
+        prev = words[i - 1] if i else None
+        gap = (w["s"] - prev["e"]) if prev else math.inf
+        pause = gap if (not prev or gap >= PAUSE) else max(gap, 0.6 * _stretch(prev))
+        if pause >= PAUSE or (prev and _SENTENCE_END.search(prev["w"])):
+            pts.append((max(0.0, w["s"] - min(0.2, max(0.0, gap) / 2)), pause, prev, w))
+    return pts
+
+
+def _not_inside_word(t, words, lo, hi):
+    """Если t попало внутрь слова — сдвиг к краю слова в пределах [lo, hi]."""
+    w = next((w for w in words if w["s"] < t < w["e"]), None)
+    if not w:
+        return t
+    for edge in sorted((w["s"], w["e"]), key=lambda x: abs(x - t)):
+        if lo <= edge <= hi:
+            return edge
     return t
 
 
-def _snap_end(t, segments):
-    for s in segments:
-        if s["s"] < t <= s["e"]:
-            return s["e"] if s["e"] - t <= 5 else t
-    return t
+def snap_end(t, words, lo, hi, after=10.0, before=6.0):
+    """Конец клипа около t, в пределах [lo, hi]: в паузе после законченной фразы, не на
+    полуслове и не на «и/а/но». Лучше чуть позже t (дать договорить), чем раньше."""
+    pts = [x for x in _end_points(words) if lo <= x[0] <= hi and t - before <= x[0] <= t + after]
+    if pts:
+        return max(pts, key=lambda x: _cut_score(x[1], x[2], x[3], x[0] - t, x[0] >= t))[0]
+    # пауз нет — режем там, где промежуток между словами самый большой
+    near = [(w["e"], (words[i + 1]["s"] - w["e"]) if i + 1 < len(words) else math.inf)
+            for i, w in enumerate(words) if lo <= w["e"] <= hi and -before <= w["e"] - t <= after]
+    if near:
+        return max(near, key=lambda x: x[1])[0]
+    return _not_inside_word(t, words, lo, hi)
+
+
+def snap_start(t, words, lo, hi, before=6.0, after=5.0):
+    """Начало клипа около t, в пределах [lo, hi]: в паузе перед новой фразой, не на
+    полуслове и не сразу после «и/а/но». Лучше чуть раньше t (захватить начало фразы)."""
+    pts = [x for x in _start_points(words) if lo <= x[0] <= hi and t - before <= x[0] <= t + after]
+    if pts:
+        return max(pts, key=lambda x: _cut_score(x[1], x[2], x[3], x[0] - t, x[0] <= t))[0]
+    near = [(w["s"], (w["s"] - words[i - 1]["e"]) if i else math.inf)
+            for i, w in enumerate(words) if lo <= w["s"] <= hi and -before <= w["s"] - t <= after]
+    if near:
+        return max(near, key=lambda x: x[1])[0]
+    return _not_inside_word(t, words, lo, hi)
 
 
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
@@ -701,6 +792,8 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
     order = np.argsort(-smooth)
     clips = []
     busy = [{"s": a, "e": b} for a, b in taken]
+    words = all_words(segments)
+    min_len, max_len = CONFIG["min_len"], CONFIG["max_len"]
     for peak in order:
         if len(clips) >= CONFIG["clips"]:
             break
@@ -718,16 +811,19 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=()):
         else:
             s, e = peak - CONFIG["pre"], peak + CONFIG["post"]
             title, reason = "", ""
-        s = max(0.0, _snap_start(max(0.0, s), segments))
-        e = min(dur, _snap_end(min(dur, e), segments))
-        if e - s > CONFIG["max_len"]:          # слишком длинно — центрируем на пике
-            s = max(0.0, min(peak - CONFIG["max_len"] * 0.65, e - CONFIG["max_len"]))
-            e = s + CONFIG["max_len"]
-        if e - s < CONFIG["min_len"]:
-            extra = CONFIG["min_len"] - (e - s)
+        s, e = max(0.0, s), min(dur, e)
+        if e - s > max_len:                    # слишком длинно — центрируем на пике
+            s = max(0.0, min(peak - max_len * 0.65, e - max_len))
+            e = s + max_len
+        if e - s < min_len:
+            extra = min_len - (e - s)
             s = max(0.0, s - extra * 0.6)
-            e = min(dur, s + CONFIG["min_len"])
-        if e - s < CONFIG["min_len"] * 0.8:
+            e = min(dur, s + min_len)
+        # границы — в паузах между фразами: не начинать с середины и дать договорить
+        s = snap_start(s, words, lo=max(0.0, e - max_len), hi=max(0.0, min(peak - 1, e - min_len)))
+        e = snap_end(e, words, lo=min(dur, max(peak + 1, s + min_len * 0.8)),
+                     hi=min(dur, s + max_len))
+        if e - s < min_len * 0.8:
             continue
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
