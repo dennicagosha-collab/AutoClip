@@ -85,8 +85,8 @@ CONFIG = {
     "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче
     "bleep_pad": 0.06,        # запас вокруг слова, сек
 
-    # --- качество ---
-    "quality": 16,            # 14 = почти без потерь (файлы больше), 18 = легче
+    # --- экспорт ---
+    "preset": "TikTok 1080p60",   # имя пресета из load_presets()
 }
 # ======================================================
 
@@ -793,15 +793,104 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 _ENCODER = None            # какой кодек сработал: h264_nvenc или libx264
 WHISPER_DEVICE = "кэш"     # на чём шла расшифровка: cuda / cpu / кэш
 
+# пресеты экспорта: встроенные + свои из %APPDATA%\AutoClip\пресеты.json
+BUILTIN_PRESETS = [
+    {"name": "TikTok 1080p60", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000},
+]
+PRESETS_PATH = os.path.join(user_dir(), "пресеты.json")
+# цвет Rec. 709 во всех трёх полях + обычный (не полный) диапазон
+COLOR_FLAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+               "-color_range", "tv"]
 
-def _encoders(cfg):
-    q = str(cfg["quality"])
+
+def check_preset(p):
+    """Проверяет и приводит пресет к виду {name, w, h, fps, kbps}."""
+    try:
+        name = str(p["name"]).strip()
+        w, h, fps, kbps = int(p["w"]), int(p["h"]), int(p["fps"]), int(p["kbps"])
+    except (KeyError, TypeError, ValueError):
+        raise AutoClipError("❌ В пресете должны быть название, ширина, высота, кадры и битрейт.")
+    if not name:
+        raise AutoClipError("❌ У пресета нет названия.")
+    if not (240 <= w <= 4320 and 240 <= h <= 4320) or w % 2 or h % 2:
+        raise AutoClipError("❌ Ширина и высота — чётные, от 240 до 4320.")
+    if not 24 <= fps <= 120:
+        raise AutoClipError("❌ Кадров в секунду — от 24 до 120.")
+    if not 1000 <= kbps <= 100000:
+        raise AutoClipError("❌ Битрейт — от 1000 до 100000 Кбит/с.")
+    return {"name": name, "w": w, "h": h, "fps": fps, "kbps": kbps}
+
+
+def load_presets():
+    """Встроенные пресеты, затем свои. У встроенных builtin=True."""
+    out = [dict(p, builtin=True) for p in BUILTIN_PRESETS]
+    try:
+        with open(PRESETS_PATH, encoding="utf-8") as f:
+            user = json.load(f)
+    except (OSError, ValueError):
+        user = []
+    names = {p["name"] for p in out}
+    for p in user if isinstance(user, list) else []:
+        try:
+            p = check_preset(p)
+        except AutoClipError:
+            continue
+        if p["name"] not in names:
+            names.add(p["name"])
+            out.append(p)
+    return out
+
+
+def save_user_presets(presets):
+    """Сохраняет свои пресеты (встроенные пропускаются)."""
+    user = [check_preset(p) for p in presets if not p.get("builtin")
+            and p["name"] not in {b["name"] for b in BUILTIN_PRESETS}]
+    tmp = PRESETS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(user, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, PRESETS_PATH)
+
+
+def get_preset(value):
+    """Имя пресета или сам пресет → пресет. Неизвестное имя → первый встроенный."""
+    if isinstance(value, dict):
+        return check_preset(value)
+    for p in load_presets():
+        if p["name"] == value:
+            return check_preset(p)
+    return check_preset(BUILTIN_PRESETS[0])
+
+
+def _encoders(preset):
+    b, buf = f"{preset['kbps']}k", f"{preset['kbps'] * 2}k"
+    gop = str(preset["fps"] * 2)              # опорный кадр раз в 2 секунды
     return {
-        "h264_nvenc": ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr",
-                       "-cq", q, "-b:v", "0", "-maxrate", "60M", "-bufsize", "120M",
-                       "-spatial-aq", "1", "-temporal-aq", "1", "-profile:v", "high"],
-        "libx264": ["-c:v", "libx264", "-preset", "slow", "-crf", q, "-profile:v", "high"],
+        "h264_nvenc": ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "cbr",
+                       "-b:v", b, "-minrate", b, "-maxrate", b, "-bufsize", buf, "-g", gop,
+                       "-spatial-aq", "1", "-profile:v", "high"],
+        "libx264": ["-c:v", "libx264", "-preset", "slow", "-b:v", b, "-minrate", b,
+                    "-maxrate", b, "-bufsize", buf, "-g", gop, "-profile:v", "high"],
     }
+
+
+def frame_filters(vinfo, preset):
+    """Обрезка по центру под пропорции пресета, масштаб (lanczos) и частота кадров."""
+    sw, sh = vinfo["w"] - vinfo["w"] % 2, vinfo["h"] - vinfo["h"] % 2
+    W, H = preset["w"], preset["h"]
+    vf = []
+    cw, ch = sw, sh
+    if sw * H > sh * W:                       # шире, чем нужно (например, горизонтальная запись)
+        cw = int(sh * W / H) // 2 * 2
+    elif sh * W > sw * H:                     # выше, чем нужно
+        ch = int(sw * H / W) // 2 * 2
+    if (cw, ch) != (sw, sh) or (sw, sh) != (vinfo["w"], vinfo["h"]):
+        vf.append(f"crop={cw}:{ch}")
+    if (cw, ch) != (W, H):
+        vf.append(f"scale={W}:{H}:flags=lanczos")
+    vf.append("setsar=1")
+    if abs(vinfo.get("fps", 0) - preset["fps"]) > 0.01:
+        vf.append(f"fps={preset['fps']}")
+    return vf
 
 
 def clip_words(segments, s, e):
@@ -821,23 +910,16 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     Клип сначала собирается во временной папке и только потом встаёт на место out_path."""
     global _ENCODER
     cfg = cfg or CONFIG
+    preset = get_preset(cfg["preset"])
     s, e = clip["s"], clip["e"]
     dur = e - s
-    # родное разрешение записи — без пережатия в меньшее
-    if vinfo["w"] > vinfo["h"]:
-        H = vinfo["h"] - vinfo["h"] % 2
-        W = int(H * 9 / 16) // 2 * 2
-    else:
-        W, H = vinfo["w"] - vinfo["w"] % 2, vinfo["h"] - vinfo["h"] % 2
+    W, H = preset["w"], preset["h"]
 
     words = clip_words(segments, s, e)
     zooms = [z for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
 
     # --- видео ---
-    vf = []
-    if vinfo["w"] > vinfo["h"]:                       # если вдруг запись горизонтальная
-        vf.append(f"crop={W}:{H}")
-    vf.append("setsar=1")
+    vf = frame_filters(vinfo, preset)
     if cfg["zoom"] and zooms:
         A = cfg["zoom_amount"]
         env = "+".join(
@@ -851,7 +933,9 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         ass_name = "subs.ass"
         build_ass(words, W, H, os.path.join(tmpdir, ass_name), cfg)
         vf.append(f"ass={ass_name}")
-    vf.append("format=yuv420p")
+    # перевод в Rec. 709 и метки цвета в самих кадрах (ffmpeg 9 берёт их оттуда, а не из флагов)
+    vf.append("scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
+              "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv")
     vgraph = "[0:v]" + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
@@ -894,9 +978,11 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{s:.3f}", "-t", f"{dur:.3f}",
             "-i", os.path.abspath(video)] + extra_in + ["-filter_complex", graph,
             "-map", "[vout]", "-map", "[aout]"]
-    tail = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-movflags", "+faststart", tmp_out]
+    tail = COLOR_FLAGS + ["-fps_mode", "cfr", "-r", str(preset["fps"]),
+                          "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
+                          "-movflags", "+faststart", tmp_out]
 
-    encs = _encoders(cfg)
+    encs = _encoders(preset)
     names = [_ENCODER] if _ENCODER else list(encs)
     last_err = ""
     for name in names:
@@ -979,7 +1065,7 @@ OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook")
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "sub_max_words", "sub_max_chars",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
-               "bleep_sound", "bleep_volume", "bleep_pad", "quality", "hook")
+               "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook")
 
 
 def project_path(path):
@@ -1073,7 +1159,10 @@ def write_report(proj):
                        ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
         rep.append("")
     run_info = proj.get("run", {})
-    rep += [f"Запись: {fmt_time(vi['dur'])}, {vi['w']}x{vi['h']}"]
+    rep += [f"Запись: {fmt_time(vi['dur'])}, {vi['w']}x{vi['h']}, {vi.get('fps', 0):g} к/с"]
+    pr = get_preset(proj.get("settings", {}).get("preset", CONFIG["preset"]))
+    rep.append(f"Пресет: {pr['name']} — {pr['w']}x{pr['h']}, {pr['fps']} к/с, "
+               f"{pr['kbps']} Кбит/с, H.264")
     if run_info:
         rep.append(f"Время работы: {run_info.get('minutes', 0):.1f} мин")
         rep += [f"    {n}: {sec:.0f} с" for n, sec in run_info.get("timings", [])]
@@ -1224,8 +1313,15 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     t_start = time.time()
     vinfo = probe(video)
     log(f"🎬 {os.path.basename(video)} — {fmt_time(vinfo['dur'])}, {vinfo['w']}x{vinfo['h']}")
-    if vinfo["w"] > vinfo["h"]:
-        log("⚠️  Видео горизонтальное — обрежу центр под 9:16.")
+    preset = get_preset(CONFIG["preset"])
+    if vinfo["w"] * preset["h"] != vinfo["h"] * preset["w"]:
+        log(f"⚠️  Пропорции записи не как у клипа — возьму середину кадра "
+            f"и приведу к {preset['w']}x{preset['h']}.")
+    elif (vinfo["w"], vinfo["h"]) != (preset["w"], preset["h"]):
+        log(f"ℹ️  Клипы будут {preset['w']}x{preset['h']}.")
+    if abs(vinfo["fps"] - preset["fps"]) > 0.01:
+        log(f"⚠️  В записи {vinfo['fps']:g} кадров/с, клипы будут {preset['fps']}. Плавнее от "
+            f"этого не станет — лучше сразу писать в OBS {preset['fps']} кадров/с.")
 
     stem = os.path.splitext(os.path.abspath(video))[0]
     out_dir = stem + "_clips"
@@ -1298,6 +1394,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
         trash(os.path.join(out_dir, c["file"]))
     proj["clips"] = kept
     proj["settings"] = {k: CONFIG[k] for k in RENDER_KEYS if k in CONFIG}
+    proj["settings"]["preset"] = preset          # сам пресет: пересборка не зависит от списка
     proj["run"] = {"date": now_iso(), "timings": timings}
     save_project(proj)
 

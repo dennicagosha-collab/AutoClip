@@ -24,9 +24,9 @@ from PySide6.QtWidgets import (  # noqa: E402
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractItemView,
 )
 
-QUALITY = {"Максимальное": 14, "Высокое": 16, "Файлы полегче": 19}
 WEBCAM = {"Вебка сверху": 0.30, "Вебка снизу": 0.70, "По центру": 0.50}
 LLM_MODES = {"Авто": "auto", "Ollama на компьютере": "ollama", "Claude API": "anthropic",
              "Без модели": "none"}
@@ -37,7 +37,7 @@ LATER = "Появится в следующих версиях"
 DEFAULTS = {
     "clips": 10, "subs": True, "zoom": True, "hook": False, "bleep": True,
     "sound": "перелистывание", "marks": False, "nick": False, "cam": "Вебка сверху",
-    "quality": "Высокое", "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
+    "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "geometry": "", "player_geometry": "",
 }
@@ -379,9 +379,12 @@ class CutPage(QWidget):
         self.cam = self._combo(WEBCAM, "cam")
         form.addWidget(self.cam)
         form.addSpacing(16)
-        form.addWidget(QLabel("Качество"))
-        self.quality = self._combo(QUALITY, "quality")
-        form.addWidget(self.quality)
+        form.addWidget(QLabel("Пресет"))
+        self.preset = QComboBox()
+        self.preset.setMinimumWidth(170)
+        self.preset.setToolTip("Размер, кадры и битрейт клипов. Свой пресет — в «Настройках».")
+        self.preset.currentTextChanged.connect(lambda t: self._set("preset", t) if t else None)
+        form.addWidget(self.preset)
         form.addStretch(1)
         g.addLayout(form, 3, 0, 1, 3)
         lay.addWidget(box)
@@ -423,6 +426,7 @@ class CutPage(QWidget):
         lay.addLayout(row)
 
         self.refresh_sounds()
+        self.refresh_presets()
         self.sound.setEnabled(self.cb_bleep.isChecked())
 
     # --- виджеты, которые сами запоминают значение ---
@@ -446,6 +450,16 @@ class CutPage(QWidget):
             cb.setCurrentText(self.s[key])
         cb.currentTextChanged.connect(lambda t: self._set(key, t))
         return cb
+
+    def refresh_presets(self):
+        names = [p["name"] for p in autoclip.load_presets()]
+        want = self.s.get("preset")
+        self.preset.blockSignals(True)
+        self.preset.clear()
+        self.preset.addItems(names)
+        self.preset.setCurrentText(want if want in names else names[0])
+        self.preset.blockSignals(False)
+        self.s["preset"] = self.preset.currentText()
 
     # --- звуки ---
     def refresh_sounds(self):
@@ -516,7 +530,7 @@ class CutPage(QWidget):
         c["bleep"] = bool(s["bleep"])
         c["bleep_sound"] = s["sound"]
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
-        c["quality"] = QUALITY.get(s["quality"], 16)
+        c["preset"] = s["preset"]
         c["llm"] = s["llm"]
         c["ollama_model"] = s["ollama_model"] or DEFAULTS["ollama_model"]
 
@@ -768,10 +782,44 @@ class SettingsPage(QWidget):
         lay.addWidget(box)
 
         # --- экспорт ---
-        box = QGroupBox("Экспорт")
-        f = QFormLayout(box)
-        f.addRow(hint("Качество выбирается на «Нарезке». Пресеты под площадки — " + LATER.lower() + "."))
+        box = QGroupBox("Пресеты экспорта")
+        v = QVBoxLayout(box)
+        self.presets = QListWidget()
+        self.presets.setObjectName("clipList")
+        self.presets.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.presets.setFixedHeight(96)
+        v.addWidget(self.presets)
+        row = QHBoxLayout()
+        self.p_name = QLineEdit()
+        self.p_name.setPlaceholderText("Название, например «Shorts 1080p30»")
+        row.addWidget(self.p_name, 1)
+        self.p_w = self._spin(240, 4320, 1080, 2, "Ширина")
+        self.p_h = self._spin(240, 4320, 1920, 2, "Высота")
+        self.p_fps = self._spin(24, 120, 60, 1, "Кадров в секунду")
+        self.p_kbps = self._spin(1000, 100000, 18000, 500, "Битрейт, Кбит/с")
+        for label, w in (("", self.p_w), ("×", self.p_h), ("к/с", self.p_fps),
+                         ("Кбит/с", self.p_kbps)):
+            if label and label != "×":
+                row.addWidget(w)
+                row.addWidget(QLabel(label))
+            else:
+                if label:
+                    row.addWidget(QLabel(label))
+                row.addWidget(w)
+        b = QPushButton("Добавить")
+        b.clicked.connect(self.add_preset)
+        row.addWidget(b)
+        v.addLayout(row)
+        row = QHBoxLayout()
+        self.btn_del = QPushButton("Удалить выбранный")
+        self.btn_del.clicked.connect(self.delete_preset)
+        row.addWidget(self.btn_del)
+        self.p_state = hint("H.264, постоянный битрейт, MP4, цвет Rec. 709, звук AAC 320 кбит/с.")
+        row.addWidget(self.p_state, 1)
+        v.addLayout(row)
+        self.presets.currentRowChanged.connect(self._preset_selected)
         lay.addWidget(box)
+        self.refresh_presets()
 
         # --- на будущее ---
         box = QGroupBox("Канал и OBS")
@@ -802,6 +850,54 @@ class SettingsPage(QWidget):
     def _set(self, key, value):
         self.s[key] = value
         save_settings(self.s)
+
+    def _spin(self, lo, hi, val, step, tip):
+        sp = QSpinBox()
+        sp.setRange(lo, hi)
+        sp.setSingleStep(step)
+        sp.setValue(val)
+        sp.setToolTip(tip)
+        return sp
+
+    # --- пресеты ---
+    def refresh_presets(self, select=None):
+        self.all_presets = autoclip.load_presets()
+        self.presets.clear()
+        for p in self.all_presets:
+            extra = " · встроенный" if p.get("builtin") else ""
+            self.presets.addItem(f"{p['name']} — {p['w']}×{p['h']}, {p['fps']} к/с, "
+                                 f"{p['kbps']} Кбит/с{extra}")
+        names = [p["name"] for p in self.all_presets]
+        self.presets.setCurrentRow(names.index(select) if select in names else 0)
+        self.win.cut.refresh_presets()
+
+    def _preset_selected(self, row):
+        ok = 0 <= row < len(self.all_presets) and not self.all_presets[row].get("builtin")
+        self.btn_del.setEnabled(ok)
+
+    def add_preset(self):
+        new = {"name": self.p_name.text().strip(), "w": self.p_w.value(), "h": self.p_h.value(),
+               "fps": self.p_fps.value(), "kbps": self.p_kbps.value()}
+        try:
+            new = autoclip.check_preset(new)
+            if new["name"] in [p["name"] for p in self.all_presets]:
+                raise autoclip.AutoClipError("❌ Пресет с таким названием уже есть.")
+            autoclip.save_user_presets(self.all_presets + [new])
+        except (autoclip.AutoClipError, OSError) as e:
+            self.p_state.setText(str(e))
+            return
+        self.p_name.clear()
+        self.p_state.setText(f"Добавлен «{new['name']}». Выбрать его можно на «Нарезке».")
+        self.refresh_presets(select=new["name"])
+
+    def delete_preset(self):
+        row = self.presets.currentRow()
+        if not (0 <= row < len(self.all_presets)) or self.all_presets[row].get("builtin"):
+            return
+        name = self.all_presets[row]["name"]
+        autoclip.save_user_presets([p for i, p in enumerate(self.all_presets) if i != row])
+        self.p_state.setText(f"Пресет «{name}» удалён.")
+        self.refresh_presets()
 
     def pick_obs(self):
         d = QFileDialog.getExistingDirectory(self, "Папка записей OBS", self.obs.text())
