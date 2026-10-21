@@ -85,6 +85,11 @@ CONFIG = {
     "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче
     "bleep_pad": 0.06,        # запас вокруг слова, сек
 
+    # --- хук: 1–2 с яркой реакции из этого же клипа в самом начале ---
+    "hook": True,
+    "hook_min_reaction": 1.0,     # реакция для хука — не слабее этого
+    "hook_percentile": 97,        # и сильнее, чем 97% секунд этой записи
+
     # --- экспорт ---
     "preset": "TikTok 1080p60",   # имя пресета из load_presets()
 }
@@ -451,6 +456,25 @@ def _parse_moments(text):
     return out
 
 
+def _ask_llm(prompt, mode, max_tokens=2000):
+    """Текст ответа языковой модели (ollama / anthropic). Ошибки сети — исключением."""
+    if mode == "ollama":
+        r = _http_json(CONFIG["ollama_url"] + "/api/chat", {
+            "model": CONFIG["ollama_model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "format": "json", "stream": False,
+            "options": {"temperature": 0.3, "num_ctx": 16384},
+        }, {}, timeout=600)
+        return r.get("message", {}).get("content", "")
+    r = _http_json("https://api.anthropic.com/v1/messages", {
+        "model": CONFIG["anthropic_model"],
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }, {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
+        "anthropic-version": "2023-06-01"}, timeout=180)
+    return "".join(b.get("text", "") for b in r.get("content", []))
+
+
 def llm_moments(segments, mode, progress=None, cancel=None):
     if mode == "none" or not segments:
         return []
@@ -472,23 +496,7 @@ def llm_moments(segments, mode, progress=None, cancel=None):
             progress("модель", (i - 1) / n_chunks * 100, f"кусок {i} из {n_chunks}")
         prompt = LLM_PROMPT + "\n".join(lines)
         try:
-            if mode == "ollama":
-                r = _http_json(CONFIG["ollama_url"] + "/api/chat", {
-                    "model": CONFIG["ollama_model"],
-                    "messages": [{"role": "user", "content": prompt}],
-                    "format": "json", "stream": False,
-                    "options": {"temperature": 0.3, "num_ctx": 16384},
-                }, {}, timeout=600)
-                text = r.get("message", {}).get("content", "")
-            else:
-                r = _http_json("https://api.anthropic.com/v1/messages", {
-                    "model": CONFIG["anthropic_model"],
-                    "max_tokens": 2000,
-                    "messages": [{"role": "user", "content": prompt}],
-                }, {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                    "anthropic-version": "2023-06-01"}, timeout=180)
-                text = "".join(b.get("text", "") for b in r.get("content", []))
-            moments += _parse_moments(text)
+            moments += _parse_moments(_ask_llm(prompt, mode))
         except urllib.error.HTTPError as e:
             log(f"   ⚠️  модель ответила ошибкой {e.code}: {e.read()[:300]!r}")
         except Exception as e:
@@ -547,6 +555,130 @@ def score_timeline(loud, segments, moments):
     parts = {name: np.convolve(arr, k, mode="same") for name, arr in parts.items()}
     smooth = sum(parts.values())
     return smooth, loud_z, parts
+
+
+# ---------------- хук ----------------
+
+HOOK_MIN, HOOK_MAX = 1.0, 2.0     # длина хука, сек
+HOOK_SKIP_START = 3.0             # пик в первые 3 с — клип и так начинается с действия
+
+
+def reaction_curve(parts):
+    """Реакция стримера по секундам: смех, мат, восклицания и громкость, но громкость
+    без речи рядом (просто звук игры) весит втрое меньше."""
+    import numpy as np
+    voice = parts["речь"] > 0.05
+    return (parts["смех"] + parts["восклицания"] + parts["мат"]
+            + parts["громкость"] * np.where(voice, 1.0, 0.3))
+
+
+def _hook_window(i, s, e, words):
+    """1–2 с вокруг секунды i, по границам слов, строго внутри клипа [s, e]."""
+    hs = max(s, i - 0.5)
+    he = min(e, hs + 1.6)
+    for w in words:
+        if w["s"] < hs < w["e"] and w["s"] >= s and he - w["s"] <= HOOK_MAX:
+            hs = w["s"]
+        if w["s"] < he < w["e"] and w["e"] <= e and w["e"] - hs <= HOOK_MAX:
+            he = w["e"]
+    if he - hs < HOOK_MIN:
+        he = min(e, hs + HOOK_MIN)
+        hs = max(s, he - HOOK_MIN)
+    return round(hs, 2), round(he, 2)
+
+
+def _what_reaction(i, parts):
+    if not parts:
+        return "яркая реакция"
+    what = [name for key, name in (("смех", "смех"), ("мат", "мат"), ("восклицания", "крик"))
+            if parts[key][i] > 0.1]
+    if parts["громкость"][i] > 1.5 and parts["речь"][i] > 0.05 and "крик" not in what:
+        what.append("громкий голос")
+    return " и ".join(what) or "яркая реакция"
+
+
+def hook_threshold(reaction, cfg=None):
+    """Порог яркой реакции для этой записи: у тихих и громких записей он разный."""
+    import numpy as np
+    cfg = cfg or CONFIG
+    return max(cfg["hook_min_reaction"],
+               float(np.percentile(np.asarray(reaction, dtype=float), cfg["hook_percentile"])))
+
+
+def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None):
+    """Решение про хук для клипа [s, e]. Хук всегда берётся из этого же клипа.
+    Возвращает {"on", "auto", "start", "end", "why"}: auto — совет ставить хук,
+    start/end — лучший момент (есть, даже если совет «не ставить»), on заполняет рендер."""
+    import numpy as np
+    cfg = cfg or CONFIG
+    rec = {"on": False, "auto": False, "start": None, "end": None, "why": ""}
+    reaction = np.asarray(reaction, dtype=float)
+    a, b = int(math.ceil(s)), min(len(reaction), int(math.floor(e)))
+    lo, hi = int(math.ceil(s + HOOK_SKIP_START)), b - 1
+    if hi <= lo:
+        rec["why"] = "клип слишком короткий для хука"
+        return rec
+    i = lo + int(np.argmax(reaction[lo:hi]))
+    peak = float(reaction[i])
+    start_level = float(reaction[a:min(b, a + 2)].max())
+    words = [w for seg in segments if seg["e"] > s and seg["s"] < e for w in seg["words"]]
+    rec["start"], rec["end"] = _hook_window(i, s, e, words)
+    if threshold is None:
+        threshold = hook_threshold(reaction, cfg)
+    if peak < threshold:
+        rec["why"] = "нет яркой реакции в клипе"
+    elif start_level >= 0.7 * peak:
+        rec["why"] = "клип и так начинается с сильного момента"
+    else:
+        rec["auto"] = True
+        rec["why"] = f"{_what_reaction(i, parts)} на {int(i - s)}-й секунде клипа"
+    return rec
+
+
+HOOK_PROMPT = """Ты монтажёр коротких вертикальных видео. Есть клип из стрима и кусок из его середины, который хотим показать в самом начале как тизер на 1–2 секунды, а потом клип с начала.
+Раскроет ли этот тизер развязку шутки или главный сюрприз, так что досматривать станет неинтересно?
+Ответь ТОЛЬКО JSON: {"spoils": true или false, "reason": "коротко почему"}
+
+Клип:
+<<CLIP>>
+
+Тизер:
+<<HOOK>>
+"""
+
+
+def llm_hook_spoils(clip_text, hook_text, mode):
+    """(True/False, почему) — раскроет ли тизер развязку; (None, "") — модель не ответила."""
+    if mode == "none" or not hook_text.strip():
+        return None, ""
+    prompt = HOOK_PROMPT.replace("<<CLIP>>", clip_text).replace("<<HOOK>>", hook_text)
+    try:
+        text = _ask_llm(prompt, mode, max_tokens=300)
+        m = re.search(r"\{.*\}", text, re.S)
+        data = json.loads(m.group(0)) if m else {}
+        if isinstance(data.get("spoils"), bool):
+            return data["spoils"], str(data.get("reason", ""))[:200]
+    except Exception as e:
+        log(f"   ⚠️  модель не ответила про хук ({e})")
+    return None, ""
+
+
+def text_between(segments, s, e):
+    return " ".join(w["w"] for seg in segments if seg["e"] > s and seg["s"] < e
+                    for w in seg["words"] if s - 0.05 <= w["s"] and w["e"] <= e + 0.05)
+
+
+def hook_span(rec, cfg):
+    """(начало, конец) хука для рендера или None. Личная настройка клипа важнее общей
+    галочки; хук вне клипа не ставится никогда (правило 5)."""
+    h = rec.get("hook") or {}
+    want = rec.get("overrides", {}).get("hook")
+    if want is None:
+        want = bool(cfg.get("hook")) and bool(h.get("auto"))
+    hs, he = h.get("start"), h.get("end")
+    if want and hs is not None and rec["start"] <= hs < he <= rec["end"]:
+        return hs, he
+    return None
 
 
 def _snap_start(t, segments):
@@ -757,7 +889,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             prev = cur[-1]
             chars = sum(len(x["w"]) + 1 for x in cur) + len(wd["w"])
             if (len(cur) >= cfg["sub_max_words"] or chars > cfg["sub_max_chars"]
-                    or wd["s"] - prev["e"] > 0.45 or re.search(r"[.!?…]$", prev["w"])):
+                    or wd["s"] - prev["e"] > 0.45 or re.search(r"[.!?…]$", prev["w"])
+                    or wd.get("part") != prev.get("part")):
                 chunks.append(cur)
                 cur = []
         cur.append(wd)
@@ -771,7 +904,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if not any(disp):
             continue
         next_start = chunks[ci + 1][0]["s"] if ci + 1 < len(chunks) else ch[-1]["e"] + 0.3
-        chunk_end = min(ch[-1]["e"] + 0.25, next_start)
+        chunk_end = min(ch[-1]["e"] + 0.25, next_start, ch[-1].get("until", math.inf))
         for wi, wd in enumerate(ch):
             st = wd["s"]
             en = ch[wi + 1]["s"] if wi + 1 < len(ch) else chunk_end
@@ -906,24 +1039,58 @@ def clip_words(segments, s, e):
 
 
 def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None):
-    """clip: {'s', 'e', 'zooms'} во времени записи. Возвращает число запиканных мест или None.
-    Клип сначала собирается во временной папке и только потом встаёт на место out_path."""
+    """clip: {'s', 'e', 'zooms', 'hook': (начало, конец) или None} во времени записи.
+    Хук — кусок этого же клипа, ставится в самое начало, затем клип с начала.
+    Возвращает число запиканных мест или None. Клип собирается во временной папке
+    и только потом встаёт на место out_path."""
     global _ENCODER
     cfg = cfg or CONFIG
     preset = get_preset(cfg["preset"])
     s, e = clip["s"], clip["e"]
     dur = e - s
     W, H = preset["w"], preset["h"]
+    hook = clip.get("hook")
+    if hook and not (s <= hook[0] < hook[1] <= e):
+        raise AutoClipError("❌ Хук вне клипа — так нельзя.")
+    hd = (hook[1] - hook[0]) if hook else 0.0      # длина хука = сдвиг клипа в готовом видео
+    total = hd + dur
 
-    words = clip_words(segments, s, e)
-    zooms = [z for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
+    # слова и зумы во времени готового видео
+    words = []
+    if hook:
+        # субтитры хука исчезают ровно на склейке
+        words += [dict(w, part=0, until=hd) for w in clip_words(segments, hook[0], hook[1])]
+    words += [dict(w, s=w["s"] + hd, e=w["e"] + hd, part=1) for w in clip_words(segments, s, e)]
+    zooms = [z - s + hd for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
+    if hook:
+        zooms = [0.12] + zooms                      # хук — сразу крупно
+
+    # --- склейка хука и клипа ---
+    pre = ",".join(frame_filters(vinfo, preset))
+    fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
+    src = os.path.abspath(video)
+    if hook:
+        inputs = ["-ss", f"{hook[0]:.3f}", "-t", f"{hd:.3f}", "-i", src,
+                  "-ss", f"{s:.3f}", "-t", f"{dur:.3f}", "-i", src]
+        fade = 0.03                                 # без щелчка на склейке
+        graph = (f"[0:v]{pre},setpts=PTS-STARTPTS[hv];[1:v]{pre},setpts=PTS-STARTPTS[cv];"
+                 f"[0:a]{fmt},afade=t=out:st={max(0.0, hd - fade):.3f}:d={fade},"
+                 f"asetpts=PTS-STARTPTS[ha];"
+                 f"[1:a]{fmt},afade=t=in:d={fade},asetpts=PTS-STARTPTS[ca];"
+                 f"[hv][ha][cv][ca]concat=n=2:v=1:a=1[vc][ac];")
+        vin, ain, snd_in = "[vc]", "[ac]", 2
+        vf = []
+    else:
+        inputs = ["-ss", f"{s:.3f}", "-t", f"{dur:.3f}", "-i", src]
+        graph = ""
+        vin, ain, snd_in = "[0:v]", "[0:a]", 1
+        vf = [pre]
 
     # --- видео ---
-    vf = frame_filters(vinfo, preset)
     if cfg["zoom"] and zooms:
         A = cfg["zoom_amount"]
         env = "+".join(
-            f"clip((t-{z - s - 0.12:.2f})/0.12,0,1)*clip(({z - s + 1.6:.2f}-t)/0.35,0,1)"
+            f"clip((t-{z - 0.12:.2f})/0.12,0,1)*clip(({z + 1.6:.2f}-t)/0.35,0,1)"
             for z in zooms)
         Z = f"(1+{A}*min(1,{env}))"
         fy = cfg["zoom_focus_y"]
@@ -936,7 +1103,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     # перевод в Rec. 709 и метки цвета в самих кадрах (ffmpeg 9 берёт их оттуда, а не из флагов)
     vf.append("scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
               "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv")
-    vgraph = "[0:v]" + ",".join(vf) + "[vout]"
+    graph += vin + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
     bleeps = []
@@ -944,22 +1111,21 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         pad = cfg["bleep_pad"]
         for wd in words:
             if is_profane(wd["w"]):
-                a, b = max(0.0, wd["s"] - pad), min(dur, wd["e"] + pad)
+                a, b = max(0.0, wd["s"] - pad), min(total, wd["e"] + pad)
                 if bleeps and a <= bleeps[-1][1]:
                     bleeps[-1][1] = b
                 else:
                     bleeps.append([a, b])
-    fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
     snd = sound_path(cfg["bleep_sound"]) if bleeps else None
     extra_in = []
     if bleeps:
         E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in bleeps)
-        agraph = f"[0:a]{fmt},volume=0:enable='{E}'[am]"
+        agraph = f"{ain}{fmt},volume=0:enable='{E}'[am]"
         if snd:
             sdur = sound_duration(snd)
             extra_in = ["-i", os.path.abspath(snd)]
             n = len(bleeps)
-            agraph += f";[1:a]{fmt},volume={cfg['bleep_volume']},asplit={n}" + \
+            agraph += f";[{snd_in}:a]{fmt},volume={cfg['bleep_volume']},asplit={n}" + \
                       "".join(f"[s{i}]" for i in range(n))
             for i, (a, b) in enumerate(bleeps):
                 L = max(0.12, min(sdur, (b - a) + 0.35))
@@ -971,13 +1137,12 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         else:
             agraph = agraph.replace("[am]", "[aout]")
     else:
-        agraph = f"[0:a]{fmt}[aout]"
+        agraph = f"{ain}{fmt}[aout]"
 
     tmp_out = os.path.join(tmpdir, "render.mp4")
-    graph = vgraph + ";" + agraph
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{s:.3f}", "-t", f"{dur:.3f}",
-            "-i", os.path.abspath(video)] + extra_in + ["-filter_complex", graph,
-            "-map", "[vout]", "-map", "[aout]"]
+    graph += ";" + agraph
+    base = ["ffmpeg", "-y", "-v", "error"] + inputs + extra_in + [
+        "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]"]
     tail = COLOR_FLAGS + ["-fps_mode", "cfr", "-r", str(preset["fps"]),
                           "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
                           "-movflags", "+faststart", tmp_out]
@@ -1129,7 +1294,8 @@ def make_clip_record(c, num, file):
         "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
-        "hook": {"on": False, "start": None, "end": None, "why": "хук ещё не сделан (этап 4)"},
+        "hook": c.get("hook") or {"on": False, "auto": False, "start": None, "end": None,
+                                  "why": "нет данных для хука"},
         "status": "new", "overrides": {}, "bleeps": None,
         "created": now_iso(), "rendered": None,
         "published": {},       # площадка → {"date", "url", "views": [...]}
@@ -1154,6 +1320,7 @@ def write_report(proj):
             rep.append(f"    из чего оценка: {parts}")
         rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
                    f"зумов: {len(c['zooms'])}")
+        rep.append("    " + hook_text(c))
         if c["overrides"]:
             rep.append("    свои настройки: " +
                        ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
@@ -1170,6 +1337,20 @@ def write_report(proj):
             rep.append(f"    кодек: {run_info['encoder']}")
     with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(rep))
+
+
+def hook_text(c):
+    """Одна строка про хук для отчёта и окна."""
+    h = c.get("hook") or {}
+    if h.get("on"):
+        return (f"хук: {fmt_time(h['start'])} в записи, {h['end'] - h['start']:.1f} с "
+                f"(с {h['start'] - c['start']:.0f}-й секунды клипа) — {h['why']}")
+    forced = c.get("overrides", {}).get("hook")
+    if forced is False:
+        return "без хука — выключен для этого клипа"
+    if h.get("auto"):
+        return f"без хука — выключен галочкой (был бы: {h['why']})"
+    return f"без хука — {h.get('why') or 'нет данных'}"
 
 
 def load_segments(proj):
@@ -1208,17 +1389,28 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
 
     segments = load_segments(proj)
     cfg = clip_config(proj, clip)
+    if (s, e) != (clip["start"], clip["end"]) or clip.get("hook", {}).get("start") is None:
+        # границы сдвинулись — момент для хука ищем заново внутри новых границ
+        if proj.get("reaction"):
+            clip["hook"] = decide_hook(s, e, proj["reaction"], segments,
+                                       threshold=proj.get("hook_threshold"), cfg=cfg)
+        elif clip.get("hook", {}).get("start") is not None and \
+                not (s <= clip["hook"]["start"] and clip["hook"]["end"] <= e):
+            clip["hook"].update(auto=False, why="момент хука оказался вне клипа")
+    span = hook_span(dict(clip, start=s, end=e), cfg)
     out = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
     log(f"🔁 Пересобираю {clip['file']} ({fmt_time(s)}–{fmt_time(e)})")
     if progress:
         progress("рендер", 0, clip["file"])
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        bl = render_clip(src, {"s": s, "e": e, "zooms": clip["zooms"]}, segments,
+        bl = render_clip(src, {"s": s, "e": e, "zooms": clip["zooms"], "hook": span}, segments,
                          proj["source_info"], out, tmp, cfg, cancel)
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso())
+    clip["hook"]["on"] = span is not None
+    log("   " + hook_text(clip))
     save_project(proj)
     write_report(proj)
     if progress:
@@ -1251,6 +1443,8 @@ def main():
     ap.add_argument("--subs", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--zoom", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--bleep", action=argparse.BooleanOptionalAction, default=None)
+    ap.add_argument("--hook", action=argparse.BooleanOptionalAction, default=None,
+                    help="хук в начале; с --rebuild — только для этого клипа")
     ap.add_argument("--sound", help="звук на мат: перелистывание / буп / свист / бип / тишина / свой файл")
     ap.add_argument("--analyze-only", action="store_true", help="только найти моменты, без рендера")
     ap.add_argument("--rebuild", metavar="КЛИП",
@@ -1267,7 +1461,7 @@ def main():
         sys.exit(1)
     migrate_user_data()
     flags = {"subs": args.subs, "zoom": args.zoom, "bleep": args.bleep,
-             "bleep_sound": args.sound}
+             "bleep_sound": args.sound, "hook": args.hook}
     try:
         if args.rebuild:
             # флаги становятся личными настройками этого клипа
@@ -1376,17 +1570,36 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     smooth, loud_z, parts = score_timeline(loud, segments, moments)
     clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts,
                        taken=[(c["start"], c["end"]) for c in kept])
-    prog("поиск", 100)
     if not clips:
+        prog("поиск", 100)
         log("😕 Ярких моментов не нашлось. Попробуй уменьшить min_len или подключить модель.")
         return None
     log(f"✂️  Нашёл {len(clips)} клипов")
+
+    reaction = reaction_curve(parts)
+    thr = hook_threshold(reaction)
+    proj["reaction"] = [round(float(x), 2) for x in reaction]   # для пересборки со сдвигом
+    proj["hook_threshold"] = round(thr, 2)
+    for i, c in enumerate(clips, 1):
+        check_cancel(cancel)
+        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr)
+        h = c["hook"]
+        if h["auto"] and mode != "none" and CONFIG["hook"]:
+            prog("поиск", i / len(clips) * 100, "проверяю хуки моделью")
+            spoils, why = llm_hook_spoils(text_between(segments, c["s"], c["e"]),
+                                          text_between(segments, h["start"], h["end"]), mode)
+            if spoils:
+                h.update(auto=False, why="модель: тизер раскроет развязку" +
+                         (f" — {why}" if why else ""))
+    prog("поиск", 100)
     t = mark("поиск моментов", t)
 
     if analyze_only:
         for i, c in enumerate(clips, 1):
             log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
                 f"оценка {c['score']:.1f} — {c['title']}")
+            log("       " + hook_text({"start": c["s"], "hook": dict(
+                c["hook"], on=c["hook"]["auto"] and CONFIG["hook"])}))
         return out_dir
 
     os.makedirs(out_dir, exist_ok=True)
@@ -1407,8 +1620,11 @@ def process(video, analyze_only=False, progress=None, cancel=None):
             log(f"   [{i}/{len(clips)}] {name}")
             prog("рендер", (i - 1) / len(clips) * 100, name)
             rec = make_clip_record(c, num, name)
-            rec["bleeps"] = render_clip(video, c, segments, vinfo, os.path.join(out_dir, name),
-                                        tmp, clip_config(proj, rec), cancel)
+            cfg = clip_config(proj, rec)
+            span = hook_span(rec, cfg)
+            rec["hook"]["on"] = span is not None
+            rec["bleeps"] = render_clip(video, dict(c, hook=span), segments, vinfo,
+                                        os.path.join(out_dir, name), tmp, cfg, cancel)
             if rec["bleeps"] is None:
                 num -= 1
                 continue

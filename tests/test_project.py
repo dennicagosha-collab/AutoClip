@@ -71,7 +71,10 @@ def test_process_writes_project_and_rebuild_works(video, fake_trash):
     assert time.time() - t0 < 30
     assert rec["start"] == round(new_start, 2)
     assert rec["overrides"] == {"zoom": False}
-    assert abs(_probe_dur(os.path.join(out_dir, c["file"])) - (rec["end"] - rec["start"])) < 0.2
+    h = rec["hook"]
+    hook_len = h["end"] - h["start"] if h["on"] else 0.0
+    assert abs(_probe_dur(os.path.join(out_dir, c["file"]))
+               - (rec["end"] - rec["start"] + hook_len)) < 0.2
     assert len(os.listdir(fake_trash)) == 1           # старая версия — в корзине
 
     saved = autoclip.load_project(out_dir)

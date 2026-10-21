@@ -35,7 +35,7 @@ VIDEO_FILTER = "Видео (*.mp4 *.mkv *.mov *.flv *.ts *.webm);;Все фай�
 LATER = "Появится в следующих версиях"
 
 DEFAULTS = {
-    "clips": 10, "subs": True, "zoom": True, "hook": False, "bleep": True,
+    "clips": 10, "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": False, "nick": False, "cam": "Вебка сверху",
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
@@ -363,7 +363,9 @@ class CutPage(QWidget):
         g.setVerticalSpacing(10)
         self.cb_subs = self._check("Субтитры", "subs")
         self.cb_zoom = self._check("Зум на эмоциях", "zoom")
-        self.cb_hook = self._check("Хук в начале", "hook", later=True)
+        self.cb_hook = self._check("Хук в начале", "hook")
+        self.cb_hook.setToolTip("1–2 секунды яркой реакции из этого же клипа в самом начале. "
+                                "Ставится, только где есть сильный момент.")
         self.cb_marks = self._check("Метки из OBS", "marks", later=True)
         self.cb_nick = self._check("Ник в углу", "nick", later=True)
         self.cb_bleep = self._check("Мат звуком", "bleep")
@@ -551,6 +553,7 @@ class CutPage(QWidget):
         c["subs"] = bool(s["subs"])
         c["zoom"] = bool(s["zoom"])
         c["bleep"] = bool(s["bleep"])
+        c["hook"] = bool(s["hook"])
         c["bleep_sound"] = s["sound"]
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -722,7 +725,8 @@ class ClipsPage(QWidget):
             it = QListWidgetItem(
                 f"{c['num']:02d}   ★ {c['score']:.1f}   {c['title']}\n"
                 f"      {st} · {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
-                f" · {c['end'] - c['start']:.0f} с")
+                f" · {c['end'] - c['start']:.0f} с"
+                f" · {'хук' if c.get('hook', {}).get('on') else 'без хука'}")
             it.setData(Qt.UserRole, c["id"])
             it.setSizeHint(QSize(0, 52))
             self.list.addItem(it)
@@ -754,6 +758,8 @@ class ClipsPage(QWidget):
                  f"Оценка {c['score']:.1f}" + (f" — {parts}" if parts else ""),
                  f"В записи: {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}, "
                  f"зумов: {len(c['zooms'])}, запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}"]
+        ht = autoclip.hook_text(c)
+        lines.append(ht[:1].upper() + ht[1:])
         if c.get("reason"):
             lines.append(f"Почему: {c['reason']}")
         self.info.setText("<br>".join(lines))
