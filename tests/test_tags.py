@@ -136,3 +136,20 @@ def test_description_tab(tmp_path, monkeypatch):
 
     saved = json.load(open(autoclip.SETTINGS_PATH, encoding="utf-8"))
     assert saved["hashtags"] == "#стрим" and saved["platform_tags"]["youtube"] == "#shorts"
+
+
+def test_ollama_request_for_thinking_model(monkeypatch):
+    """Qwen3 просим не думать вслух, а если подумала — рассуждения выкидываем."""
+    sent = {}
+
+    def fake_http(url, payload, headers, timeout):
+        sent.update(payload)
+        return {"message": {"content": '<think>хм, а что если</think>{"title": "Ок", "tags": []}'}}
+    monkeypatch.setattr(autoclip, "_http_json", fake_http)
+    monkeypatch.setitem(autoclip.CONFIG, "ollama_model", "qwen3:14b")
+    assert autoclip._ask_llm("x", "ollama") == '{"title": "Ок", "tags": []}'
+    assert sent["think"] is False and sent["format"] == "json"
+    monkeypatch.setitem(autoclip.CONFIG, "ollama_model", "qwen2.5:14b")
+    sent.clear()
+    autoclip._ask_llm("x", "ollama")
+    assert "think" not in sent                       # старым моделям параметр не шлём

@@ -57,7 +57,7 @@ CONFIG = {
     # --- языковая модель для оценки моментов ---
     # auto = Ollama, если запущена; иначе Claude API, если задан ANTHROPIC_API_KEY; иначе без неё
     "llm": "auto",                  # auto / ollama / anthropic / none
-    "ollama_model": "qwen2.5:14b",
+    "ollama_model": "qwen3:14b",
     "ollama_url": "http://localhost:11434",
     "anthropic_model": "claude-haiku-5-5",
 
@@ -502,16 +502,25 @@ def _parse_moments(text):
     return out
 
 
+_THINKING_MODELS = ("qwen3", "deepseek-r1", "magistral", "gpt-oss")
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
 def _ask_llm(prompt, mode, max_tokens=2000):
     """Текст ответа языковой модели (ollama / anthropic). Ошибки сети — исключением."""
     if mode == "ollama":
-        r = _http_json(CONFIG["ollama_url"] + "/api/chat", {
-            "model": CONFIG["ollama_model"],
+        model = CONFIG["ollama_model"]
+        payload = {
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "format": "json", "stream": False,
             "options": {"temperature": 0.3, "num_ctx": 16384},
-        }, {}, timeout=600)
-        return r.get("message", {}).get("content", "")
+        }
+        if model.lower().startswith(_THINKING_MODELS):
+            payload["think"] = False             # Qwen3 и др. иначе сначала «думают вслух»
+        r = _http_json(CONFIG["ollama_url"] + "/api/chat", payload, {}, timeout=600)
+        # если модель всё же подумала вслух — рассуждения не нужны, нужен только ответ
+        return _THINK_BLOCK.sub("", r.get("message", {}).get("content", "")).strip()
     r = _http_json("https://api.anthropic.com/v1/messages", {
         "model": CONFIG["anthropic_model"],
         "max_tokens": max_tokens,
