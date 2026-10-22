@@ -1375,6 +1375,116 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     return None
 
 
+# ---------------- обложка ----------------
+
+COVER_WINDOW = 1.0     # кадр для обложки ищем ±1 с вокруг самой яркой реакции
+COVER_FPS = 4          # сколько кадров в секунду смотреть
+
+
+def _face_detector():
+    """Детектор лиц OpenCV, если он установлен (иначе обложка выбирается по резкости)."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+    det = cv2.CascadeClassifier(path) if os.path.isfile(path) else None
+    return None if det is None or det.empty() else det
+
+
+def cover_moment(clip, reaction):
+    """Секунда записи с самой яркой реакцией внутри клипа — вокруг неё ищем обложку."""
+    import numpy as np
+    s, e = clip["start"], clip["end"]
+    n = 0 if reaction is None else len(reaction)
+    a, b = int(math.ceil(s + 0.5)), min(n, int(e - 0.5))
+    if b <= a:
+        return (s + e) / 2
+    return a + int(np.argmax(np.asarray(reaction[a:b], dtype=float))) + 0.5
+
+
+def webcam_zone(cfg, h):
+    """Строки кадра, где вебка: сверху, снизу или весь кадр (по «Раскладке»)."""
+    fy = cfg.get("zoom_focus_y", 0.3)
+    if fy < 0.45:
+        return 0, h // 2
+    if fy > 0.55:
+        return h // 2, h
+    return 0, h
+
+
+def score_cover_frame(gray, det=None, zone=None):
+    """Насколько кадр хорош для обложки: лицо в зоне вебки, резкость, не тёмный.
+    Возвращает (оценка, есть ли лицо)."""
+    import numpy as np
+    f = gray.astype(np.int16)
+    sharp = float(np.var(np.diff(f, axis=1))) + float(np.var(np.diff(f, axis=0)))
+    score = math.log1p(sharp)
+    if gray.mean() < 25:                          # почти чёрный кадр — плохая обложка
+        score -= 3.0
+    face = False
+    if det is not None:
+        a, b = zone or (0, gray.shape[0])
+        found = det.detectMultiScale(gray[a:b], scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
+        if len(found):
+            face = True
+            biggest = max(fw * fh for (_, _, fw, fh) in found)
+            score += 10.0 + 50.0 * biggest / gray.size
+    return score, face
+
+
+def pick_cover_time(video, vinfo, t, cfg, cancel=None):
+    """Из кадров t±1 с выбирает лучший для обложки. Возвращает (время, есть ли лицо)."""
+    import numpy as np
+    preset = get_preset(cfg["preset"])
+    w = 270
+    h = int(round(w * preset["h"] / preset["w"] / 2)) * 2
+    t0 = max(0.0, t - COVER_WINDOW)
+    vf = ",".join(frame_filters(vinfo, preset) + [f"fps={COVER_FPS}", f"scale={w}:{h}", "format=gray"])
+    p = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{2 * COVER_WINDOW:.3f}",
+                        "-i", video, "-vf", vf, "-f", "rawvideo", "-"],
+                       capture_output=True, creationflags=_NO_WINDOW)
+    check_cancel(cancel)
+    raw = np.frombuffer(p.stdout, np.uint8)
+    n = len(raw) // (w * h)
+    if p.returncode != 0 or n == 0:
+        return t, False
+    frames = raw[:n * w * h].reshape(n, h, w)
+    det = _face_detector()
+    zone = webcam_zone(cfg, h)
+    scored = [score_cover_frame(fr, det, zone) for fr in frames]
+    best = max(range(n), key=lambda i: scored[i][0])
+    return t0 + best / COVER_FPS, scored[best][1]
+
+
+def make_cover(video, vinfo, clip, reaction, cover_path, cfg=None, cancel=None):
+    """Обложка клипа <клип>.jpg: кадр с самой яркой реакцией (с лицом, если найдётся),
+    в размере клипа, без субтитров и зума. Кадр всегда из самого клипа.
+    Возвращает {"file", "t", "face"} или None — обложка не должна ломать нарезку."""
+    cfg = cfg or CONFIG
+    try:
+        t, face = pick_cover_time(video, vinfo, cover_moment(clip, reaction), cfg, cancel)
+        t = min(max(t, clip["start"]), clip["end"] - 0.05)
+        preset = get_preset(cfg["preset"])
+        vf = ",".join(frame_filters(vinfo, preset) + ["format=yuvj420p"])
+        tmp = cover_path + ".tmp.jpg"
+        p = run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", video, "-frames:v", "1",
+                 "-vf", vf, "-q:v", "2", tmp], cancel=cancel)
+        if p.returncode != 0 or not os.path.isfile(tmp):
+            return None
+        replace_file(tmp, cover_path)
+        return {"file": os.path.basename(cover_path), "t": round(t, 2), "face": bool(face)}
+    except Cancelled:
+        raise
+    except Exception as e:
+        log(f"   ⚠️  обложка не получилась: {e}")
+        return None
+
+
+def cover_path_for(folder, clip_file):
+    return os.path.join(folder, os.path.splitext(clip_file)[0] + ".jpg")
+
+
 # ---------------- 8. файлы и папка пользователя ----------------
 
 SETTINGS_PATH = os.path.join(user_dir(), "настройки.json")
@@ -1600,7 +1710,9 @@ def set_status(path, ref, status):
     if clip["status"] == "rejected":
         raise AutoClipError("❌ Клип уже в корзине.")
     if status == "rejected":
-        trash(os.path.join(os.path.dirname(proj["_path"]), clip["file"]))
+        folder = os.path.dirname(proj["_path"])
+        trash(os.path.join(folder, clip["file"]))
+        trash(cover_path_for(folder, clip["file"]))
     clip["status"] = status
     clip["status_date"] = now_iso()
     save_project(proj)
@@ -1646,6 +1758,10 @@ def write_report(proj):
         rep.append("    " + hook_text(c))
         if c.get("quiet_start"):
             rep.append("    тихое начало — первые 3 с без звука")
+        if c.get("cover"):
+            cv = c["cover"]
+            rep.append(f"    обложка: {cv['file']} (кадр {fmt_time(cv['t'])}"
+                       f"{', лицо' if cv.get('face') else ''})")
         if c["overrides"]:
             rep.append("    свои настройки: " +
                        ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
@@ -1735,6 +1851,9 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
                 quiet_start=quiet_start(out))
+    clip["cover"] = make_cover(src, proj["source_info"], clip, proj.get("reaction") or [],
+                               cover_path_for(os.path.dirname(proj["_path"]), clip["file"]),
+                               cfg, cancel)
     clip["hook"]["on"] = span is not None
     log("   " + hook_text(clip))
     save_project(proj)
@@ -2109,6 +2228,8 @@ def process(video, analyze_only=False, progress=None, cancel=None):
                 continue
             rec["rendered"] = now_iso()
             rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
+            rec["cover"] = make_cover(video, vinfo, rec, reaction,
+                                      cover_path_for(out_dir, name), cfg, cancel)
             proj["clips"].append(rec)
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
     prog("рендер", 100)

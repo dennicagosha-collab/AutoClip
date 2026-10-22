@@ -75,7 +75,7 @@ def test_process_writes_project_and_rebuild_works(video, fake_trash):
     hook_len = h["end"] - h["start"] if h["on"] else 0.0
     assert abs(_probe_dur(os.path.join(out_dir, c["file"]))
                - (rec["end"] - rec["start"] + hook_len)) < 0.2
-    assert len(os.listdir(fake_trash)) == 1           # старая версия — в корзине
+    assert len([f for f in os.listdir(fake_trash) if f.endswith(".mp4")]) == 1   # старая версия — в корзине
 
     saved = autoclip.load_project(out_dir)
     assert autoclip.find_clip(saved, c["id"])["start"] == rec["start"]

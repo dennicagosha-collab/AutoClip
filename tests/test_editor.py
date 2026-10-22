@@ -52,7 +52,7 @@ def test_rejected_goes_to_trash(cut, fake_trash):
     c = autoclip.load_project(cut)["clips"][0]
     autoclip.set_status(cut, c["id"], "rejected")
     assert not os.path.exists(os.path.join(cut, c["file"]))
-    assert len(os.listdir(fake_trash)) == 1                 # не удалён, а в корзине
+    assert len([f for f in os.listdir(fake_trash) if f.endswith(".mp4")]) == 1   # не удалён, а в корзине
     with pytest.raises(autoclip.AutoClipError):
         autoclip.set_status(cut, c["id"], "good")
     assert "rejected" == autoclip.find_clip(autoclip.load_project(cut), c["id"])["status"]

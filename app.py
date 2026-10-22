@@ -917,6 +917,7 @@ class _LeftClick:
 
 FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}))
 SHIFT = 2.0          # шаг сдвига начала и конца, сек
+COVER_W, COVER_H = 34, 60   # обложка в списке клипов
 
 
 class ClipsPage(QWidget):
@@ -968,6 +969,9 @@ class ClipsPage(QWidget):
         self.list.setObjectName("clipList")
         self.list.setWordWrap(True)
         self.list.setTextElideMode(Qt.ElideNone)
+        self.list.setIconSize(QSize(COVER_W, COVER_H))
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._covers = {}              # обложки списка: путь → (время изменения, значок)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
         ll.addWidget(self.list, 1)
@@ -1079,6 +1083,9 @@ class ClipsPage(QWidget):
         row.addWidget(self.btn_rebuild)
         self.state = hint("")
         row.addWidget(self.state, 1)
+        ed.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(8)
         self.btn_good = QPushButton("👍  Хороший")
         self.btn_good.clicked.connect(self.toggle_good)
         self.btn_trash = QPushButton("В корзину")
@@ -1090,6 +1097,7 @@ class ClipsPage(QWidget):
         self.btn_show.clicked.connect(self.show_file)
         for w in (self.btn_good, self.btn_trash, self.btn_save, self.btn_show):
             row.addWidget(w)
+        row.addStretch(1)
         ed.addLayout(row)
         rl.addWidget(self.editor)
         self.editor.setEnabled(False)
@@ -1203,10 +1211,13 @@ class ClipsPage(QWidget):
             it = QListWidgetItem(
                 f"{c['num']:02d}   ★ {c['score']:.1f}   {'📍 ' if c.get('marks') else ''}"
                 f"{c['title']}\n"
-                f"      {autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
+                f"{autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
                 f" · {c['end'] - c['start']:.0f} с · " + " · ".join(autoclip.clip_tags(c)))
             if c.get("marks"):
                 it.setToolTip("Клип по метке из OBS")
+            icon = self.cover_icon(c)
+            if icon:
+                it.setIcon(icon)
             it.setData(Qt.UserRole, c["id"])
             self.list.addItem(it)
             if c["id"] == select_id:
@@ -1231,6 +1242,28 @@ class ClipsPage(QWidget):
         if not (it and self.proj):
             return None
         return autoclip.find_clip(self.proj, it.data(Qt.UserRole))
+
+    def cover_icon(self, c):
+        """Маленькая обложка клипа для списка (пересчитывается, только если файл изменился)."""
+        from PySide6.QtGui import QIcon
+        if not c.get("cover"):
+            return None
+        path = os.path.join(os.path.dirname(self.proj["_path"]), c["cover"]["file"])
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        cached = self._covers.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        pm = QPixmap(path)
+        if pm.isNull():
+            return None
+        pm = pm.scaled(COVER_W * 2, COVER_H * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm.setDevicePixelRatio(2)
+        icon = QIcon(pm)
+        self._covers[path] = (mtime, icon)
+        return icon
 
     def clip_path(self, c):
         return os.path.join(os.path.dirname(self.proj["_path"]), c["file"])

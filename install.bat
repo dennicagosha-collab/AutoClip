@@ -14,7 +14,7 @@ if errorlevel 1 goto badpython
 echo.
 echo [1/3] Ставлю библиотеки, это несколько минут...
 %PY% -m pip install --upgrade pip
-%PY% -m pip install --only-binary=:all: faster-whisper numpy PySide6 send2trash pytest nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+%PY% -m pip install --only-binary=:all: faster-whisper numpy PySide6 send2trash pytest "opencv-python-headless<5" nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 if errorlevel 1 goto pipfail
 
 echo.
