@@ -78,7 +78,7 @@ def test_process_uses_llm_title_and_tags(tmp_path, monkeypatch, fake_trash):
             {"s": 20.8, "e": 21.4, "w": "смотри"}]}], f, ensure_ascii=False)
 
     def fake_llm(prompt, mode, max_tokens=2000):
-        if "tags" in prompt and "title" in prompt and "расшифровка короткого клипа" in prompt:
+        if prompt.startswith(autoclip.META_PROMPT.split("<<CLIP>>")[0]):
             return '{"title": "Смотри сюда", "tags": ["#bg3", "#ор"]}'
         if "spoils" in prompt:
             return '{"spoils": false, "reason": ""}'
@@ -153,3 +153,9 @@ def test_ollama_request_for_thinking_model(monkeypatch):
     sent.clear()
     autoclip._ask_llm("x", "ollama")
     assert "think" not in sent                       # старым моделям параметр не шлём
+
+
+def test_llm_meta_drops_empty_and_profane_tags(monkeypatch):
+    monkeypatch.setattr(autoclip, "_ask_llm", lambda *a, **k:
+                        '{"title": "Чародей без ячеек", "tags": ["#мем", "#хуя", "#чародей", "#игрок", "#bg3"]}')
+    assert autoclip.llm_clip_meta("текст", "ollama")["tags"] == ["#чародей", "#bg3"]
