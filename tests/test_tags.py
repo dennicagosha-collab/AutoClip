@@ -159,3 +159,54 @@ def test_llm_meta_drops_empty_and_profane_tags(monkeypatch):
     monkeypatch.setattr(autoclip, "_ask_llm", lambda *a, **k:
                         '{"title": "Чародей без ячеек", "tags": ["#мем", "#хуя", "#чародей", "#игрок", "#bg3"]}')
     assert autoclip.llm_clip_meta("текст", "ollama")["tags"] == ["#чародей", "#bg3"]
+
+
+@pytest.mark.parametrize("want,models,expect", [
+    ("qwen3:14b", ["qwen3:14b"], "qwen3:14b"),
+    ("qwen2.5:14b", ["qwen3:14b"], "qwen3:14b"),            # старое имя — берём скачанную
+    ("qwen3", ["qwen3:latest", "llama3:8b"], "qwen3:latest"),
+    ("qwen3:8b", ["llama3:8b", "qwen3:14b"], "qwen3:14b"),  # та же семья
+    ("mistral", ["llama3:8b"], "llama3:8b"),                # хоть какая-то
+    ("qwen3:14b", [], None),
+])
+def test_resolve_ollama_model(monkeypatch, want, models, expect):
+    monkeypatch.setitem(autoclip.CONFIG, "ollama_model", want)
+    assert autoclip.resolve_ollama_model(models) == expect
+
+
+def test_pick_llm_switches_to_downloaded_model(monkeypatch):
+    logs = []
+    monkeypatch.setattr(autoclip, "log", logs.append)
+    monkeypatch.setattr(autoclip, "_ollama_alive", lambda: True)
+    monkeypatch.setattr(autoclip, "ollama_models", lambda: ["qwen3:14b"])
+    monkeypatch.setitem(autoclip.CONFIG, "ollama_model", "qwen2.5:14b")
+    assert autoclip.pick_llm("auto") == "ollama"
+    assert autoclip.CONFIG["ollama_model"] == "qwen3:14b"
+    assert any("нет в Ollama" in m for m in logs)
+    monkeypatch.setattr(autoclip, "ollama_models", lambda: [])
+    assert autoclip.pick_llm("auto") in ("none", "anthropic")      # моделей нет — без неё
+
+
+def test_llm_failure_warned_once_per_cut(tmp_path, monkeypatch, fake_trash):
+    import urllib.error
+    v = tmp_path / "запись.mp4"
+    audio = "aevalsrc='0.03*sin(2*PI*300*t)*(1+25*between(mod(t,20),10,12))':s=48000:d=60"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=270x480:r=30:d=60",
+                    "-f", "lavfi", "-i", audio, "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(v)], check=True)
+    segs = [{"s": t, "e": t + 2.4, "text": "ну вот смотри сюда",
+             "words": [{"s": t + i * 0.6, "e": t + i * 0.6 + 0.5, "w": w}
+                       for i, w in enumerate(["ну", "вот", "смотри", "сюда"])]} for t in range(0, 60, 4)]
+    with open(tmp_path / "запись.transcript.json", "w", encoding="utf-8") as f:
+        json.dump(segs, f, ensure_ascii=False)
+
+    def broken(*a, **k):
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+    logs = []
+    monkeypatch.setattr(autoclip, "log", logs.append)
+    monkeypatch.setattr(autoclip, "pick_llm", lambda m: "ollama")
+    monkeypatch.setattr(autoclip, "_ask_llm", broken)
+    autoclip.CONFIG.update(clips=3)
+    out = autoclip.process(str(v))
+    assert len(autoclip.load_project(out)["clips"]) >= 2
+    assert sum("про название" in m for m in logs) == 1               # одна строка, а не на каждый клип

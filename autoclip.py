@@ -471,14 +471,59 @@ def _ollama_alive():
         return False
 
 
+def ollama_models():
+    """Какие модели скачаны в Ollama ([] — Ollama не запущена или моделей нет)."""
+    try:
+        with urllib.request.urlopen(CONFIG["ollama_url"] + "/api/tags", timeout=2) as r:
+            return [m["name"] for m in json.loads(r.read().decode("utf-8")).get("models", [])]
+    except Exception:
+        return []
+
+
+def resolve_ollama_model(models=None):
+    """Модель из настроек, если она скачана; иначе — подходящая скачанная (та же семья,
+    потом qwen3:14b, потом любая). None — скачанных моделей нет."""
+    models = ollama_models() if models is None else models
+    if not models:
+        return None
+    want = CONFIG["ollama_model"].strip()
+    names = {m.lower(): m for m in models}
+    for cand in (want, want + ":latest"):
+        if cand.lower() in names:
+            return names[cand.lower()]
+    family = want.split(":")[0].lower()
+    return (next((m for m in models if m.lower().split(":")[0] == family), None)
+            or names.get("qwen3:14b") or models[0])
+
+
 def pick_llm(mode):
-    if mode == "auto":
+    """Какую модель звать: ollama / anthropic / none. Для Ollama заодно проверяет, что
+    модель из настроек скачана, а если нет — берёт скачанную и говорит об этом."""
+    if mode in ("auto", "ollama"):
         if _ollama_alive():
-            return "ollama"
-        if os.environ.get("ANTHROPIC_API_KEY"):
+            model = resolve_ollama_model()
+            if model:
+                if model != CONFIG["ollama_model"]:
+                    log(f"   ⚠️  модели {CONFIG['ollama_model']} нет в Ollama — беру {model}")
+                    CONFIG["ollama_model"] = model
+                return "ollama"
+            log("   ⚠️  в Ollama нет ни одной модели — скачай: ollama pull qwen3:14b")
+        elif mode == "ollama":
+            log("   ⚠️  Ollama не запущена — ищу без модели")
+        if mode == "auto" and os.environ.get("ANTHROPIC_API_KEY"):
             return "anthropic"
         return "none"
     return mode
+
+
+_warned = set()
+
+
+def warn_once(msg):
+    """Одно и то же предупреждение — один раз за нарезку, а не на каждый клип."""
+    if msg not in _warned:
+        _warned.add(msg)
+        log(msg)
 
 
 def _parse_moments(text):
@@ -553,7 +598,7 @@ def llm_moments(segments, mode, progress=None, cancel=None):
         try:
             moments += _parse_moments(_ask_llm(prompt, mode))
         except urllib.error.HTTPError as e:
-            log(f"   ⚠️  модель ответила ошибкой {e.code}: {e.read()[:300]!r}")
+            warn_once(f"   ⚠️  модель ответила ошибкой {e.code}: {e.read()[:300]!r}")
         except Exception as e:
             log(f"   ⚠️  модель недоступна ({e}), продолжаю без неё")
             return moments
@@ -714,7 +759,7 @@ def llm_hook_spoils(clip_text, hook_text, mode):
         if isinstance(data.get("spoils"), bool):
             return data["spoils"], str(data.get("reason", ""))[:200]
     except Exception as e:
-        log(f"   ⚠️  модель не ответила про хук ({e})")
+        warn_once(f"   ⚠️  модель не ответила про хук ({e})")
     return None, ""
 
 
@@ -1971,7 +2016,7 @@ def llm_clip_meta(clip_text, mode):
         m = re.search(r"\{.*\}", text, re.S)
         data = json.loads(m.group(0)) if m else {}
     except Exception as e:
-        log(f"   ⚠️  модель не ответила про название ({e})")
+        warn_once(f"   ⚠️  модель не ответила про название ({e})")
         return None
     title = " ".join(_censor(w) for w in str(data.get("title", "")).replace('"', "").split())[:60]
     tags = [t for t in parse_tags(" ".join(map(str, data.get("tags", []) or [])))
@@ -2407,6 +2452,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
 
     need_ffmpeg()
     prepare_sounds()
+    _warned.clear()
     try:
         import numpy  # noqa: F401
     except ImportError:

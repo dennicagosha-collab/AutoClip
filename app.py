@@ -2379,7 +2379,18 @@ class SettingsPage(QWidget):
 
     def check_llm(self):
         autoclip.CONFIG["ollama_model"] = self.s["ollama_model"] or DEFAULTS["ollama_model"]
-        ollama = "Ollama работает" if autoclip._ollama_alive() else "Ollama не запущена"
+        if autoclip._ollama_alive():
+            models = autoclip.ollama_models()
+            want = autoclip.CONFIG["ollama_model"]
+            got = autoclip.resolve_ollama_model(models)
+            if not got:
+                ollama = "Ollama работает, но моделей нет — ollama pull qwen3:14b"
+            elif got.lower().split(":latest")[0] == want.lower().split(":latest")[0]:
+                ollama = f"Ollama работает, {want} скачана"
+            else:
+                ollama = f"Ollama работает, но {want} не скачана — возьму {got}"
+        else:
+            ollama = "Ollama не запущена"
         key = "ключ Claude есть" if os.environ.get("ANTHROPIC_API_KEY") else "ключа Claude нет"
         mode = autoclip.pick_llm(self.s["llm"])
         names = {"ollama": "Ollama", "anthropic": "Claude API", "none": "без модели"}
