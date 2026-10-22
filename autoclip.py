@@ -93,6 +93,10 @@ CONFIG = {
     "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче
     "bleep_pad": 0.06,        # запас вокруг слова, сек
 
+    # --- описание к клипу: хэштеги (всего не больше 5) ---
+    "hashtags": "",                                  # всегда добавлять
+    "platform_tags": {"tiktok": "", "youtube": "#shorts", "instagram": "#reels"},
+
     # --- метки из OBS (горячая клавиша «Добавить маркер главы», запись в Hybrid MP4) ---
     "marks": True,
     "mark_window": 30.0,      # метку ставят после момента: ищем момент за 30 с до неё
@@ -1634,7 +1638,8 @@ OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_
 RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
                "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook",
-               "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity")
+               "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity",
+               "hashtags", "platform_tags")
 
 
 def clip_dirs(video):
@@ -1730,6 +1735,8 @@ def make_clip_record(c, num, file):
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
         "marks": c.get("marks", []),           # метки из OBS, по которым найден клип
+        "meta": c.get("meta"),                 # название и хэштеги от языковой модели
+        "desc_custom": None,                   # своё описание по площадкам, если поправил
         "hook": c.get("hook") or {"on": False, "auto": False, "start": None, "end": None,
                                   "why": "нет данных для хука"},
         "status": "new", "overrides": {}, "bleeps": None,
@@ -1822,6 +1829,9 @@ def write_report(proj):
         rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
                    f"зумов: {len(c['zooms'])}")
         rep.append("    " + hook_text(c))
+        rep.append("    хэштеги (TikTok): " +
+                   (" ".join(compose_tags("tiktok", proj.get("settings") or CONFIG,
+                                          (c.get("meta") or {}).get("tags", []))) or "—"))
         if c.get("quiet_start"):
             rep.append("    тихое начало — первые 3 с без звука")
         if c.get("cover"):
@@ -1844,6 +1854,103 @@ def write_report(proj):
             rep.append(f"    кодек: {run_info['encoder']}")
     with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(rep))
+
+
+# ---------------- хэштеги и описание ----------------
+
+PLATFORMS = {"tiktok": "TikTok", "youtube": "YouTube", "instagram": "Instagram"}
+MAX_TAGS = 5
+_TAG_CHARS = re.compile(r"[^\w]", re.U)
+
+
+def parse_tags(text):
+    """«стрим, #игры  shorts» → ['#стрим', '#игры', '#shorts'] — без повторов и мусора."""
+    out, seen = [], set()
+    for raw in re.split(r"[\s,;]+", str(text or "")):
+        word = _TAG_CHARS.sub("", raw.lstrip("#"))
+        if word and word.lower() not in seen:
+            seen.add(word.lower())
+            out.append("#" + word)
+    return out
+
+
+def compose_tags(platform, cfg=None, content=()):
+    """Хэштеги для площадки: добавка площадки (#shorts), постоянные, потом по содержанию.
+    Не больше MAX_TAGS, без повторов."""
+    cfg = cfg or CONFIG
+    tags = (parse_tags(cfg.get("platform_tags", {}).get(platform, "")) +
+            parse_tags(cfg.get("hashtags", "")) + parse_tags(" ".join(content or [])))
+    out, seen = [], set()
+    for t in tags:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:MAX_TAGS]
+
+
+def clip_title(clip):
+    """Название клипа для описания: от модели, если есть, иначе своё (без мата)."""
+    meta = clip.get("meta") or {}
+    return (meta.get("title") or clip.get("title") or "").strip()
+
+
+def auto_description(clip, platform, cfg=None):
+    """Описание, которое программа предлагает сама: название и хэштеги."""
+    tags = compose_tags(platform, cfg, (clip.get("meta") or {}).get("tags", []))
+    return (clip_title(clip) + ("\n\n" + " ".join(tags) if tags else "")).strip()
+
+
+def clip_description(clip, platform, cfg=None):
+    """Текст под клип для площадки: свой текст Гоши для этой площадки, если он его
+    поправил, иначе — автоматический."""
+    custom = (clip.get("desc_custom") or {}).get(platform)
+    return custom.strip() if custom else auto_description(clip, platform, cfg)
+
+
+def set_description(path, ref, platform, text):
+    """Свой текст описания клипа для площадки. None или пусто — вернуть автоматический."""
+    if platform not in PLATFORMS:
+        raise AutoClipError(f"❌ Нет такой площадки: {platform}")
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    custom = dict(clip.get("desc_custom") or {})
+    text = (text or "").strip()
+    if text:
+        custom[platform] = text
+    else:
+        custom.pop(platform, None)
+    clip["desc_custom"] = custom or None
+    save_project(proj)
+    return clip
+
+
+META_PROMPT = """Ты ведёшь TikTok русскоязычного игрового стримера. Ниже расшифровка короткого клипа.
+Придумай:
+- title — короткое цепляющее название клипа, до 60 символов, по-русски, без мата, без кавычек и эмодзи;
+- tags — 2 или 3 хэштега по содержанию (игра, ситуация, эмоция), без общих вроде #fyp, #рекомендации.
+Ответь ТОЛЬКО JSON: {"title": "...", "tags": ["#...", "#..."]}
+
+Расшифровка:
+<<CLIP>>
+"""
+
+
+def llm_clip_meta(clip_text, mode):
+    """Название и 2–3 хэштега по содержанию от языковой модели или None."""
+    if mode == "none" or not clip_text.strip():
+        return None
+    try:
+        text = _ask_llm(META_PROMPT.replace("<<CLIP>>", clip_text), mode, max_tokens=300)
+        m = re.search(r"\{.*\}", text, re.S)
+        data = json.loads(m.group(0)) if m else {}
+    except Exception as e:
+        log(f"   ⚠️  модель не ответила про название ({e})")
+        return None
+    title = " ".join(_censor(w) for w in str(data.get("title", "")).replace('"', "").split())[:60]
+    tags = parse_tags(" ".join(map(str, data.get("tags", []) or [])))[:3]
+    if not title and not tags:
+        return None
+    return {"title": title, "tags": tags}
 
 
 def hook_text(c):
@@ -2258,6 +2365,11 @@ def process(video, analyze_only=False, progress=None, cancel=None):
             if spoils:
                 h.update(auto=False, why="модель: тизер раскроет развязку" +
                          (f" — {why}" if why else ""))
+        if mode != "none":
+            prog("поиск", i / len(clips) * 100, "название и хэштеги")
+            c["meta"] = llm_clip_meta(text_between(segments, c["s"], c["e"]), mode)
+            if c["meta"] and c["meta"]["title"]:
+                c["title"] = c["meta"]["title"]          # и имя файла станет понятным
     prog("поиск", 100)
     t = mark("поиск моментов", t)
 

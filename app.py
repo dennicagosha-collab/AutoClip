@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,7 @@ DEFAULTS = {
     "nick_opacity": autoclip.CONFIG["nick_opacity"],
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
+    "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
@@ -112,6 +114,8 @@ QComboBox QAbstractItemView {{ background: {SURFACE2}; border: 1px solid {BORDER
 QSpinBox::up-button, QSpinBox::down-button {{ width: 0; border: none; }}
 QPlainTextEdit {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
     font-family: "Cascadia Mono", Consolas; font-size: 9pt; padding: 10px; color: #b9bcc6; }}
+#desc {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {FG};
+         background: {SURFACE2}; padding: 8px; }}
 QProgressBar {{ background: {SURFACE2}; border: none; border-radius: 3px; }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
 #step {{ color: {MUTED}; font-size: 9pt; padding: 3px 10px; border-radius: 10px;
@@ -523,7 +527,7 @@ class PlayerPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(280, 420)
+        self.setMinimumSize(240, 240)      # на невысоком экране видео ужимается, а не наезжает
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
@@ -862,6 +866,8 @@ class CutPage(QWidget):
         c["nick_corner"] = s["nick_corner"]
         c["nick_size"] = NICK_SIZES.get(s["nick_size"], 40)
         c["nick_opacity"] = int(s["nick_opacity"])
+        c["hashtags"] = s["hashtags"]
+        c["platform_tags"] = dict(s["platform_tags"])
         c["bleep_sound"] = s["sound"]
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -1026,8 +1032,27 @@ class ClipsPage(QWidget):
         rl.addWidget(self.info)
 
         # --- редактор клипа ---
-        self.editor, ed = card()
+        self.editor, outer = card()
+        outer.setSpacing(10)
+        tabs = QHBoxLayout()
+        tabs.setSpacing(6)
+        self.ed_tabs = []
+        for i, name in enumerate(("Клип", "Описание")):
+            b = QPushButton(name)
+            b.setObjectName("filter")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, i=i: self.show_tab(i))
+            tabs.addWidget(b)
+            self.ed_tabs.append(b)
+        tabs.addStretch(1)
+        outer.addLayout(tabs)
+        self.ed_stack = QStackedWidget()
+        outer.addWidget(self.ed_stack)
+        page = QWidget()
+        ed = QVBoxLayout(page)
+        ed.setContentsMargins(0, 0, 0, 0)
         ed.setSpacing(10)
+        self.ed_stack.addWidget(page)
         row = QHBoxLayout()
         row.setSpacing(18)
         self.e_hook = Toggle(tip="1–2 с яркой реакции из этого клипа в начале")
@@ -1119,10 +1144,60 @@ class ClipsPage(QWidget):
             row.addWidget(w)
         row.addStretch(1)
         ed.addLayout(row)
+        # --- описание для площадок ---
+        page = QWidget()
+        dl = QVBoxLayout(page)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(8)
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        self.desc_btns = {}
+        for key, name in autoclip.PLATFORMS.items():
+            b = QPushButton(name)
+            b.setObjectName("filter")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, k=key: self.set_desc_platform(k))
+            prow.addWidget(b)
+            self.desc_btns[key] = b
+        prow.addStretch(1)
+        self.desc_tags = hint("")
+        prow.addWidget(self.desc_tags)
+        dl.addLayout(prow)
+        self.desc = QPlainTextEdit()
+        self.desc.setObjectName("desc")
+        self.desc.setFixedHeight(96)
+        self.desc.textChanged.connect(self._desc_edited)
+        dl.addWidget(self.desc)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        b = QPushButton("Копировать описание")
+        b.setObjectName("primary")
+        b.clicked.connect(self.copy_desc)
+        row.addWidget(b)
+        self.btn_desc_reset = QPushButton("Вернуть как было")
+        self.btn_desc_reset.clicked.connect(self.reset_desc)
+        row.addWidget(self.btn_desc_reset)
+        self.desc_state = hint("")
+        row.addWidget(self.desc_state, 1)
+        dl.addLayout(row)
+        dl.addStretch(1)
+        self.ed_stack.addWidget(page)
+        self.desc_platform = "tiktok"
+        self._desc_clip = None
+        self._desc_timer = QTimer(self)
+        self._desc_timer.setSingleShot(True)
+        self._desc_timer.setInterval(600)
+        self._desc_timer.timeout.connect(self.save_desc)
+        self.show_tab(0)
+        self.set_desc_platform("tiktok")
+
         rl.addWidget(self.editor)
         self.editor.setEnabled(False)
 
         split.addWidget(right)
+        left.setMinimumWidth(390)
+        split.setStretchFactor(0, 2)
+        split.setStretchFactor(1, 3)
         split.setSizes([440, 700])
         self.split = split
         lay.addWidget(split, 1)
@@ -1291,6 +1366,7 @@ class ClipsPage(QWidget):
     def _row_changed(self, row):
         if row == self._row:
             return
+        self.save_desc()
         if self._row >= 0 and not self._leave_ok():
             self.list.blockSignals(True)
             self.list.setCurrentRow(self._row)
@@ -1374,6 +1450,7 @@ class ClipsPage(QWidget):
         good = c["status"] == "good"
         self.btn_good.setText("↩  Убрать из хороших" if good else "👍  Хороший")
         self._changed()
+        self.refresh_desc()
 
     def _time(self, edit):
         try:
@@ -1422,6 +1499,85 @@ class ClipsPage(QWidget):
             return
         dur = self.proj["source_info"]["dur"]
         edit.setText(autoclip.fmt_time_exact(min(dur, max(0.0, t + delta))))
+
+    # ---------- описание ----------
+    def show_tab(self, i):
+        for j, b in enumerate(self.ed_tabs):
+            b.setChecked(j == i)
+        self.ed_stack.setCurrentIndex(i)
+
+    def set_desc_platform(self, key):
+        self.save_desc()
+        self.desc_platform = key
+        for k, b in self.desc_btns.items():
+            b.setChecked(k == key)
+        self.refresh_desc()
+
+    def tag_cfg(self):
+        """Хэштеги берутся из нынешних «Настроек», а не из тех, что были при нарезке."""
+        s = self.win.settings
+        return {"hashtags": s.get("hashtags", ""), "platform_tags": s.get("platform_tags", {})}
+
+    def refresh_desc(self):
+        c = self.current_clip()
+        self._desc_timer.stop()
+        self._desc_clip = c["id"] if c else None
+        self.desc.blockSignals(True)
+        self.desc.setPlainText(autoclip.clip_description(c, self.desc_platform, self.tag_cfg())
+                               if c else "")
+        self.desc.blockSignals(False)
+        self._desc_info(c)
+
+    def _desc_info(self, c):
+        text = self.desc.toPlainText()
+        n = len(re.findall(r"#\w+", text))
+        self.desc_tags.setText(f"хэштегов: {n} из {autoclip.MAX_TAGS}" +
+                               (" — многовато" if n > autoclip.MAX_TAGS else ""))
+        custom = bool(c and (c.get("desc_custom") or {}).get(self.desc_platform))
+        self.btn_desc_reset.setEnabled(custom)
+        self.desc_state.setText("Твой текст" if custom else "Предложено программой")
+
+    def _desc_edited(self):
+        n = len(re.findall(r"#\w+", self.desc.toPlainText()))
+        self.desc_tags.setText(f"хэштегов: {n} из {autoclip.MAX_TAGS}" +
+                               (" — многовато" if n > autoclip.MAX_TAGS else ""))
+        self._desc_timer.start()
+
+    def save_desc(self):
+        """Сохраняет правку описания (через 0,6 с после последней буквы)."""
+        if not self._desc_timer.isActive() and not self._desc_pending():
+            return
+        self._desc_timer.stop()
+        cid = self._desc_clip
+        if not (cid and self.proj):
+            return
+        c = autoclip.find_clip(self.proj, cid)
+        text = self.desc.toPlainText()
+        auto = autoclip.auto_description(c, self.desc_platform, self.tag_cfg())
+        autoclip.set_description(self.proj["_path"], cid, self.desc_platform,
+                                 None if text.strip() == auto.strip() else text)
+        self.proj = autoclip.load_project(self.proj["_path"])
+        self._desc_info(autoclip.find_clip(self.proj, cid))
+
+    def _desc_pending(self):
+        if not (self._desc_clip and self.proj):
+            return False
+        c = autoclip.find_clip(self.proj, self._desc_clip)
+        return self.desc.toPlainText().strip() != autoclip.clip_description(
+            c, self.desc_platform, self.tag_cfg()).strip()
+
+    def copy_desc(self):
+        self.save_desc()
+        QApplication.clipboard().setText(self.desc.toPlainText())
+        self.desc_state.setText("Скопировано ✓")
+
+    def reset_desc(self):
+        c = self.current_clip()
+        if c:
+            self._desc_timer.stop()
+            autoclip.set_description(self.proj["_path"], c["id"], self.desc_platform, None)
+            self.proj = autoclip.load_project(self.proj["_path"])
+            self.refresh_desc()
 
     # ---------- действия ----------
     def rebuild(self):
@@ -1944,9 +2100,28 @@ class SettingsPage(QWidget):
         v.addLayout(row)
         lay.addWidget(box)
 
-        # --- канал и OBS ---
-        box, v = card("Канал и OBS", "Запоминается уже сейчас. Слежка за папкой "
-                                     "и хэштеги — " + LATER.lower() + ".")
+        # --- хэштеги и описание ---
+        box, v = card("Хэштеги и описание",
+                      "Описание под клипом: название и хэштеги, всего не больше 5. Сначала "
+                      "добавка площадки, потом постоянные, потом по содержанию клипа "
+                      "(их придумывает языковая модель).")
+        self.tags = QLineEdit(self.s["hashtags"])
+        self.tags.setPlaceholderText("#стрим #игры")
+        self.tags.setMinimumWidth(300)
+        self.tags.textChanged.connect(lambda t: self._set("hashtags", t.strip()))
+        v.addWidget(option_row("Всегда добавлять", self.tags))
+        self.ptags = {}
+        for key, name in autoclip.PLATFORMS.items():
+            e = QLineEdit(self.s["platform_tags"].get(key, ""))
+            e.setMinimumWidth(300)
+            e.setPlaceholderText("ничего")
+            e.textChanged.connect(lambda t, k=key: self._set_ptag(k, t))
+            v.addWidget(option_row(f"Добавка для {name}", e))
+            self.ptags[key] = e
+        lay.addWidget(box)
+
+        # --- OBS ---
+        box, v = card("OBS", "Запоминается уже сейчас. Слежка за папкой — " + LATER.lower() + ".")
         obs = QHBoxLayout()
         obs.setSpacing(6)
         self.obs = QLineEdit(self.s["obs_dir"])
@@ -1958,11 +2133,6 @@ class SettingsPage(QWidget):
         b.clicked.connect(self.pick_obs)
         obs.addWidget(b)
         v.addWidget(option_row("Папка OBS", obs))
-        self.tags = QLineEdit(self.s["hashtags"])
-        self.tags.setPlaceholderText("#стрим #игры")
-        self.tags.setMinimumWidth(300)
-        self.tags.textChanged.connect(lambda t: self._set("hashtags", t.strip()))
-        v.addWidget(option_row("Хэштеги", self.tags))
         lay.addWidget(box)
 
         lay.addWidget(hint(f"Настройки хранятся в {autoclip.user_dir()}"))
@@ -1993,6 +2163,11 @@ class SettingsPage(QWidget):
         sp.setValue(val)
         sp.setToolTip(tip)
         return sp
+
+    def _set_ptag(self, key, text):
+        tags = dict(self.s.get("platform_tags") or {})
+        tags[key] = text.strip()
+        self._set("platform_tags", tags)
 
     def _nick_opacity(self, v):
         self.nick_op_label.setText(f"{v}%")
