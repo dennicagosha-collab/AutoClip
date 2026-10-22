@@ -110,3 +110,8 @@ def test_clips_page_empty_on_start(app_module, tmp_path):
     page.load(page.projects.itemData(0))                 # выбрал сам — открылась
     assert page.proj is not None and page.projects.currentIndex() == 0
     win.close()
+
+
+def test_windows_do_not_show_on_screen(app_module):
+    """При тестах окна рисуются в памяти и не всплывают на мониторе."""
+    assert QApplication.platformName() == "offscreen"
