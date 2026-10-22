@@ -2220,6 +2220,107 @@ def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cance
     return out_path
 
 
+# ---------------- 11. публикация ----------------
+# Программа только открывает страницу загрузки и кладёт описание в буфер.
+# Кнопки на сайтах нажимает сам Гоша — никаких автокликов (правило 4).
+
+UPLOAD_URLS = {
+    "tiktok": "https://www.tiktok.com/tiktokstudio/upload",
+    "youtube": "https://www.youtube.com/upload",
+    # у Instagram в браузере нет прямой страницы публикации — «Создать» (+) в меню слева
+    "instagram": "https://www.instagram.com/",
+}
+EDGE_PATHS = (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+              r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")
+
+
+def find_edge():
+    """Путь к Edge или None."""
+    found = shutil.which("msedge")
+    if found:
+        return found
+    for p in EDGE_PATHS:
+        if os.path.isfile(p):
+            return p
+    if os.name == "nt":
+        try:
+            import winreg
+            key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(root, key) as k:
+                        p = winreg.QueryValue(k, None)
+                        if p and os.path.isfile(p):
+                            return p
+                except OSError:
+                    continue
+        except ImportError:
+            pass
+    return None
+
+
+def browser_profile_dir():
+    """Отдельный профиль Edge для AutoClip: войти в соцсети нужно один раз."""
+    d = os.path.join(user_dir(), "браузер")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def side_by_side(rect, n):
+    """Делит прямоугольник экрана (x, y, w, h) на n окон рядом слева направо."""
+    x, y, w, h = rect
+    step = w // n
+    return [(x + i * step, y, step, h) for i in range(n)]
+
+
+def open_upload(platform, rect=None):
+    """Открывает страницу загрузки площадки отдельным окном Edge в режиме приложения
+    (rect — где поставить окно: x, y, ширина, высота). Нет Edge — браузер по умолчанию.
+    Возвращает "edge" или "browser"."""
+    if platform not in UPLOAD_URLS:
+        raise AutoClipError(f"❌ Нет такой площадки: {platform}")
+    url = UPLOAD_URLS[platform]
+    edge = find_edge()
+    if edge:
+        cmd = [edge, f"--app={url}", f"--user-data-dir={browser_profile_dir()}",
+               "--no-first-run", "--no-default-browser-check"]
+        if rect:
+            x, y, w, h = (int(v) for v in rect)
+            cmd += [f"--window-position={x},{y}", f"--window-size={w},{h}"]
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | _NO_WINDOW
+        subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+        return "edge"
+    import webbrowser
+    webbrowser.open(url)
+    return "browser"
+
+
+def mark_published(path, ref, platform, on=True, url=""):
+    """Отметка «выложен на площадке» (дата и, по желанию, ссылка на пост).
+    Первая отметка делает статус «выложен»; если снять все — снова «хороший»."""
+    if platform not in PLATFORMS:
+        raise AutoClipError(f"❌ Нет такой площадки: {platform}")
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    if clip["status"] == "rejected":
+        raise AutoClipError("❌ Клип в корзине.")
+    pub = dict(clip.get("published") or {})
+    if on:
+        old = pub.get(platform) or {}
+        pub[platform] = {**old, "date": old.get("date") or now_iso(),
+                         "url": (url or old.get("url") or "").strip()}
+    else:
+        pub.pop(platform, None)
+    clip["published"] = pub
+    if pub and clip["status"] != "published":
+        clip["status"], clip["status_date"] = "published", now_iso()
+    elif not pub and clip["status"] == "published":
+        clip["status"], clip["status_date"] = "good", now_iso()
+    save_project(proj)
+    write_report(proj)
+    return clip
+
+
 # ---------------- main ----------------
 
 def safe_name(s):

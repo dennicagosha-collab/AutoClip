@@ -940,6 +940,32 @@ class _LeftClick:
 
 # ---------------- раздел «Клипы» ----------------
 
+CLIP_PATH = Qt.UserRole + 2          # путь к файлу клипа в строке списка
+
+
+class ClipList(QListWidget):
+    """Список клипов: клип можно перетащить мышкой прямо в окно загрузки на сайте."""
+
+    def __init__(self):
+        super().__init__()
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragOnly)
+        self.setDefaultDropAction(Qt.CopyAction)
+
+    def mimeTypes(self):
+        return ["text/uri-list"]
+
+    def mimeData(self, items):
+        from PySide6.QtCore import QMimeData
+        md = QMimeData()
+        paths = [it.data(CLIP_PATH) for it in items if it.data(CLIP_PATH)]
+        md.setUrls([QUrl.fromLocalFile(p) for p in paths if os.path.isfile(p)])
+        return md
+
+    def supportedDropActions(self):
+        return Qt.CopyAction
+
+
 FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}))
 SHIFT = 2.0          # шаг сдвига начала и конца, сек
 COVER_W, COVER_H = 34, 60   # обложка в списке клипов
@@ -990,8 +1016,9 @@ class ClipsPage(QWidget):
         ll.addLayout(frow)
         self.filter = 0
         self.filter_btns[0].setChecked(True)
-        self.list = QListWidget()
+        self.list = ClipList()
         self.list.setObjectName("clipList")
+        self.list.setToolTip("Клип можно перетащить мышкой прямо в окно загрузки на сайте")
         self.list.setWordWrap(True)
         self.list.setTextElideMode(Qt.ElideNone)
         self.list.setIconSize(QSize(COVER_W, COVER_H))
@@ -1037,7 +1064,7 @@ class ClipsPage(QWidget):
         tabs = QHBoxLayout()
         tabs.setSpacing(6)
         self.ed_tabs = []
-        for i, name in enumerate(("Клип", "Описание")):
+        for i, name in enumerate(("Клип", "Описание", "Публикация")):
             b = QPushButton(name)
             b.setObjectName("filter")
             b.setCheckable(True)
@@ -1182,6 +1209,53 @@ class ClipsPage(QWidget):
         dl.addLayout(row)
         dl.addStretch(1)
         self.ed_stack.addWidget(page)
+
+        # --- публикация ---
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(8)
+        top = QHBoxLayout()
+        b = QPushButton("Во все три")
+        b.setObjectName("primary")
+        b.setToolTip("Три окна загрузки рядом на основном мониторе")
+        b.clicked.connect(self.publish_all)
+        top.addWidget(b)
+        top.addWidget(hint("Окно загрузки откроется отдельно, описание будет в буфере — "
+                           "вставь Ctrl+V. Клип перетащи мышкой из списка слева прямо "
+                           "в окно загрузки."), 1)
+        pl.addLayout(top)
+        self.pub_rows = {}
+        for key, name in autoclip.PLATFORMS.items():
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            lbl = QLabel(name)
+            lbl.setObjectName("rowLabel")
+            lbl.setFixedWidth(84)
+            row.addWidget(lbl)
+            state = hint("")
+            state.setFixedWidth(100)
+            row.addWidget(state)
+            go = QPushButton("Открыть")
+            go.setToolTip(f"Окно загрузки {name}, описание — в буфер")
+            go.clicked.connect(lambda _, k=key: self.publish(k))
+            row.addWidget(go)
+            mark = QPushButton()
+            mark.clicked.connect(lambda _, k=key: self.toggle_published(k))
+            row.addWidget(mark)
+            link = QLineEdit()
+            link.setPlaceholderText("ссылка на пост — по желанию")
+            link.editingFinished.connect(lambda k=key: self.save_link(k))
+            row.addWidget(link, 1)
+            row.addStretch(0)
+            pl.addLayout(row)
+            self.pub_rows[key] = (state, link, mark)
+        pl.addWidget(hint("Instagram в браузере: нажми «Создать» (+) в меню слева."))
+        self.pub_state = hint("")
+        pl.addWidget(self.pub_state)
+        pl.addStretch(1)
+        self.ed_stack.addWidget(page)
+
         self.desc_platform = "tiktok"
         self._desc_clip = None
         self._desc_timer = QTimer(self)
@@ -1314,6 +1388,7 @@ class ClipsPage(QWidget):
             if icon:
                 it.setIcon(icon)
             it.setData(Qt.UserRole, c["id"])
+            it.setData(CLIP_PATH, self.clip_path(c))
             self.list.addItem(it)
             if c["id"] == select_id:
                 row = i
@@ -1451,6 +1526,7 @@ class ClipsPage(QWidget):
         self.btn_good.setText("↩  Убрать из хороших" if good else "👍  Хороший")
         self._changed()
         self.refresh_desc()
+        self.refresh_pub()
 
     def _time(self, edit):
         try:
@@ -1578,6 +1654,70 @@ class ClipsPage(QWidget):
             autoclip.set_description(self.proj["_path"], c["id"], self.desc_platform, None)
             self.proj = autoclip.load_project(self.proj["_path"])
             self.refresh_desc()
+
+    # ---------- публикация ----------
+    def refresh_pub(self):
+        c = self.current_clip()
+        pub = (c or {}).get("published") or {}
+        for key, (state, link, mark) in self.pub_rows.items():
+            p = pub.get(key)
+            state.setText(f"выложен {p['date'][8:10]}.{p['date'][5:7]}" if p else "не выложен")
+            link.blockSignals(True)
+            link.setText((p or {}).get("url", ""))
+            link.blockSignals(False)
+            link.setVisible(bool(p))                 # ссылка нужна, только когда выложил
+            link.setEnabled(bool(p))
+            mark.setText("Снять отметку" if p else "Выложил")
+
+    def publish(self, platform, rect=None):
+        """Описание — в буфер, страница загрузки — отдельным окном. Публикует сам Гоша."""
+        c = self.current_clip()
+        if not c:
+            return
+        self.save_desc()
+        QApplication.clipboard().setText(
+            autoclip.clip_description(c, platform, self.tag_cfg()))
+        try:
+            how = autoclip.open_upload(platform, rect)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        name = autoclip.PLATFORMS[platform]
+        self.pub_state.setText(f"Открыл {name}{'' if how == 'edge' else ' в браузере'} · "
+                               f"описание для {name} в буфере")
+
+    def publish_all(self):
+        scr = QApplication.primaryScreen()
+        g = scr.availableGeometry()
+        k = scr.devicePixelRatio()
+        rects = autoclip.side_by_side((g.x() * k, g.y() * k, g.width() * k, g.height() * k),
+                                      len(autoclip.PLATFORMS))
+        for key, rect in reversed(list(zip(autoclip.PLATFORMS, rects))):
+            self.publish(key, rect)                  # TikTok последним — его описание в буфере
+        self.pub_state.setText("Открыл три окна · в буфере описание для TikTok, для остальных — "
+                               "«Копировать описание» на вкладке «Описание»")
+
+    def toggle_published(self, platform):
+        c = self.current_clip()
+        if not c:
+            return
+        on = platform not in (c.get("published") or {})
+        url = self.pub_rows[platform][1].text()
+        try:
+            autoclip.mark_published(self.proj["_path"], c["id"], platform, on, url)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self.base = {}
+        self.reload(c["id"])
+        self.show_tab(2)
+
+    def save_link(self, platform):
+        c = self.current_clip()
+        if c and platform in (c.get("published") or {}):
+            autoclip.mark_published(self.proj["_path"], c["id"], platform, True,
+                                    self.pub_rows[platform][1].text())
+            self.proj = autoclip.load_project(self.proj["_path"])
 
     # ---------- действия ----------
     def rebuild(self):
