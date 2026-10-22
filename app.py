@@ -37,11 +37,14 @@ LLM_MODES = {"Авто": "auto", "Ollama на компьютере": "ollama", "
 VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".webm")
 VIDEO_FILTER = "Видео (*.mp4 *.mkv *.mov *.flv *.ts *.webm);;Все файлы (*.*)"
 LATER = "Появится в следующих версиях"
+NICK_SIZES = {"Маленький": 32, "Средний": 40, "Крупный": 52}
 
 DEFAULTS = {
     "clips": 10, "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
+    "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
+    "nick_opacity": autoclip.CONFIG["nick_opacity"],
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "geometry": "", "player_geometry": "",
@@ -263,7 +266,7 @@ def option_row(text, widget, sub=None):
         s.setObjectName("rowHint")
         s.setWordWrap(True)
         col.addWidget(s)
-    col.addStretch(1)                  # у высоких строк подпись остаётся сверху
+        col.addStretch(1)              # у высоких строк подпись с пояснением остаётся сверху
     h.addLayout(col, 1)
     if isinstance(widget, QWidget):
         h.addWidget(widget, 0, Qt.AlignVCenter)
@@ -456,10 +459,11 @@ class SubsPreview(QWidget):
         super().__init__()
         self.setFixedSize(72, 128)
         self.setToolTip("Где будут субтитры. Красным — зона кнопок и подписей соцсетей.")
-        self.sub_y, self.safe = 0.6, True
+        self.sub_y, self.safe, self.subs, self.nick = 0.6, True, True, {}
 
-    def set_state(self, sub_y, safe):
-        self.sub_y, self.safe = sub_y, safe
+    def set_state(self, sub_y, safe, subs=True, nick=None):
+        """nick — настройки ника ({"nick": True, "nick_corner": …}) или пусто."""
+        self.sub_y, self.safe, self.subs, self.nick = sub_y, safe, subs, nick or {}
         self.update()
 
     def paintEvent(self, e):
@@ -478,16 +482,26 @@ class SubsPreview(QWidget):
                        h - int((z["top"] + z["bottom"]) * h), red)
             p.fillRect(0, int(z["top"] * h), int(z["left"] * w),
                        h - int((z["top"] + z["bottom"]) * h), red)
-        lay = autoclip.subs_layout(1080, 1920, dict(autoclip.CONFIG, sub_y=self.sub_y,
-                                                    safe_zone=self.safe))
-        l, _, r, _ = lay["box"]
-        bw = (r - l) / 1080 * w * 0.8
-        cx, cy = lay["x"] / 1080 * w, lay["y"] / 1920 * h
+        cfg = dict(autoclip.CONFIG, sub_y=self.sub_y, safe_zone=self.safe, nick=False)
+        cfg.update(self.nick)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#ffffff"))
-        p.drawRoundedRect(int(cx - bw / 2), int(cy - 4), int(bw), 8, 3, 3)
-        p.setBrush(QColor("#ffe600"))
-        p.drawRoundedRect(int(cx - bw / 6), int(cy - 4), int(bw / 3), 8, 3, 3)
+        if self.subs:
+            lay = autoclip.subs_layout(1080, 1920, cfg)
+            l, _, r, _ = lay["box"]
+            bw = (r - l) / 1080 * w * 0.8
+            cx, cy = lay["x"] / 1080 * w, lay["y"] / 1920 * h
+            p.setBrush(QColor("#ffffff"))
+            p.drawRoundedRect(int(cx - bw / 2), int(cy - 4), int(bw), 8, 3, 3)
+            p.setBrush(QColor("#ffe600"))
+            p.drawRoundedRect(int(cx - bw / 6), int(cy - 4), int(bw / 3), 8, 3, 3)
+        if cfg.get("nick") and str(cfg.get("nick_text", "")).strip():
+            nk = autoclip.nick_layout(1080, 1920, cfg)
+            nw = min(w * 0.6, len(cfg["nick_text"]) * nk["fs"] * 0.55 / 1080 * w)
+            nh = max(4, (nk["y1"] - nk["y0"]) / 1920 * h * 0.7)
+            x = nk["x"] / 1080 * w - (nw if nk["corner"][1] == "r" else 0)
+            y = nk["y0"] / 1920 * h
+            p.setBrush(QColor(255, 255, 255, int(255 * cfg.get("nick_opacity", 70) / 100)))
+            p.drawRoundedRect(QRectF(x, y, nw, nh), 2, 2)
         p.end()
 
 
@@ -843,6 +857,11 @@ class CutPage(QWidget):
         c["marks"] = bool(s["marks"])
         c["sub_y"] = autoclip.SUB_POSITIONS.get(s["sub_pos"], autoclip.CONFIG["sub_y"])
         c["safe_zone"] = bool(s["safe_zone"])
+        c["nick"] = bool(s["nick"])
+        c["nick_text"] = s["nick_text"]
+        c["nick_corner"] = s["nick_corner"]
+        c["nick_size"] = NICK_SIZES.get(s["nick_size"], 40)
+        c["nick_opacity"] = int(s["nick_opacity"])
         c["bleep_sound"] = s["sound"]
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -1015,8 +1034,9 @@ class ClipsPage(QWidget):
         self.e_zoom = Toggle()
         self.e_subs = Toggle()
         self.e_safe = Toggle(tip="Не заходить субтитрами под кнопки соцсетей")
+        self.e_nick = Toggle(tip="Ник в углу — текст и угол в «Настройках»")
         for text, w in (("Хук", self.e_hook), ("Зум", self.e_zoom), ("Субтитры", self.e_subs),
-                        ("Сейф-зона", self.e_safe)):
+                        ("Сейф-зона", self.e_safe), ("Ник", self.e_nick)):
             pair = QHBoxLayout()
             pair.setSpacing(8)
             pair.addWidget(w)
@@ -1327,9 +1347,10 @@ class ClipsPage(QWidget):
                      "bleep": bool(cfg["bleep"]), "subs": bool(cfg["subs"]),
                      "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
+                     "nick": bool(cfg.get("nick")),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
-                   self.e_start, self.e_end, self.e_sound)
+                   self.e_start, self.e_end, self.e_sound, self.e_nick)
         for w in widgets:
             w.blockSignals(True)
         fill_sounds(self.e_sound, cfg["bleep_sound"])
@@ -1340,10 +1361,11 @@ class ClipsPage(QWidget):
         self.e_subs.setChecked(b["subs"])
         self.e_pos.setCurrentText(autoclip.sub_position_name(b["sub_y"]))
         self.e_safe.setChecked(b["safe_zone"])
+        self.e_nick.setChecked(b["nick"])
         self.e_pos.setEnabled(b["subs"])
         self.e_safe.setEnabled(b["subs"])
         self.e_sound.setEnabled(b["bleep"])
-        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_safe):
+        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_safe, self.e_nick):
             w.update()
         self.e_start.setText(autoclip.fmt_time_exact(b["start"]))
         self.e_end.setText(autoclip.fmt_time_exact(b["end"]))
@@ -1365,6 +1387,7 @@ class ClipsPage(QWidget):
                 "bleep": self.e_bleep.isChecked(), "subs": self.e_subs.isChecked(),
                 "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
+                "nick": self.e_nick.isChecked(),
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -1809,10 +1832,46 @@ class SettingsPage(QWidget):
         self.cb_marks = self._toggle("marks")
         v.addWidget(option_row("Метки из OBS", self.cb_marks,
                                "Моменты, где ты нажал «Добавить маркер главы», идут первыми"))
-        self.cb_nick = Toggle(False, LATER)
-        self.cb_nick.setEnabled(False)
-        v.addWidget(option_row("Ник в углу", self.cb_nick, LATER))
         lay.addWidget(box)
+
+        # --- ник в углу ---
+        box, v = card("Ник в углу", "Тестовая функция: небольшая подпись в углу клипа. "
+                                    "Не заходит на субтитры и в зону кнопок соцсетей.")
+        self.cb_nick = self._toggle("nick")
+        v.addWidget(option_row("Показывать ник", self.cb_nick))
+        self.nick = QLineEdit(self.s["nick_text"])
+        self.nick.setMinimumWidth(220)
+        self.nick.textChanged.connect(lambda t: self._set("nick_text", t.strip()))
+        v.addWidget(option_row("Текст", self.nick))
+        self.nick_corner = self._combo(autoclip.NICK_CORNERS, "nick_corner")
+        v.addWidget(option_row("Угол", self.nick_corner))
+        self.nick_size = self._combo(NICK_SIZES, "nick_size")
+        v.addWidget(option_row("Размер", self.nick_size))
+        op = QHBoxLayout()
+        op.setSpacing(10)
+        self.nick_opacity = QSlider(Qt.Horizontal)
+        self.nick_opacity.setRange(30, 100)
+        self.nick_opacity.setSingleStep(5)
+        self.nick_opacity.setFixedWidth(180)
+        self.nick_opacity.setValue(int(self.s["nick_opacity"]))
+        self.nick_op_label = QLabel()
+        self.nick_op_label.setFixedWidth(40)
+        op.addWidget(self.nick_opacity)
+        op.addWidget(self.nick_op_label)
+        self.nick_opacity.valueChanged.connect(self._nick_opacity)
+        self._nick_opacity(self.nick_opacity.value())
+        v.addWidget(option_row("Видимость", op, "100% — ярко, 30% — едва заметно"))
+        lay.addWidget(box)
+        for w in (self.cb_nick,):
+            w.toggled.connect(self._update_preview)
+        for w in (self.nick_corner, self.nick_size, self.nick):
+            (w.textChanged if isinstance(w, QLineEdit) else w.currentTextChanged).connect(
+                self._update_preview)
+        self.nick_opacity.valueChanged.connect(self._update_preview)
+        for w in (self.nick, self.nick_corner, self.nick_size, self.nick_opacity):
+            self.cb_nick.toggled.connect(w.setEnabled)
+            w.setEnabled(self.cb_nick.isChecked())
+        self._update_preview()
         for w in (self.cb_subs, self.cb_safe):
             w.toggled.connect(self._update_preview)
         self.sub_pos.currentTextChanged.connect(self._update_preview)
@@ -1886,7 +1945,7 @@ class SettingsPage(QWidget):
         lay.addWidget(box)
 
         # --- канал и OBS ---
-        box, v = card("Канал и OBS", "Запоминается уже сейчас. Слежка за папкой, ник в углу "
+        box, v = card("Канал и OBS", "Запоминается уже сейчас. Слежка за папкой "
                                      "и хэштеги — " + LATER.lower() + ".")
         obs = QHBoxLayout()
         obs.setSpacing(6)
@@ -1899,10 +1958,6 @@ class SettingsPage(QWidget):
         b.clicked.connect(self.pick_obs)
         obs.addWidget(b)
         v.addWidget(option_row("Папка OBS", obs))
-        self.nick = QLineEdit(self.s["nick_text"])
-        self.nick.setMinimumWidth(300)
-        self.nick.textChanged.connect(lambda t: self._set("nick_text", t.strip()))
-        v.addWidget(option_row("Ник", self.nick))
         self.tags = QLineEdit(self.s["hashtags"])
         self.tags.setPlaceholderText("#стрим #игры")
         self.tags.setMinimumWidth(300)
@@ -1939,10 +1994,19 @@ class SettingsPage(QWidget):
         sp.setToolTip(tip)
         return sp
 
+    def _nick_opacity(self, v):
+        self.nick_op_label.setText(f"{v}%")
+        self._set("nick_opacity", int(v))
+
     def _update_preview(self, *_):
+        if not hasattr(self, "nick_opacity"):          # карточка ника ещё строится
+            return
+        nick = {"nick": self.cb_nick.isChecked(), "nick_text": self.nick.text(),
+                "nick_corner": self.nick_corner.currentText(),
+                "nick_size": NICK_SIZES.get(self.nick_size.currentText(), 40),
+                "nick_opacity": self.nick_opacity.value()}
         self.preview.set_state(autoclip.SUB_POSITIONS.get(self.sub_pos.currentText(), 0.6),
-                               self.cb_safe.isChecked())
-        self.preview.setVisible(self.cb_subs.isChecked())
+                               self.cb_safe.isChecked(), self.cb_subs.isChecked(), nick)
 
     def refresh_sounds(self):
         fill_sounds(self.sound, self.s.get("sound"))

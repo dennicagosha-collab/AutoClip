@@ -67,6 +67,13 @@ CONFIG = {
     "sub_size": 82,
     "sub_y": 0.60,            # высота субтитров: 0 = верх кадра, 1 = низ (см. SUB_POSITIONS)
     "safe_zone": True,        # не заходить под кнопки и подписи TikTok / Shorts / Reels
+
+    # --- ник в углу (тестовая функция, по умолчанию выключена) ---
+    "nick": False,
+    "nick_text": "Final_KFC_Boss",
+    "nick_corner": "Сверху слева",  # см. NICK_CORNERS
+    "nick_size": 40,                # размер шрифта при ширине кадра 1080
+    "nick_opacity": 70,             # непрозрачность, %
     "sub_max_words": 3,
     "sub_max_chars": 18,
     "sub_uppercase": True,
@@ -1037,18 +1044,73 @@ def sub_position_name(y):
     return min(SUB_POSITIONS, key=lambda k: abs(SUB_POSITIONS[k] - y))
 
 
+NICK_CORNERS = {"Сверху слева": "tl", "Сверху справа": "tr", "Снизу слева": "bl",
+                "Снизу справа": "br"}
+NICK_ALIGN = {"tl": 7, "tr": 9, "bl": 1, "br": 3}     # выравнивание ASS: точка — угол строки
+
+
+def frame_area(w, h, cfg):
+    """Где можно рисовать текст: внутри сейф-зоны соцсетей или с отступом от краёв."""
+    if cfg.get("safe_zone"):
+        return (SAFE_ZONE["left"] * w, SAFE_ZONE["top"] * h,
+                w - SAFE_ZONE["right"] * w, h - SAFE_ZONE["bottom"] * h)
+    return 40.0, 40.0, w - 40.0, h - 40.0
+
+
+def nick_layout(w, h, cfg=None):
+    """Ник в углу: точка привязки, выравнивание, размер и занятая полоса по высоте."""
+    cfg = cfg or CONFIG
+    left, top, right, bottom = frame_area(w, h, cfg)
+    corner = NICK_CORNERS.get(cfg.get("nick_corner"), "tl")
+    fs = int(cfg.get("nick_size", 40) * w / 1080)
+    pad = 0.015 * w                                  # небольшой отступ от края области
+    x = left + pad if corner[1] == "l" else right - pad
+    y = top + pad if corner[0] == "t" else bottom - pad
+    tall = 1.35 * fs                                 # строка с обводкой и тенью
+    y0, y1 = (y, y + tall) if corner[0] == "t" else (y - tall, y)
+    return {"x": int(x), "y": int(y), "an": NICK_ALIGN[corner], "fs": fs, "corner": corner,
+            "y0": y0, "y1": y1}
+
+
+def build_nick_ass(w, h, path, cfg, dur):
+    """Ник отдельным слоем — виден, даже если субтитры выключены."""
+    nk = nick_layout(w, h, cfg)
+    alpha = max(0, min(255, int(round(255 * (1 - cfg.get("nick_opacity", 70) / 100)))))
+    a = f"{alpha:02X}"
+    text = _ass_escape(str(cfg.get("nick_text", "")).strip())
+    outline = max(2, int(nk["fs"] * 0.08))
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write(f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {w}
+PlayResY: {h}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Nick,Arial,{nk['fs']},&H{a}FFFFFF,&H{a}FFFFFF,&H{a}000000,&H{a}000000,-1,0,0,0,100,100,1,0,1,{outline},1,{nk['an']},0,0,0,204
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 1,{_ass_time(0)},{_ass_time(dur + 1)},Nick,,0,0,0,,{{\\an{nk['an']}\\pos({nk['x']},{nk['y']})}}{text}
+""")
+
+
 def subs_layout(w, h, cfg=None):
     """Куда и каким размером ставить субтитры: центр (x, y), размер шрифта, сколько букв
     влезает в строку и границы области. С сейф-зоной — внутри неё."""
     cfg = cfg or CONFIG
     fs = int(cfg["sub_size"] * w / 1080)
-    if cfg.get("safe_zone"):
-        left, right = SAFE_ZONE["left"] * w, w - SAFE_ZONE["right"] * w
-        top, bottom = SAFE_ZONE["top"] * h, h - SAFE_ZONE["bottom"] * h
-    else:
-        left, right, top, bottom = 40.0, w - 40.0, 40.0, h - 40.0
+    left, top, right, bottom = frame_area(w, h, cfg)
     half = 0.6 * fs                                  # половина строки с обводкой и тенью
     y = min(max(h * cfg["sub_y"], top + half), bottom - half)
+    if cfg.get("nick") and str(cfg.get("nick_text", "")).strip():
+        # ник не должен перекрывать субтитры — отодвигаем строку от него
+        nk, gap = nick_layout(w, h, cfg), 0.25 * fs
+        if y - half < nk["y1"] + gap and y + half > nk["y0"] - gap:
+            y = nk["y1"] + gap + half if nk["corner"][0] == "t" else nk["y0"] - gap - half
+            y = min(max(y, top + half), bottom - half)
     max_chars = max(4, min(cfg["sub_max_chars"], int((right - left) / (CHAR_W * fs))))
     return {"x": int((left + right) / 2), "y": int(y), "fs": fs, "max_chars": max_chars,
             "box": (left, top, right, bottom)}
@@ -1321,6 +1383,9 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         ass_name = "subs.ass"
         build_ass(words, W, H, os.path.join(tmpdir, ass_name), cfg)
         vf.append(f"ass={ass_name}")
+    if cfg.get("nick") and str(cfg.get("nick_text", "")).strip():
+        build_nick_ass(W, H, os.path.join(tmpdir, "nick.ass"), cfg, total)
+        vf.append("ass=nick.ass")
     # перевод в Rec. 709 и метки цвета в самих кадрах (ffmpeg 9 берёт их оттуда, а не из флагов)
     vf.append("scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"
               "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv")
@@ -1564,11 +1629,12 @@ PROJECT_FILE = "project.json"
 PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
-OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone")
+OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick")
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
-               "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook")
+               "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook",
+               "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity")
 
 
 def clip_dirs(video):
@@ -2046,6 +2112,8 @@ def main():
     ap.add_argument("--sub-pos", choices=list(SUB_POSITIONS), help="где субтитры")
     ap.add_argument("--safe-zone", action=argparse.BooleanOptionalAction, default=None,
                     help="не заходить субтитрами под кнопки соцсетей")
+    ap.add_argument("--nick", action=argparse.BooleanOptionalAction, default=None,
+                    help="ник в углу; с --rebuild — только для этого клипа")
     ap.add_argument("--hook", action=argparse.BooleanOptionalAction, default=None,
                     help="хук в начале; с --rebuild — только для этого клипа")
     ap.add_argument("--sound", help="звук на мат: перелистывание / буп / свист / бип / тишина / свой файл")
@@ -2064,7 +2132,7 @@ def main():
         sys.exit(1)
     migrate_user_data()
     flags = {"subs": args.subs, "zoom": args.zoom, "bleep": args.bleep,
-             "bleep_sound": args.sound, "hook": args.hook, "safe_zone": args.safe_zone,
+             "bleep_sound": args.sound, "hook": args.hook, "safe_zone": args.safe_zone, "nick": args.nick,
              "sub_y": SUB_POSITIONS[args.sub_pos] if args.sub_pos else None}
     try:
         if args.rebuild:
