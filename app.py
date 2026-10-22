@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QAbstractButton, QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QDialog, QMenu, QSystemTrayIcon, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -49,6 +50,7 @@ DEFAULTS = {
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
+    "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
@@ -2261,7 +2263,8 @@ class SettingsPage(QWidget):
         lay.addWidget(box)
 
         # --- OBS ---
-        box, v = card("OBS", "Запоминается уже сейчас. Слежка за папкой — " + LATER.lower() + ".")
+        box, v = card("OBS", "Новая запись в этой папке — AutoClip предложит её нарезать. "
+                             "Пока слежка включена, крестик сворачивает программу в трей.")
         obs = QHBoxLayout()
         obs.setSpacing(6)
         self.obs = QLineEdit(self.s["obs_dir"])
@@ -2272,7 +2275,22 @@ class SettingsPage(QWidget):
         b = QPushButton("Выбрать…")
         b.clicked.connect(self.pick_obs)
         obs.addWidget(b)
+        b = QPushButton("Найти в OBS")
+        b.setToolTip("Взять папку записей из настроек OBS")
+        b.clicked.connect(self.find_obs)
+        obs.addWidget(b)
         v.addWidget(option_row("Папка OBS", obs))
+        self.cb_watch = Toggle(bool(self.s["watch"]))
+        self.cb_watch.toggled.connect(self.set_watch)
+        v.addWidget(option_row("Следить за папкой", self.cb_watch,
+                               "Предлагать нарезать новые записи, когда OBS их допишет"))
+        self.min_minutes = Stepper(1, 120, int(self.s["min_minutes"]))
+        self.min_minutes.valueChanged.connect(lambda m: self._set("min_minutes", m))
+        mm = QHBoxLayout()
+        mm.setSpacing(8)
+        mm.addWidget(self.min_minutes)
+        mm.addWidget(QLabel("мин"))
+        v.addWidget(option_row("Не предлагать записи короче", mm, "Короткие записи — обычно тесты"))
         lay.addWidget(box)
 
         lay.addWidget(hint(f"Настройки хранятся в {autoclip.user_dir()}"))
@@ -2367,6 +2385,26 @@ class SettingsPage(QWidget):
         self.p_state.setText(f"Пресет «{name}» удалён.")
         self.refresh_presets()
 
+    def find_obs(self):
+        d = autoclip.find_obs_record_dir()
+        if d:
+            self.obs.setText(d)
+            self._set("obs_dir", d)
+        else:
+            QMessageBox.information(self, "AutoClip", "Папку записей в настройках OBS не нашёл — "
+                                                      "выбери её кнопкой «Выбрать…».")
+
+    def set_watch(self, on):
+        if on and not self.s.get("obs_dir"):
+            d = autoclip.find_obs_record_dir()
+            if d:
+                self.obs.setText(d)
+                self._set("obs_dir", d)
+        if on and not self.s.get("watch"):
+            self.s["watch_since"] = time.time()      # предлагать только записи после включения
+        self._set("watch", bool(on))
+        self.win.watch_changed()
+
     def pick_obs(self):
         d = QFileDialog.getExistingDirectory(self, "Папка записей OBS", self.obs.text())
         if d:
@@ -2395,6 +2433,39 @@ class SettingsPage(QWidget):
         mode = autoclip.pick_llm(self.s["llm"])
         names = {"ollama": "Ollama", "anthropic": "Claude API", "none": "без модели"}
         self.llm_state.setText(f"{ollama}, {key}. Сейчас будет: {names.get(mode, mode)}.")
+
+
+# ---------------- новая запись OBS ----------------
+
+class NewRecordingDialog(QDialog):
+    """«Новая запись: <имя>, <длительность>, меток: N. Нарезать?»"""
+
+    def __init__(self, parent, path, info):
+        super().__init__(parent)
+        self.path = path
+        self.setWindowTitle("AutoClip — новая запись")
+        self.setModal(False)
+        self.setMinimumWidth(460)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(8)
+        t = QLabel("Новая запись")
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+        lay.addWidget(QLabel(f"{os.path.basename(path)}\n{autoclip.fmt_time(info['dur'])}"
+                             f"  ·  меток из OBS: {info['marks']}"))
+        lay.addWidget(hint("Нарезать?"))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        no = QPushButton("Не надо")
+        no.clicked.connect(self.reject)
+        yes = QPushButton("Нарезать")
+        yes.setObjectName("primary")
+        yes.setDefault(True)
+        yes.clicked.connect(self.accept)
+        row.addWidget(no)
+        row.addWidget(yes)
+        lay.addLayout(row)
 
 
 # ---------------- главное окно ----------------
@@ -2477,6 +2548,126 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
 
+        # --- трей и слежка за папкой OBS ---
+        self._quitting = False
+        self._queue = []             # записи, которые ждут, пока закончится текущая нарезка
+        self._pending = []           # (путь, сведения) — спросить «Нарезать?», когда окно видно
+        self._asked = set()          # уже спросили в этом запуске
+        self._dialog = None
+        self.tracker = autoclip.GrowthTracker()
+        self.tray = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            from PySide6.QtGui import QIcon
+            self.tray = QSystemTrayIcon(QIcon(ICON) if os.path.isfile(ICON) else self.windowIcon(), self)
+            self.tray.setToolTip("AutoClip")
+            menu = QMenu()
+            menu.addAction("Открыть AutoClip", self.show_window)
+            self.tray_watch = menu.addAction("Следить за папкой OBS")
+            self.tray_watch.setCheckable(True)
+            self.tray_watch.toggled.connect(self.settings_page.cb_watch.setChecked)
+            menu.addSeparator()
+            menu.addAction("Выход", self.quit_app)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(lambda r: self.show_window()
+                                        if r == QSystemTrayIcon.Trigger else None)
+            self.tray.messageClicked.connect(self.show_window)
+        self.fs_watch = None
+        self.watch_timer = QTimer(self)
+        self.watch_timer.setInterval(3000)
+        self.watch_timer.timeout.connect(self.scan_obs)
+        self.watch_changed()
+
+    # --- слежка за папкой OBS ---
+    def watch_changed(self):
+        """Включить или выключить слежку по настройкам."""
+        on = bool(self.settings.get("watch")) and os.path.isdir(self.settings.get("obs_dir", ""))
+        if self.tray:
+            self.tray.setVisible(bool(self.settings.get("watch")))
+            self.tray_watch.blockSignals(True)
+            self.tray_watch.setChecked(bool(self.settings.get("watch")))
+            self.tray_watch.blockSignals(False)
+        if self.fs_watch:
+            self.fs_watch.deleteLater()
+            self.fs_watch = None
+        if on:
+            from PySide6.QtCore import QFileSystemWatcher
+            self.fs_watch = QFileSystemWatcher([self.settings["obs_dir"]], self)
+            self.fs_watch.directoryChanged.connect(lambda _: self.scan_obs())
+            self.watch_timer.start()
+        else:
+            self.watch_timer.stop()
+
+    def scan_obs(self):
+        """Новые записи в папке OBS: дописана ли, длинная ли, — и спросить «Нарезать?»."""
+        s = self.settings
+        if not (s.get("watch") and os.path.isdir(s.get("obs_dir", ""))):
+            return
+        for path in autoclip.new_recordings(s["obs_dir"], float(s.get("watch_since") or 0)):
+            if path in self._asked or not self.tracker.update(path):
+                continue
+            info = autoclip.recording_info(path)
+            if info is None:                          # ещё не читается — подождём
+                continue
+            self.tracker.forget(path)
+            self._asked.add(path)
+            if info["dur"] < int(s.get("min_minutes", 5)) * 60:
+                autoclip.set_recording_state(path, "short")
+                continue
+            self.offer(path, info)
+
+    def offer(self, path, info):
+        """Уведомление Windows; сам вопрос — когда окно на экране (не поверх игры)."""
+        self._pending.append((path, info))
+        text = (f"{os.path.basename(path)}, {autoclip.fmt_time(info['dur'])}, "
+                f"меток: {info['marks']}. Нарезать?")
+        if self.tray:
+            self.tray.showMessage("Новая запись", text, QSystemTrayIcon.Information, 15000)
+        if self.isVisible() and self.isActiveWindow():
+            self.ask_pending()
+
+    def ask_pending(self):
+        if self._dialog or not self._pending:
+            return
+        path, info = self._pending.pop(0)
+        self._dialog = NewRecordingDialog(self, path, info)
+        self._dialog.finished.connect(lambda r, p=path: self._answered(p, r))
+        self._dialog.show()
+        self._dialog.raise_()
+
+    def _answered(self, path, result):
+        self._dialog = None
+        if result == QDialog.Accepted:
+            autoclip.set_recording_state(path, "cut")
+            self.cut_recording(path)
+        else:
+            autoclip.set_recording_state(path, "declined")
+        QTimer.singleShot(0, self.ask_pending)
+
+    def cut_recording(self, path):
+        if self.busy:
+            self._queue.append(path)
+            self.cut.write(f"ℹ️  {os.path.basename(path)} нарежу после текущей записи.")
+            return
+        self.go("cut")
+        self.cut.set_files([path])
+        self.cut.start_or_stop()
+
+    def show_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(200, self.ask_pending)
+
+    def changeEvent(self, e):
+        from PySide6.QtCore import QEvent
+        if e.type() == QEvent.ActivationChange and self.isActiveWindow():
+            QTimer.singleShot(200, self.ask_pending)
+        super().changeEvent(e)
+
+    def quit_app(self):
+        self._quitting = True
+        self.close()
+
     def _page(self, i):
         self.stack.setCurrentIndex(i)
         if self.PAGES[i][0] == "weekly":
@@ -2517,6 +2708,8 @@ class MainWindow(QMainWindow):
         if out:
             self.clips.load(out)
             self.cut.write("Клипы — в разделе «Клипы».")
+        if self._queue:
+            QTimer.singleShot(500, lambda: self.cut_recording(self._queue.pop(0)))
 
     # --- открепляемый просмотр ---
     def toggle_detach(self):
@@ -2551,6 +2744,17 @@ class MainWindow(QMainWindow):
         w.deleteLater()
 
     def closeEvent(self, e):
+        if self.settings.get("watch") and self.tray and not self._quitting:
+            # со слежкой — в трей, чтобы новые записи ловились и с закрытым окном
+            e.ignore()
+            self.hide()
+            if not self.settings.get("tray_hint_shown"):
+                self.tray.showMessage("AutoClip работает в трее",
+                                      "Слежу за папкой OBS. Выход — правой кнопкой по значку.",
+                                      QSystemTrayIcon.Information, 8000)
+                self.settings["tray_hint_shown"] = True
+                save_settings(self.settings)
+            return
         if self.busy:
             r = QMessageBox.question(self, "AutoClip", "Нарезка ещё идёт. Остановить и закрыть?")
             if r != QMessageBox.Yes:
@@ -2562,7 +2766,11 @@ class MainWindow(QMainWindow):
         self.clips.player.clear()
         self.settings["geometry"] = bytes(self.saveGeometry().toHex()).decode()
         save_settings(self.settings)
+        if self.tray:
+            self.tray.hide()
         super().closeEvent(e)
+        if getattr(self, "standalone", False):
+            QApplication.quit()                      # окно закрыли по-настоящему — выходим
 
 
 def dark_palette(app):
@@ -2600,7 +2808,10 @@ def main():
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(ICON))
     dark_palette(app)
+    # из трея программа выходит сама (окно может быть спрятано, а диалог — закрыться)
+    app.setQuitOnLastWindowClosed(False)
     win = MainWindow()
+    win.standalone = True
     win.show()
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
     if videos:

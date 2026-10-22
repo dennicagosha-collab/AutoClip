@@ -2366,6 +2366,128 @@ def mark_published(path, ref, platform, on=True, url=""):
     return clip
 
 
+# ---------------- 12. слежка за папкой OBS ----------------
+
+VIDEO_EXT = (".mp4", ".mkv", ".mov", ".flv", ".ts", ".webm")
+RECORDINGS_LOG = os.path.join(user_dir(), "записи.json")
+STABLE_SECONDS = 10.0        # запись дописана, если размер не меняется столько секунд
+
+
+def _read_ini(path):
+    """Простое чтение ini OBS: {секция: {ключ: значение}} (configparser спотыкается на BOM)."""
+    data, sec = {}, None
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    sec = data.setdefault(line[1:-1], {})
+                elif "=" in line and sec is not None:
+                    k, v = line.split("=", 1)
+                    sec[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return data
+
+
+def find_obs_record_dir():
+    """Папка, куда OBS пишет записи (из настроек текущего профиля OBS) или None."""
+    base = os.path.join(os.environ.get("APPDATA", ""), "obs-studio")
+    user = _read_ini(os.path.join(base, "user.ini")) or _read_ini(os.path.join(base, "global.ini"))
+    prof = user.get("Basic", {}).get("ProfileDir")
+    if not prof:
+        return None
+    ini = _read_ini(os.path.join(base, "basic", "profiles", prof, "basic.ini"))
+    mode = ini.get("Output", {}).get("Mode", "Simple")
+    path = (ini.get("AdvOut", {}).get("RecFilePath") if mode == "Advanced"
+            else ini.get("SimpleOutput", {}).get("FilePath"))
+    if path:
+        path = os.path.normpath(path.replace("\\\\", "\\"))
+        return path if os.path.isdir(path) else None
+    return None
+
+
+def load_recordings_log():
+    try:
+        with open(RECORDINGS_LOG, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def set_recording_state(path, state):
+    """Что решили про запись: offered / cut / declined / short — второй раз не спрашиваем."""
+    data = load_recordings_log()
+    data[os.path.normcase(os.path.abspath(path))] = {"state": state, "date": now_iso()}
+    tmp = RECORDINGS_LOG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, RECORDINGS_LOG)
+
+
+def recording_state(path):
+    return (load_recordings_log().get(os.path.normcase(os.path.abspath(path))) or {}).get("state")
+
+
+def new_recordings(folder, since):
+    """Видео в папке OBS, появившиеся после since (время, сек) и ещё не разобранные."""
+    out = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return out
+    decided = load_recordings_log()
+    for n in names:
+        p = os.path.join(folder, n)
+        if not n.lower().endswith(VIDEO_EXT) or not os.path.isfile(p):
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if st.st_mtime >= since and \
+                os.path.normcase(os.path.abspath(p)) not in decided:
+            out.append(p)
+    return sorted(out)
+
+
+class GrowthTracker:
+    """Следит, дописал ли OBS файл: размер не меняется STABLE_SECONDS секунд."""
+
+    def __init__(self, stable=STABLE_SECONDS):
+        self.stable = stable
+        self.seen = {}               # путь → (размер, когда размер последний раз менялся)
+
+    def update(self, path, now=None):
+        """Отметить текущий размер. True — файл перестал расти и уже читается."""
+        now = time.time() if now is None else now
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            self.seen.pop(path, None)
+            return False
+        last = self.seen.get(path)
+        if last is None or last[0] != size:
+            self.seen[path] = (size, now)
+            return False
+        return size > 0 and now - last[1] >= self.stable
+
+    def forget(self, path):
+        self.seen.pop(path, None)
+
+
+def recording_info(path):
+    """Длительность и число меток — для вопроса «Нарезать?». None — файл ещё не читается."""
+    p = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+             "default=nw=1:nk=1", path])
+    try:
+        dur = float(p.stdout.strip())
+    except ValueError:
+        return None
+    return {"dur": dur, "marks": len(read_markers(path))}
+
+
 # ---------------- main ----------------
 
 def safe_name(s):
