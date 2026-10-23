@@ -1770,6 +1770,7 @@ class ClipsPage(QWidget):
         self.m_vol.setValue(-18)
         self.m_vol.setFixedWidth(150)
         self.m_vol_l = hint("−18 дБ к голосу")
+        self.m_vol_l.setWordWrap(False)
         self.m_vol.valueChanged.connect(lambda v: (self.m_vol_l.setText(f"−{abs(v)} дБ к голосу"),
                                                    self._music_set(volume=float(v))))
         row.addWidget(self.m_vol)
