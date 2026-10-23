@@ -575,9 +575,18 @@ def _ask_llm(prompt, mode, max_tokens=2000):
     return "".join(b.get("text", "") for b in r.get("content", []))
 
 
-def llm_moments(segments, mode, progress=None, cancel=None):
+def taste_block(examples):
+    """Примеры клипов, которые нравятся Гоше или зашли зрителям, — для запроса к модели."""
+    if not examples:
+        return ""
+    return ("Примеры клипов, которые нравятся стримеру или хорошо зашли зрителям "
+            "(ищи похожее по духу):\n" + "\n".join(f"- «{t}»" for t in examples) + "\n\n")
+
+
+def llm_moments(segments, mode, progress=None, cancel=None, examples=()):
     if mode == "none" or not segments:
         return []
+    taste = taste_block(examples)
     chunk_len, overlap = 600.0, 30.0
     end_all = segments[-1]["e"]
     moments, start = [], 0.0
@@ -594,7 +603,7 @@ def llm_moments(segments, mode, progress=None, cancel=None):
         log(f"   кусок {i}/{n_chunks}")
         if progress:
             progress("модель", (i - 1) / n_chunks * 100, f"кусок {i} из {n_chunks}")
-        prompt = LLM_PROMPT + "\n".join(lines)
+        prompt = LLM_PROMPT.replace("Расшифровка:\n", taste + "Расшифровка:\n") + "\n".join(lines)
         try:
             moments += _parse_moments(_ask_llm(prompt, mode))
         except urllib.error.HTTPError as e:
@@ -1862,6 +1871,17 @@ def save_clip_as(path, ref, dest):
     return dest
 
 
+def add_forecast(clip, segments):
+    """Признаки клипа и прогноз 0–10 (правила + модель, если обучена)."""
+    try:
+        import forecast
+        clip["features"] = forecast.clip_features(clip, segments)
+        clip["forecast"] = forecast.predict(clip["features"], clip.get("score", 0),
+                                            forecast.load_model())
+    except Exception as e:                       # прогноз не должен ломать нарезку
+        log(f"   ⚠️  прогноз не посчитался: {e}")
+
+
 def write_report(proj):
     out_dir = os.path.dirname(proj["_path"])
     vi = proj["source_info"]
@@ -1883,6 +1903,11 @@ def write_report(proj):
         rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
                    f"зумов: {len(c['zooms'])}")
         rep.append("    " + hook_text(c))
+        if c.get("forecast") and c.get("features"):
+            import forecast
+            rep.append(f"    прогноз: {c['forecast']['value']:.1f} из 10 — {c['forecast']['note']}")
+            for ok, text in forecast.retention_notes(c, c["features"]):
+                rep.append("      " + {True: "+", False: "−", None: "·"}[ok] + " " + text)
         rep.append("    хэштеги (TikTok): " +
                    (" ".join(compose_tags("tiktok", proj.get("settings") or CONFIG,
                                           (c.get("meta") or {}).get("tags", []))) or "—"))
@@ -2101,6 +2126,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
                                cover_path_for(os.path.dirname(proj["_path"]), clip["file"]),
                                cfg, cancel)
     clip["hook"]["on"] = span is not None
+    add_forecast(clip, segments)
     log("   " + hook_text(clip))
     save_project(proj)
     write_report(proj)
@@ -2628,7 +2654,14 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     prog("модель", 0)
     if mode != "none":
         log(f"🤖 Оцениваю моменты через {mode}...")
-        moments = llm_moments(segments, mode, progress, cancel)
+        try:
+            import forecast
+            examples = forecast.taste_examples()
+        except Exception:
+            examples = []
+        if examples:
+            log(f"   примеры твоего вкуса: {len(examples)}")
+        moments = llm_moments(segments, mode, progress, cancel, examples)
         log(f"   модель предложила {len(moments)} моментов")
     else:
         log("🤖 Без языковой модели — ищу по звуку и речи.")
@@ -2707,6 +2740,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
             rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
             rec["cover"] = make_cover(video, vinfo, rec, reaction,
                                       cover_path_for(out_dir, name), cfg, cancel)
+            add_forecast(rec, segments)
             proj["clips"].append(rec)
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
     prog("рендер", 100)

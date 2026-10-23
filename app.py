@@ -16,6 +16,7 @@ sys.path.insert(0, HERE)
 os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 
 import autoclip  # noqa: E402
+import forecast  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     QByteArray, QEventLoop, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl,
@@ -51,6 +52,7 @@ DEFAULTS = {
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
+    "views_days": 3,
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
@@ -191,6 +193,7 @@ class Bus(QObject):
     rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
     weekly_progress = Signal(float, str)
     weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
+    trained = Signal(object)               # итог обучения прогноза
 
 
 class Stream:
@@ -219,6 +222,16 @@ def page_title(text, sub=""):
         box.addWidget(h)
     box.addSpacing(6)
     return box
+
+
+def plural(n, one, few, many):
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
+
+
+NOTE_MARK = {True: ("+", "#7dd99a"), False: ("−", "#ff7a90"), None: ("·", MUTED)}
 
 
 def hint(text):
@@ -1479,20 +1492,40 @@ class ClipsPage(QWidget):
             self.player.clear()
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c.get("score_parts", {}).items()
                           if abs(v) >= 0.05)
-        lines = [f"<b>{c['title']}</b>",
-                 f"Оценка {c['score']:.1f}" + (f" — {parts}" if parts else ""),
-                 f"Зумов: {len(c['zooms'])}, запикано: "
-                 f"{c['bleeps'] if c['bleeps'] is not None else '-'}"]
+        lines = [f"<b>{c['title']}</b>"]
+        feats = c.get("features") or self.features(c)
+        if feats:
+            fc = c.get("forecast") or forecast.predict(feats, c.get("score", 0),
+                                                       forecast.load_model())
+            lines.append(f"Прогноз: <b>{fc['value']:.1f} из 10</b> "
+                         f"<span style='color:{MUTED}'>· {fc['note']}</span>")
+            notes = forecast.retention_notes(c, feats)
+            lines.append("&nbsp;&nbsp;".join(
+                f"<span style='color:{NOTE_MARK[ok][1]}'>{NOTE_MARK[ok][0]} {t}</span>"
+                for ok, t in notes))
+        lines += [f"<span style='color:{MUTED}'>Оценка моментов {c['score']:.1f}"
+                  + (f" — {parts}" if parts else "") + "</span>",
+                  f"Зумов: {len(c['zooms'])}, запикано: "
+                  f"{c['bleeps'] if c['bleeps'] is not None else '-'}"]
         if c.get("marks"):
             lines.append("📍 Метка из OBS: " + ", ".join(autoclip.fmt_time(t) for t in c["marks"]))
         ht = autoclip.hook_text(c)
         lines.append(ht[:1].upper() + ht[1:])
-        if c.get("quiet_start"):
-            lines.append("Тихое начало — первые 3 с без звука")
         if c.get("reason"):
             lines.append(f"Почему: {c['reason']}")
         self.info.setText("<br>".join(lines))
         self.fill_editor(c)
+
+    def features(self, c):
+        """Признаки старых клипов (до прогноза) — из расшифровки, она кэшируется."""
+        pp = self.proj["_path"]
+        if getattr(self, "_segs_for", None) != pp:
+            try:
+                self._segs = autoclip.load_segments(self.proj)
+            except autoclip.AutoClipError:
+                self._segs = None
+            self._segs_for = pp
+        return forecast.clip_features(c, self._segs) if self._segs is not None else None
 
     def fill_editor(self, c):
         cfg = autoclip.clip_config(self.proj, c)
@@ -1663,7 +1696,10 @@ class ClipsPage(QWidget):
         pub = (c or {}).get("published") or {}
         for key, (state, link, mark) in self.pub_rows.items():
             p = pub.get(key)
-            state.setText(f"выложен {p['date'][8:10]}.{p['date'][5:7]}" if p else "не выложен")
+            text = f"выложен {p['date'][8:10]}.{p['date'][5:7]}" if p else "не выложен"
+            if p and isinstance(p.get("views"), (int, float)):
+                text += f"\n{int(p['views']):,} просм.".replace(",", " ")
+            state.setText(text)
             link.blockSignals(True)
             link.setText((p or {}).get("url", ""))
             link.blockSignals(False)
@@ -2262,6 +2298,30 @@ class SettingsPage(QWidget):
             self.ptags[key] = e
         lay.addWidget(box)
 
+        # --- прогноз ---
+        box, v = card("Прогноз", "Оценка клипа из 10: правила удержания плюс то, чему программа "
+                                 "научилась на твоих оценках и просмотрах. Это оценка, а не "
+                                 "обещание просмотров.")
+        self.views_days = Stepper(2, 7, int(self.s.get("views_days", 3)))
+        self.views_days.valueChanged.connect(lambda d: self._set("views_days", d))
+        vd = QHBoxLayout()
+        vd.setSpacing(8)
+        vd.addWidget(self.views_days)
+        vd.addWidget(QLabel("дня"))
+        v.addWidget(option_row("Спрашивать про просмотры через", vd,
+                               "После «Выложил» — при запуске программы"))
+        self.model_state = QLabel("")
+        self.model_state.setWordWrap(True)
+        self.model_state.setTextFormat(Qt.RichText)
+        v.addWidget(self.model_state)
+        b = QPushButton("Обучить сейчас")
+        b.clicked.connect(lambda: (self.model_state.setText("Учусь…"), self.win.retrain()))
+        row = QHBoxLayout()
+        row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        lay.addWidget(box)
+
         # --- OBS ---
         box, v = card("OBS", "Новая запись в этой папке — AutoClip предложит её нарезать. "
                              "Пока слежка включена, крестик сворачивает программу в трей.")
@@ -2385,6 +2445,26 @@ class SettingsPage(QWidget):
         self.p_state.setText(f"Пресет «{name}» удалён.")
         self.refresh_presets()
 
+    def show_model(self, info):
+        if not info or info.get("error"):
+            self.model_state.setText(f"Не получилось обучиться: {(info or {}).get('error', '')}")
+            return
+        need = forecast.MIN_SAMPLES
+        lines = [f"Оценок «Хороший» / «В корзину»: <b>{info['n_like']}</b> из {need}, "
+                 f"клипов с просмотрами: <b>{info['n_views']}</b> из {need}."]
+        if not (info.get("like") or info.get("views")):
+            lines.append(f"<span style='color:{MUTED}'>Данных пока мало — прогноз считается "
+                         "по правилам.</span>")
+        else:
+            lines.append(f"Модель учтена в прогнозе на {int(forecast.model_share(info) * 100)}%.")
+            for key, title in (("views", "Что набирает просмотры"), ("like", "Что тебе нравится")):
+                pairs = forecast.explain(info).get(key)
+                if pairs:
+                    lines.append(f"{title}: " + ", ".join(
+                        f"<span style='color:{'#7dd99a' if w > 0 else '#ff7a90'}'>{n} "
+                        f"{'+' if w > 0 else '−'}{abs(w):.2f}</span>" for n, w in pairs))
+        self.model_state.setText("<br>".join(lines))
+
     def find_obs(self):
         d = autoclip.find_obs_record_dir()
         if d:
@@ -2433,6 +2513,85 @@ class SettingsPage(QWidget):
         mode = autoclip.pick_llm(self.s["llm"])
         names = {"ollama": "Ollama", "anthropic": "Claude API", "none": "без модели"}
         self.llm_state.setText(f"{ollama}, {key}. Сейчас будет: {names.get(mode, mode)}.")
+
+
+# ---------------- вопрос про просмотры ----------------
+
+class ViewsDialog(QDialog):
+    """«Клип "…" выложен в TikTok 3 дня назад. Сколько просмотров?» — все вопросы одним списком."""
+
+    def __init__(self, parent, questions):
+        super().__init__(parent)
+        self.questions = questions
+        self.action = "snooze"
+        self.setWindowTitle("AutoClip — просмотры")
+        self.setMinimumWidth(640)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        t = QLabel("Сколько набрали клипы?")
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+        lay.addWidget(hint("Ответы учат прогноз. Процент досмотров — по желанию. Пустые строки "
+                           "спрошу завтра."))
+        from PySide6.QtGui import QIntValidator, QDoubleValidator
+        self.rows = []
+        for q in questions:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            name = autoclip.PLATFORMS.get(q["platform"], q["platform"])
+            d = q["days_ago"]
+            lbl = QLabel(f"«{q['title']}»<br><span style='color:{MUTED}'>{name}, выложен "
+                         f"{d} {plural(d, 'день', 'дня', 'дней')} назад</span>")
+            lbl.setWordWrap(True)
+            row.addWidget(lbl, 1)
+            views = QLineEdit()
+            views.setPlaceholderText("просмотры")
+            views.setValidator(QIntValidator(0, 2_000_000_000, views))
+            views.setFixedWidth(120)
+            ret = QLineEdit()
+            ret.setPlaceholderText("% досмотров")
+            ret.setValidator(QDoubleValidator(0, 100, 1, ret))
+            ret.setFixedWidth(110)
+            row.addWidget(views)
+            row.addWidget(ret)
+            lay.addLayout(row)
+            self.rows.append((q, views, ret))
+        row = QHBoxLayout()
+        skip = QPushButton("Пропустить")
+        skip.setObjectName("ghost")
+        skip.clicked.connect(lambda: self._done("skip"))
+        later = QPushButton("Напомнить завтра")
+        later.clicked.connect(lambda: self._done("snooze"))
+        save = QPushButton("Сохранить")
+        save.setObjectName("primary")
+        save.setDefault(True)
+        save.clicked.connect(lambda: self._done("save"))
+        row.addWidget(skip)
+        row.addStretch(1)
+        row.addWidget(later)
+        row.addWidget(save)
+        lay.addLayout(row)
+
+    def _done(self, action):
+        self.action = action
+        self.accept()
+
+    def apply(self):
+        """Записать ответы. Возвращает, сколько клипов получили просмотры."""
+        saved = 0
+        for q, views, ret in self.rows:
+            args = (q["project"], q["id"], q["platform"])
+            v = views.text().strip()
+            if self.action == "save" and v:
+                r = ret.text().strip().replace(",", ".")
+                forecast.record_views(*args, int(v), float(r) if r else None)
+                saved += 1
+            elif self.action == "skip":
+                forecast.skip_views(*args)
+            else:
+                forecast.snooze_views(*args)
+        return saved
 
 
 # ---------------- новая запись OBS ----------------
@@ -2576,6 +2735,39 @@ class MainWindow(QMainWindow):
         self.watch_timer.setInterval(3000)
         self.watch_timer.timeout.connect(self.scan_obs)
         self.watch_changed()
+
+        # --- прогноз: обучиться на том, что есть, и спросить про просмотры ---
+        self.bus.trained.connect(self.settings_page.show_model)
+        self.retrain()
+        QTimer.singleShot(1500, self.ask_views)
+
+    # --- прогноз ---
+    def retrain(self):
+        def work():
+            try:
+                self.bus.trained.emit(forecast.train())
+            except Exception as e:
+                self.bus.trained.emit({"error": str(e)})
+        threading.Thread(target=work, daemon=True).start()
+
+    def ask_views(self):
+        qs = forecast.due_questions(int(self.settings.get("views_days", 3)))
+        if not qs or getattr(self, "_views_dialog", None):
+            return
+        dlg = ViewsDialog(self, qs)
+        self._views_dialog = dlg
+
+        def done(_):
+            self._views_dialog = None
+            try:
+                if dlg.apply():
+                    self.retrain()
+            except (autoclip.AutoClipError, ValueError) as e:
+                QMessageBox.warning(self, "AutoClip", str(e))
+            if self.clips.proj:
+                self.clips.reload(self.clips.current_clip()["id"] if self.clips.current_clip() else None)
+        dlg.finished.connect(done)
+        dlg.show()
 
     # --- слежка за папкой OBS ---
     def watch_changed(self):

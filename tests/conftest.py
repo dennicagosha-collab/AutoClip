@@ -18,6 +18,9 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(autoclip, "PROJECTS_INDEX", str(tmp_path / "нарезки.json"))
     monkeypatch.setattr(autoclip, "WEEKLY_DIR", str(tmp_path / "подборки"))
     monkeypatch.setattr(autoclip, "RECORDINGS_LOG", str(tmp_path / "записи.json"))
+    import forecast
+    monkeypatch.setattr(forecast, "HISTORY_PATH", str(tmp_path / "история.json"))
+    monkeypatch.setattr(forecast, "MODEL_PATH", str(tmp_path / "модель.json"))
 
 
 @pytest.fixture
