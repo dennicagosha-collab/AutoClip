@@ -85,9 +85,10 @@ def test_duck_under_speech_and_silence_under_bleep(tmp_path):
     out = _render(tmp_path, music, words, bleep=True)
     x = _audio(out)
     seg = lambda a, b: _band(x[int(a * 8000):int(b * 8000)], 1000)   # noqa: E731
-    quiet, talk, mat = seg(1.0, 3.0), seg(5.2, 6.0), seg(9.15, 9.45)
+    quiet, talk, mat = seg(1.5, 1.8), seg(5.4, 5.7), seg(9.15, 9.45)   # окна одной длины
     assert talk < quiet * 0.6                                    # под речью музыка тише
-    assert mat < quiet * 0.1                                     # под звуком на мат — тишина
+    assert mat > quiet * 0.15                                    # под матом — не провал в тишину,
+    assert mat < quiet * 0.6 and 0.5 < mat / talk < 2            # а приглушена, как под речью
 
 
 def test_no_music_by_default_and_missing_file(tmp_path):

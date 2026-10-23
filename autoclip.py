@@ -1933,9 +1933,9 @@ def speech_spans(words, gap=0.5):
     return [tuple(x) for x in spans]
 
 
-def music_chain(m_in, total, mcfg, gain_db, speech=(), bleeps=()):
-    """Фильтры для музыки: громкость, приглушение под речью, тишина под звуком на мат,
-    плавные края. Возвращает строку фильтра, которая из m_in делает [mus]."""
+def music_chain(m_in, total, mcfg, gain_db, speech=()):
+    """Фильтры для музыки: громкость, приглушение под речью (и под матом — так же, без провала
+    в тишину), плавные края. Возвращает строку фильтра, которая из m_in делает [mus]."""
     fade = max(0.0, min(float(mcfg.get("fade", 1.0)), total / 3))
     base = 10 ** (gain_db / 20)
     expr = f"{base:.5f}"
@@ -1944,9 +1944,6 @@ def music_chain(m_in, total, mcfg, gain_db, speech=(), bleeps=()):
         env = "+".join(f"clip((t-{a - 0.25:.2f})/0.2,0,1)*clip(({b + 0.4:.2f}-t)/0.3,0,1)"
                        for a, b in speech)
         expr += f"*(1-{k:.3f}*min(1,{env}))"
-    if bleeps:
-        # под звуком на мат музыка молчит — не заезжает на него и не глушит его
-        expr += "*(1-min(1," + "+".join(f"between(t,{a:.3f},{u:.3f})" for a, _, u in bleeps) + "))"
     chain = (f"{m_in}aformat=sample_rates=48000:channel_layouts=stereo,"
              f"atrim=0:{total:.3f},asetpts=PTS-STARTPTS,volume='{expr}':eval=frame")
     if fade > 0:
@@ -2129,7 +2126,8 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         voice = loudness(src, s, dur)
         gain = music_gain(dict(music, _len=total), voice)
         agraph = agraph.replace("[aout]", "[voice]")
-        agraph += ";" + music_chain(f"[{mi}:a]", total, music, gain, speech_spans(words), bleeps)
+        # мат — тоже речь: под ним музыка приглушена, как под словами
+        agraph += ";" + music_chain(f"[{mi}:a]", total, music, gain, speech_spans(words))
         agraph += ";[voice][mus]amix=inputs=2:duration=first:normalize=0[aout]"
 
     tmp_out = os.path.join(tmpdir, "render.mp4")
@@ -2858,10 +2856,8 @@ def music_preview(path, ref, mcfg, out_path):
                  for w in clip_words(segs, clip["start"], clip["end"])]
     except AutoClipError:
         words = []
-    cfg = clip_config(proj, clip)
-    bleeps = bleep_spans(words, total, cfg["bleep_pad"]) if cfg["bleep"] else []
     gain = music_gain(dict(music, _len=total), loudness(src))
-    graph = (music_chain("[1:a]", total, music, gain, speech_spans(words), bleeps) +
+    graph = (music_chain("[1:a]", total, music, gain, speech_spans(words)) +
              ";[0:a]aformat=sample_rates=48000:channel_layouts=stereo[voice];"
              "[voice][mus]amix=inputs=2:duration=first:normalize=0[aout]")
     p = run(["ffmpeg", "-y", "-v", "error", "-i", src, "-ss", f"{float(music.get('offset', 0)):.3f}",
