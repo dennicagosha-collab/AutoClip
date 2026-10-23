@@ -48,6 +48,9 @@ DEFAULTS = {
     "clips": 10, "clips_mode": "count", "auto_min_score": autoclip.CONFIG["auto_min_score"],
     "auto_min_score_plain": autoclip.CONFIG["auto_min_score_plain"],
     "auto_max": autoclip.CONFIG["auto_max"], "build_mode": "auto", "game_processes": "",
+    "sub_style": "Обычный", "sub_x": None, "sub_y_free": 0.6,
+    "sub_font": "Arial Black", "sub_mode": "words", "sub_size": 82, "sub_color": "#FFFFFF",
+    "sub_hl_color": "#FFE600", "sub_outline_color": "#000000", "sub_outline": 7,
     "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
@@ -207,6 +210,7 @@ class Bus(QObject):
     update_progress = Signal(float)
     update_done = Signal(object, object)   # итог установки, текст ошибки или None
     report_done = Signal(object, object)   # путь к отчёту об ошибке, текст ошибки или None
+    sub_layer = Signal(int, str)           # номер запроса, картинка субтитров для предпросмотра
 
 
 class Stream:
@@ -235,6 +239,155 @@ def page_title(text, sub=""):
         box.addWidget(h)
     box.addSpacing(6)
     return box
+
+
+SUB_MODES = {"words": "По 2–3 слова", "single": "По одному слову"}
+CUSTOM_POS = "Своё место"     # субтитры перетащили мышкой в предпросмотре
+
+
+def sub_settings(s):
+    """Субтитры из «Настроек» → ключи CONFIG: стиль, высота и место по ширине."""
+    out = {k: s.get(k, DEFAULTS[k]) for k in autoclip.STYLE_KEYS}
+    out["sub_size"] = int(out["sub_size"])
+    out["sub_outline"] = int(out["sub_outline"])
+    out["sub_style"] = s.get("sub_style", "Обычный")
+    if s.get("sub_pos") in autoclip.SUB_POSITIONS:
+        out.update(sub_y=autoclip.SUB_POSITIONS[s["sub_pos"]], sub_x=None)
+    else:
+        out.update(sub_y=float(s.get("sub_y_free", 0.6)), sub_x=s.get("sub_x"))
+    return out
+
+
+def latest_cover():
+    """Кадр для предпросмотра субтитров: обложка последнего клипа (без субтитров)."""
+    for pp in reversed(autoclip.known_projects()):
+        try:
+            with open(pp, encoding="utf-8") as f:
+                clips = json.load(f).get("clips", [])
+        except (OSError, ValueError):
+            continue
+        for c in reversed(clips):
+            cv = (c.get("cover") or {}).get("file")
+            path = os.path.join(os.path.dirname(pp), cv) if cv else ""
+            if cv and os.path.isfile(path):
+                return path
+    return None
+
+
+class ColorButton(QPushButton):
+    """Кнопка-образец цвета: по клику — выбор цвета."""
+    changed = Signal(str)
+
+    def __init__(self, color, tip=""):
+        super().__init__()
+        self.setFixedSize(44, 30)
+        self.setToolTip(tip)
+        self.set_color(color)
+        self.clicked.connect(self.pick)
+
+    def set_color(self, color):
+        self.color = QColor(color).name().upper()
+        self.setStyleSheet(f"background: {self.color}; border: 2px solid #3a3d48; border-radius: 8px;")
+
+    def pick(self):
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(self.color), self, "Цвет")
+        if c.isValid():
+            self.set_color(c.name())
+            self.changed.emit(self.color)
+
+
+class LivePreview(QWidget):
+    """Кадр клипа с субтитрами — их рисует тот же libass, что и в клипе. Строку можно
+    перетащить мышкой; сейф-зона — рамкой, за неё строку не вытащить."""
+    moved = Signal(float, float)      # новый центр строки: доли ширины и высоты кадра
+
+    W, H = 1080, 1920
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(243, 432)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("Перетащи субтитры мышкой")
+        self.frame = None
+        self.layer = None
+        self.cfg = dict(autoclip.CONFIG)
+        self.drag = None              # (точка нажатия, смещение)
+        self.offset = (0.0, 0.0)
+
+    def set_frame(self, path):
+        pm = QPixmap(path) if path else QPixmap()
+        self.frame = None if pm.isNull() else pm
+        self.update()
+
+    def set_layer(self, path, cfg):
+        img = QPixmap(path) if path else QPixmap()
+        self.layer = None if img.isNull() else img
+        self.cfg = cfg
+        self.offset = (0.0, 0.0)
+        self.update()
+
+    def _k(self):
+        return self.width() / self.W
+
+    def center(self):
+        lay = autoclip.subs_layout(self.W, self.H, self.cfg)
+        return lay["x"], lay["y"], lay
+
+    def _clamped(self, dx, dy):
+        x, y, lay = self.center()
+        left, top, right, bottom = lay["box"]
+        half, fs = 0.6 * lay["fs"], lay["fs"]
+        nx = min(max(x + dx, left + 2 * fs), right - 2 * fs) if right - left > 4 * fs else x
+        ny = min(max(y + dy, top + half), bottom - half)
+        return nx - x, ny - y
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        if self.frame:
+            p.drawPixmap(self.rect(), self.frame)
+        else:
+            from PySide6.QtGui import QLinearGradient
+            g = QLinearGradient(0, 0, 0, h)
+            g.setColorAt(0, QColor("#2b2f3a"))
+            g.setColorAt(1, QColor("#14161c"))
+            p.fillRect(self.rect(), g)
+        if self.cfg.get("safe_zone"):
+            z = autoclip.SAFE_ZONE
+            pen = QPen(QColor(255, 79, 109, 220), 1, Qt.DashLine)
+            p.setPen(pen)
+            p.drawRect(QRectF(z["left"] * w, z["top"] * h, w * (1 - z["left"] - z["right"]) - 1,
+                              h * (1 - z["top"] - z["bottom"]) - 1))
+        if self.layer and self.cfg.get("subs", True):
+            k = self._k()
+            dx, dy = self.offset
+            p.drawPixmap(QRectF(dx * k, dy * k, w, h), self.layer, QRectF(self.layer.rect()))
+        p.setPen(QColor("#3a3d48"))
+        p.drawRect(0, 0, w - 1, h - 1)
+        p.end()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.layer:
+            self.drag = (e.position(), self.offset)
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        if self.drag:
+            start, (ox, oy) = self.drag
+            k = self._k()
+            d = e.position() - start
+            self.offset = self._clamped(ox + d.x() / k, oy + d.y() / k)
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self.drag:
+            self.drag = None
+            self.setCursor(Qt.OpenHandCursor)
+            if self.offset != (0.0, 0.0):
+                x, y, _ = self.center()
+                self.moved.emit((x + self.offset[0]) / self.W, (y + self.offset[1]) / self.H)
 
 
 def plural(n, one, few, many):
@@ -399,9 +552,9 @@ class Stepper(QWidget):
     """Число с кнопками − и + (вместо поля со стрелками)."""
     valueChanged = Signal(int)
 
-    def __init__(self, lo, hi, value):
+    def __init__(self, lo, hi, value, step=1):
         super().__init__()
-        self.lo, self.hi = lo, hi
+        self.lo, self.hi, self.step = lo, hi, step
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
@@ -416,8 +569,8 @@ class Stepper(QWidget):
         h.addWidget(self.minus)
         h.addWidget(self.label)
         h.addWidget(self.plus)
-        self.minus.clicked.connect(lambda: self.setValue(self._v - 1))
-        self.plus.clicked.connect(lambda: self.setValue(self._v + 1))
+        self.minus.clicked.connect(lambda: self.setValue(self._v - self.step))
+        self.plus.clicked.connect(lambda: self.setValue(self._v + self.step))
         self._v = None
         self.setValue(value)
 
@@ -968,7 +1121,7 @@ class CutPage(QWidget):
         c["bleep"] = bool(s["bleep"])
         c["hook"] = bool(s["hook"])
         c["marks"] = bool(s["marks"])
-        c["sub_y"] = autoclip.SUB_POSITIONS.get(s["sub_pos"], autoclip.CONFIG["sub_y"])
+        c.update(sub_settings(s))
         c["safe_zone"] = bool(s["safe_zone"])
         c["nick"] = bool(s["nick"])
         c["nick_text"] = s["nick_text"]
@@ -1269,6 +1422,13 @@ class ClipsPage(QWidget):
         self.e_bleep.toggled.connect(self.e_sound.setEnabled)
         row.addWidget(self.e_sound)
         row.addWidget(SoundButton(self.e_sound))
+        row.addSpacing(12)
+        row.addWidget(QLabel("Стиль"))
+        self.e_style = QComboBox()
+        self.e_style.setMinimumWidth(150)
+        self.e_style.setToolTip("Стиль субтитров этого клипа. Свои стили — в «Настройках»")
+        self.e_style.currentIndexChanged.connect(self._changed)
+        row.addWidget(self.e_style)
         row.addStretch(1)
         ed.addLayout(row)
         ed.addWidget(separator())
@@ -1849,12 +2009,20 @@ class ClipsPage(QWidget):
                      "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
                      "nick": bool(cfg.get("nick")),
+                     "style": (c.get("overrides") or {}).get("sub_style") or "",
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
-                   self.e_start, self.e_end, self.e_sound, self.e_nick)
+                   self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style)
         for w in widgets:
             w.blockSignals(True)
         fill_sounds(self.e_sound, cfg["bleep_sound"])
+        self.e_style.clear()
+        self.e_style.addItem("как у нарезки", "")
+        for st in autoclip.load_styles():
+            self.e_style.addItem(st["name"], st["name"])
+        if self.base["style"] and self.e_style.findData(self.base["style"]) < 0:
+            self.e_style.addItem(self.base["style"], self.base["style"])   # стиль потом удалили
+        self.e_style.setCurrentIndex(max(0, self.e_style.findData(self.base["style"])))
         b = self.base
         self.e_hook.setChecked(b["hook"])
         self.e_zoom.setChecked(b["zoom"])
@@ -1891,6 +2059,7 @@ class ClipsPage(QWidget):
                 "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
                 "nick": self.e_nick.isChecked(),
+                "style": self.e_style.currentData() or "",
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -2084,6 +2253,10 @@ class ClipsPage(QWidget):
             QMessageBox.warning(self, "AutoClip", "Клип получается короче 3 секунд.")
             return
         overrides = {k: v for k, v in p.items() if k in autoclip.OVERRIDE_KEYS}
+        if "style" in p:                              # свой стиль — все его значения клипу
+            st = autoclip.get_style(p["style"]) if p["style"] else None
+            overrides.update({k: (st[k] if st else None) for k in autoclip.STYLE_KEYS})
+            overrides["sub_style"] = st["name"] if st else None
         start = now["start"] if "start" in p else None
         end = now["end"] if "end" in p else None
         self.busy = True
@@ -2449,15 +2622,16 @@ class SettingsPage(QWidget):
                                      "У отдельного клипа всё можно поменять в «Клипах».")
         self.cb_subs = self._toggle("subs")
         v.addWidget(option_row("Субтитры", self.cb_subs))
-        self.sub_pos = self._combo(autoclip.SUB_POSITIONS, "sub_pos")
+        self.sub_pos = self._combo(list(autoclip.SUB_POSITIONS) +
+                                   ([CUSTOM_POS] if self.s.get("sub_pos") == CUSTOM_POS else []),
+                                   "sub_pos")
         v.addWidget(option_row("Где субтитры", self.sub_pos))
         self.cb_safe = self._toggle("safe_zone")
         v.addWidget(option_row("Сейф-зона соцсетей", self.cb_safe,
                                "Субтитры не заходят под кнопки, ник и подпись "
                                "TikTok, Shorts и Reels"))
-        self.preview = SubsPreview()
-        v.addWidget(option_row("Как это выглядит", self.preview,
-                               "Белое — субтитры, красное — зона кнопок соцсетей"))
+        self.preview = SubsPreview()            # маленькая схема — в карточке «Ник в углу»
+        v.addWidget(hint("Шрифт, цвета и место субтитров — в карточке «Субтитры» ниже."))
         v.addWidget(separator())
         self.cb_zoom = self._toggle("zoom")
         v.addWidget(option_row("Зум на эмоциях", self.cb_zoom))
@@ -2509,6 +2683,86 @@ class SettingsPage(QWidget):
                                "Остальные яркие моменты — кандидатами, без видео"))
         lay.addWidget(box)
 
+        # --- субтитры: стиль и живой предпросмотр ---
+        box, v = card("Субтитры", "Как выглядят субтитры в новых клипах. Справа — кадр клипа: "
+                                  "строку можно перетащить мышкой, пунктир — сейф-зона.")
+        body = QHBoxLayout()
+        body.setSpacing(24)
+        form = QVBoxLayout()
+        form.setSpacing(10)
+        st_row = QHBoxLayout()
+        st_row.setSpacing(6)
+        self.style_box = QComboBox()
+        self.style_box.setMinimumWidth(190)
+        self.style_box.activated.connect(lambda i: self.apply_style(self.style_box.itemText(i)))
+        st_row.addWidget(self.style_box)
+        b = QPushButton("Сохранить как…")
+        b.clicked.connect(self.save_style_as)
+        st_row.addWidget(b)
+        self.style_del = QPushButton("Удалить")
+        self.style_del.setObjectName("ghost")
+        self.style_del.clicked.connect(self.delete_style)
+        st_row.addWidget(self.style_del)
+        form.addWidget(option_row("Стиль", st_row, "Выбранный — по умолчанию для новых клипов"))
+        f_row = QHBoxLayout()
+        f_row.setSpacing(6)
+        self.font_box = QComboBox()
+        self.font_box.setMinimumWidth(220)
+        self.font_box.setMaxVisibleItems(18)
+        self.font_box.activated.connect(lambda i: self._set_style_key("sub_font", self.font_box.itemText(i)))
+        f_row.addWidget(self.font_box)
+        b = QPushButton("Свой файл шрифта…")
+        b.setToolTip("ttf или otf — копия ляжет в папку программы с настройками")
+        b.clicked.connect(self.pick_font_file)
+        f_row.addWidget(b)
+        form.addWidget(option_row("Шрифт", f_row, "Только шрифты с русскими буквами"))
+        self.mode_box = QComboBox()
+        self.mode_box.setMinimumWidth(190)
+        for k, name in SUB_MODES.items():
+            self.mode_box.addItem(name, k)
+        self.mode_box.activated.connect(lambda i: self._set_style_key("sub_mode", self.mode_box.itemData(i)))
+        form.addWidget(option_row("Показ", self.mode_box))
+        self.size_box = Stepper(40, 160, int(self.s.get("sub_size", 82)), step=4)
+        self.size_box.valueChanged.connect(lambda x: self._set_style_key("sub_size", int(x)))
+        form.addWidget(option_row("Размер", self.size_box))
+        c_row = QHBoxLayout()
+        c_row.setSpacing(8)
+        self.c_text = ColorButton(self.s.get("sub_color", "#FFFFFF"), "Текст")
+        self.c_hl = ColorButton(self.s.get("sub_hl_color", "#FFE600"), "Слово, которое сейчас звучит")
+        self.c_out = ColorButton(self.s.get("sub_outline_color", "#000000"), "Обводка")
+        for lbl, btn, key in (("текст", self.c_text, "sub_color"), ("слово", self.c_hl, "sub_hl_color"),
+                              ("обводка", self.c_out, "sub_outline_color")):
+            c_row.addWidget(btn)
+            c_row.addWidget(hint(lbl))
+            c_row.addSpacing(6)
+            btn.changed.connect(lambda col, key=key: self._set_style_key(key, col))
+        form.addWidget(option_row("Цвета", c_row))
+        self.outline_box = Stepper(0, 20, int(self.s.get("sub_outline", 7)))
+        self.outline_box.valueChanged.connect(lambda x: self._set_style_key("sub_outline", int(x)))
+        form.addWidget(option_row("Толщина обводки", self.outline_box))
+        p_row = QHBoxLayout()
+        p_row.setSpacing(6)
+        for name, pos in (("Верх", "Сверху"), ("Середина", "Середина"), ("Низ", "Снизу")):
+            b = QPushButton(name)
+            b.clicked.connect(lambda _, pos=pos: self.sub_pos.setCurrentText(pos))
+            p_row.addWidget(b)
+        form.addWidget(option_row("Место", p_row, "Или перетащи строку мышкой в кадре справа"))
+        form.addStretch(1)
+        body.addLayout(form, 1)
+        self.live = LivePreview()
+        self.live.set_frame(latest_cover())
+        self.live.moved.connect(self.subs_moved)
+        body.addWidget(self.live, 0, Qt.AlignTop)
+        v.addLayout(body)
+        lay.addWidget(box)
+        self._live_n = 0
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(200)
+        self._live_timer.timeout.connect(self.render_live)
+        self.win.bus.sub_layer.connect(self._live_ready)
+        self.fill_style_widgets()
+
         # --- ник в углу ---
         box, v = card("Ник в углу", "Тестовая функция: небольшая подпись в углу клипа. "
                                     "Не заходит на субтитры и в зону кнопок соцсетей.")
@@ -2536,6 +2790,8 @@ class SettingsPage(QWidget):
         self.nick_opacity.valueChanged.connect(self._nick_opacity)
         self._nick_opacity(self.nick_opacity.value())
         v.addWidget(option_row("Видимость", op, "100% — ярко, 30% — едва заметно"))
+        v.addWidget(option_row("Где ник", self.preview,
+                               "Белое — субтитры, красное — зона кнопок соцсетей"))
         lay.addWidget(box)
         for w in (self.cb_nick,):
             w.toggled.connect(self._update_preview)
@@ -2788,7 +3044,127 @@ class SettingsPage(QWidget):
         self.nick_op_label.setText(f"{v}%")
         self._set("nick_opacity", int(v))
 
+    # --- субтитры ---
+    def fill_style_widgets(self):
+        """Поля стиля — по нынешним настройкам."""
+        from PySide6.QtGui import QFontDatabase
+        names = [st["name"] for st in autoclip.load_styles()]
+        self.style_box.blockSignals(True)
+        self.style_box.clear()
+        self.style_box.addItems(names)
+        cur = self.s.get("sub_style", "Обычный")
+        self.style_box.setCurrentText(cur if cur in names else names[0])
+        self.style_box.blockSignals(False)
+        self.style_del.setEnabled(self.style_box.currentText() != "Обычный")
+        fams = sorted(set(QFontDatabase.families(QFontDatabase.WritingSystem.Cyrillic))
+                      | set(autoclip.user_fonts()) | {self.s.get("sub_font", "Arial Black")},
+                      key=str.lower)
+        self.font_box.blockSignals(True)
+        self.font_box.clear()
+        self.font_box.addItems([f for f in fams if not f.startswith("@")])
+        self.font_box.setCurrentText(self.s.get("sub_font", "Arial Black"))
+        self.font_box.blockSignals(False)
+        self.mode_box.setCurrentIndex(max(0, self.mode_box.findData(self.s.get("sub_mode", "words"))))
+        for w, key in ((self.size_box, "sub_size"), (self.outline_box, "sub_outline")):
+            w.blockSignals(True)
+            w.setValue(int(self.s.get(key, DEFAULTS[key])))
+            w.blockSignals(False)
+        for btn, key in ((self.c_text, "sub_color"), (self.c_hl, "sub_hl_color"),
+                         (self.c_out, "sub_outline_color")):
+            btn.set_color(self.s.get(key, DEFAULTS[key]))
+        self.refresh_live()
+
+    def _set_style_key(self, key, value):
+        self._set(key, value)
+        self.refresh_live()
+
+    def apply_style(self, name):
+        st = autoclip.get_style(name)
+        for k in autoclip.STYLE_KEYS:
+            self.s[k] = st[k]
+        self.s["sub_style"] = st["name"]
+        save_settings(self.s)
+        self.fill_style_widgets()
+
+    def save_style_as(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Сохранить стиль", "Название стиля:",
+                                        text="" if self.s.get("sub_style") == "Обычный"
+                                        else self.s.get("sub_style", ""))
+        if not ok or not name.strip():
+            return
+        try:
+            autoclip.save_style(name, {k: self.s.get(k, DEFAULTS[k]) for k in autoclip.STYLE_KEYS})
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self._set("sub_style", name.strip())
+        self.fill_style_widgets()
+
+    def delete_style(self):
+        name = self.style_box.currentText()
+        if name == "Обычный":
+            return
+        autoclip.delete_style(name)
+        self.apply_style("Обычный")
+
+    def pick_font_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Файл шрифта", "", "Шрифты (*.ttf *.otf)")
+        if not path:
+            return
+        try:
+            fam = autoclip.add_font(path)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        from PySide6.QtGui import QFontDatabase
+        QFontDatabase.addApplicationFont(os.path.join(autoclip.FONTS_DIR, os.path.basename(path)))
+        self._set("sub_font", fam)
+        self.fill_style_widgets()
+
+    def subs_moved(self, x, y):
+        self.s["sub_x"] = round(x, 4)
+        self.s["sub_y_free"] = round(y, 4)
+        if self.sub_pos.findText(CUSTOM_POS) < 0:
+            self.sub_pos.addItem(CUSTOM_POS)
+        self.sub_pos.setCurrentText(CUSTOM_POS)       # сохранит sub_pos и перерисует
+        self._set("sub_pos", CUSTOM_POS)
+        self.refresh_live()
+
+    def live_cfg(self):
+        cfg = dict(autoclip.CONFIG, subs=self.cb_subs.isChecked(), safe_zone=self.cb_safe.isChecked())
+        cfg.update(sub_settings(self.s))
+        cfg.update(nick=False)                       # ник — на маленькой схеме у «Ника в углу»
+        return cfg
+
+    def refresh_live(self, *_):
+        if hasattr(self, "_live_timer"):
+            self._live_timer.start()
+
+    def render_live(self):
+        self._live_n += 1
+        n, cfg, bus = self._live_n, self.live_cfg(), self.win.bus
+        out = os.path.join(tempfile.gettempdir(), f"autoclip_live_{os.getpid()}_{n % 4}.png")
+
+        def work():
+            try:
+                autoclip.render_sub_layer(cfg, LivePreview.W, LivePreview.H, out)
+                path = out
+            except Exception:
+                path = ""
+            try:
+                bus.sub_layer.emit(n, path)
+            except RuntimeError:
+                pass
+        self._live_cfg = cfg
+        threading.Thread(target=work, daemon=True).start()
+
+    def _live_ready(self, n, path):
+        if n == self._live_n:                        # пришёл последний запрос, старые — мимо
+            self.live.set_layer(path, self._live_cfg)
+
     def _update_preview(self, *_):
+        self.refresh_live()
         if not hasattr(self, "nick_opacity"):          # карточка ника ещё строится
             return
         nick = {"nick": self.cb_nick.isChecked(), "nick_text": self.nick.text(),

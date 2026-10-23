@@ -7,6 +7,7 @@ import sys
 import pytest
 
 import autoclip
+from qtwait import pump
 
 
 def _video(tmp_path, dur=60, quiet_until=0):
@@ -110,11 +111,10 @@ def win(tmp_path, monkeypatch):
 
 
 def wait_for(cond, ms=60000):
-    from PySide6.QtTest import QTest
     for _ in range(ms // 50):
         if cond():
             return True
-        QTest.qWait(50)
+        pump(50)
     return cond()
 
 

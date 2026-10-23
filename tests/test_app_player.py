@@ -11,6 +11,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import autoclip  # noqa: E402
+from qtwait import pump  # noqa: E402
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def wait_for(cond, ms=5000):
     for _ in range(ms // 50):
         if cond():
             return True
-        QTest.qWait(50)
+        pump(50)
     return cond()
 
 
@@ -60,7 +61,7 @@ def test_clip_opens_paused_on_first_frame(win, project):
     win.go("clips")
     pl = win.clips.player
     assert wait_for(lambda: pl.video.videoSink().videoFrame().isValid())
-    QTest.qWait(500)
+    pump(500)
     assert pl.player.playbackState() != QMediaPlayer.PlayingState
     assert pl.player.position() < 200
 

@@ -83,6 +83,13 @@ CONFIG = {
     "nick_size": 40,                # размер шрифта при ширине кадра 1080
     "nick_opacity": 70,             # непрозрачность, %
     "sub_max_words": 3,
+    "sub_mode": "words",      # words — по 2–3 слова; single — по одному слову
+    "sub_color": "#FFFFFF",   # текст
+    "sub_hl_color": "#FFE600",  # текущее слово
+    "sub_outline_color": "#000000",
+    "sub_outline": 7,         # толщина обводки при ширине кадра 1080
+    "sub_x": None,            # центр строки по ширине (доля кадра); None — середина области
+    "sub_style": "Обычный",   # сохранённый стиль
     "sub_max_chars": 18,
     "sub_uppercase": True,
 
@@ -171,9 +178,10 @@ def _flags():
     return _NO_WINDOW | (_proc_priority if os.name == "nt" else 0)
 
 
-def run(cmd, cwd=None, quiet=True, cancel=None):
+def run(cmd, cwd=None, quiet=True, cancel=None, binary=False):
+    text = {} if binary else {"encoding": "utf-8", "errors": "replace"}
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            encoding="utf-8", errors="replace", creationflags=_flags())
+                            creationflags=_flags(), **text)
     while True:
         try:
             out, err = proc.communicate(timeout=0.3)
@@ -184,7 +192,7 @@ def run(cmd, cwd=None, quiet=True, cancel=None):
                 proc.communicate()
                 raise Cancelled()
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
-    if p.returncode != 0 and not quiet:
+    if p.returncode != 0 and not quiet and not binary:
         log(p.stderr[-3000:])
     return p
 
@@ -289,7 +297,8 @@ def _set_self_priority(low):
 def need_ffmpeg():
     # ffmpeg.exe / ffprobe.exe можно просто положить рядом со скриптом
     here = os.path.dirname(os.path.abspath(__file__))
-    os.environ["PATH"] = here + os.pathsep + os.environ.get("PATH", "")
+    if here not in os.environ.get("PATH", "").split(os.pathsep):      # один раз, а не при каждом вызове
+        os.environ["PATH"] = here + os.pathsep + os.environ.get("PATH", "")
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             raise AutoClipError(f"❌ Не найден {tool}. Установи ffmpeg (install.bat) и перезапусти окно.")
@@ -1351,9 +1360,22 @@ def subs_layout(w, h, cfg=None):
         if y - half < nk["y1"] + gap and y + half > nk["y0"] - gap:
             y = nk["y1"] + gap + half if nk["corner"][0] == "t" else nk["y0"] - gap - half
             y = min(max(y, top + half), bottom - half)
-    max_chars = max(4, min(cfg["sub_max_chars"], int((right - left) / (CHAR_W * fs))))
-    return {"x": int((left + right) / 2), "y": int(y), "fs": fs, "max_chars": max_chars,
-            "box": (left, top, right, bottom)}
+    # по ширине — куда перетащили (в пределах области); строка не шире, чем влезает вокруг центра
+    x = (left + right) / 2
+    if cfg.get("sub_x") is not None and right - left > 4 * fs:
+        x = min(max(w * float(cfg["sub_x"]), left + 2 * fs), right - 2 * fs)
+    room = 2 * min(x - left, right - x)
+    max_chars = max(4, min(cfg["sub_max_chars"], int(room / (CHAR_W * fs))))
+    return {"x": int(x), "y": int(y), "fs": fs, "max_chars": max_chars,
+            "box": (left, top, right, bottom), "room": room}
+
+
+def ass_color(rgb, alpha=0):
+    """«#RRGGBB» → «&HAABBGGRR» для ASS."""
+    v = str(rgb or "#FFFFFF").lstrip("#")
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", v):
+        v = "FFFFFF"
+    return f"&H{alpha:02X}{v[4:6]}{v[2:4]}{v[0:2]}".upper()
 
 
 def build_ass(words, w, h, path, cfg=None):
@@ -1361,7 +1383,10 @@ def build_ass(words, w, h, path, cfg=None):
     cfg = cfg or CONFIG
     lay = subs_layout(w, h, cfg)
     fs = lay["fs"]
-    outline = max(3, int(fs * 0.09))
+    outline = max(1, int(round(float(cfg.get("sub_outline", 7)) * w / 1080)))
+    text_c, out_c = ass_color(cfg.get("sub_color")), ass_color(cfg.get("sub_outline_color", "#000000"))
+    hl = ass_color(cfg.get("sub_hl_color", "#FFE600"))[4:]        # без прозрачности: &HBBGGRR
+    base = text_c[4:]
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -1371,7 +1396,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{cfg["sub_font"]},{fs},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},2,5,40,40,0,204
+Style: Main,{cfg["sub_font"]},{fs},{text_c},{text_c},{out_c},&H80000000,-1,0,0,0,100,100,0,0,1,{outline},2,5,40,40,0,204
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -1382,7 +1407,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if cur:
             prev = cur[-1]
             chars = sum(len(x["w"]) + 1 for x in cur) + len(wd["w"])
-            if (len(cur) >= cfg["sub_max_words"] or chars > lay["max_chars"]
+            max_words = 1 if cfg.get("sub_mode") == "single" else cfg["sub_max_words"]
+            if (len(cur) >= max_words or chars > lay["max_chars"]
                     or wd["s"] - prev["e"] > 0.45 or re.search(r"[.!?…]$", prev["w"])
                     or wd.get("part") != prev.get("part")):
                 chunks.append(cur)
@@ -1392,7 +1418,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         chunks.append(cur)
 
     x, y = lay["x"], lay["y"]
-    room = lay["box"][2] - lay["box"][0]
+    room = lay["room"]
     lines = []
     for ci, ch in enumerate(chunks):
         disp = [_display_word(x_["w"], cfg) for x_ in ch]
@@ -1407,7 +1433,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 continue
             parts = []
             for j, d in enumerate(disp):
-                parts.append("{\\c&H00E6FF&}" + d + "{\\c&HFFFFFF&}" if j == wi else d)
+                parts.append("{\\c&H%s&}" % hl + d + "{\\c&H%s&}" % base if j == wi else d)
             # одно длинное слово шире области — уменьшаем строку, а не вылезаем за край
             width = CHAR_W * fs * len(" ".join(disp))
             k = min(100, int(100 * room / width)) if width else 100
@@ -1421,6 +1447,185 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     with open(path, "w", encoding="utf-8-sig") as f:
         f.write(header + "\n".join(lines) + "\n")
+
+
+# ---------------- свои шрифты и стили субтитров ----------------
+
+FONTS_DIR = os.path.join(user_dir(), "шрифты")
+FONT_EXT = (".ttf", ".otf")
+
+
+def font_family(path):
+    """Название семейства из файла шрифта (таблица name), чтобы назвать его в ASS."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        num = struct.unpack(">H", data[4:6])[0]
+        name_off = None
+        for i in range(num):
+            tag, _, off, _ = struct.unpack(">4sIII", data[12 + 16 * i: 28 + 16 * i])
+            if tag == b"name":
+                name_off = off
+        if name_off is None:
+            return None
+        _, count, str_off = struct.unpack(">HHH", data[name_off:name_off + 6])
+        found = {}
+        for i in range(count):
+            pid, eid, lang, nid, ln, off = struct.unpack(
+                ">HHHHHH", data[name_off + 6 + 12 * i: name_off + 18 + 12 * i])
+            if nid not in (1, 16):
+                continue
+            raw = data[name_off + str_off + off: name_off + str_off + off + ln]
+            text = raw.decode("utf-16-be", "replace") if pid in (0, 3) else raw.decode("latin-1")
+            # лучше: типографское семейство (16), английское (0x409), Windows
+            rank = (nid == 16, pid == 3 and lang == 0x409, pid == 3)
+            if text.strip() and (nid not in found or rank > found[nid][0]):
+                found[nid] = (rank, text.strip())
+        best = found.get(1) or found.get(16)
+        return best[1] if best else None
+    except (OSError, struct.error, IndexError):
+        return None
+
+
+def add_font(path):
+    """«Свой файл шрифта…»: копия в %APPDATA%\\AutoClip\\шрифты. Возвращает название семейства."""
+    if not path.lower().endswith(FONT_EXT):
+        raise AutoClipError("❌ Нужен файл шрифта .ttf или .otf.")
+    fam = font_family(path)
+    if not fam:
+        raise AutoClipError("❌ Не получилось прочитать шрифт — файл повреждён или не шрифт.")
+    os.makedirs(FONTS_DIR, exist_ok=True)
+    dest = os.path.join(FONTS_DIR, os.path.basename(path))
+    if os.path.abspath(dest) != os.path.abspath(path):
+        if os.path.exists(dest):
+            trash(dest)
+        shutil.copy2(path, dest)
+    return fam
+
+
+def user_fonts():
+    """Свои шрифты: {семейство: файл}."""
+    out = {}
+    if os.path.isdir(FONTS_DIR):
+        for f in sorted(os.listdir(FONTS_DIR)):
+            if f.lower().endswith(FONT_EXT):
+                fam = font_family(os.path.join(FONTS_DIR, f))
+                if fam:
+                    out.setdefault(fam, os.path.join(FONTS_DIR, f))
+    return out
+
+
+def ass_filter(ass_name, tmpdir):
+    """Фильтр ass для ffmpeg; свои шрифты кладём рядом (fontsdir=fonts), чтобы не возиться
+    с двоеточием диска в пути."""
+    fonts = user_fonts()
+    if not fonts:
+        return f"ass={ass_name}"
+    fd = os.path.join(tmpdir, "fonts")
+    os.makedirs(fd, exist_ok=True)
+    for path in fonts.values():
+        dest = os.path.join(fd, os.path.basename(path))
+        if not os.path.exists(dest):
+            shutil.copy2(path, dest)
+    return f"ass={ass_name}:fontsdir=fonts"
+
+
+# стиль = шрифт, режим, размер, цвета, обводка (положение — отдельно)
+STYLE_KEYS = ("sub_font", "sub_mode", "sub_size", "sub_color", "sub_hl_color",
+              "sub_outline_color", "sub_outline")
+STYLES_PATH = os.path.join(user_dir(), "стили.json")
+BUILTIN_STYLE = {"name": "Обычный", "sub_font": "Arial Black", "sub_mode": "words",
+                 "sub_size": 82, "sub_color": "#FFFFFF", "sub_hl_color": "#FFE600",
+                 "sub_outline_color": "#000000", "sub_outline": 7}
+
+
+def load_styles():
+    """Сохранённые стили: встроенный «Обычный» + свои из %APPDATA%\\AutoClip\\стили.json."""
+    try:
+        with open(STYLES_PATH, encoding="utf-8") as f:
+            own = [x for x in json.load(f) if isinstance(x, dict) and x.get("name")]
+    except (OSError, ValueError):
+        own = []
+    out = [dict(BUILTIN_STYLE, builtin=True)]
+    for st in own:
+        if st["name"] != BUILTIN_STYLE["name"]:
+            out.append({k: st.get(k, BUILTIN_STYLE.get(k)) for k in ("name",) + STYLE_KEYS})
+    return out
+
+
+def get_style(name):
+    return next((st for st in load_styles() if st["name"] == name), load_styles()[0])
+
+
+def save_style(name, values):
+    """Сохранить (или заменить) свой стиль."""
+    name = str(name).strip()
+    if not name:
+        raise AutoClipError("❌ Дай стилю название.")
+    if name == BUILTIN_STYLE["name"]:
+        raise AutoClipError("❌ «Обычный» — встроенный стиль, назови свой иначе.")
+    own = [st for st in load_styles() if not st.get("builtin") and st["name"] != name]
+    own.append(dict({k: values.get(k, BUILTIN_STYLE[k]) for k in STYLE_KEYS}, name=name))
+    tmp = STYLES_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(own, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, STYLES_PATH)
+
+
+def delete_style(name):
+    own = [st for st in load_styles() if not st.get("builtin") and st["name"] != name]
+    with open(STYLES_PATH, "w", encoding="utf-8") as f:
+        json.dump(own, f, ensure_ascii=False, indent=1)
+
+
+PREVIEW_WORDS = ["вот", "это", "поворот"]
+
+
+def render_sub_layer(cfg, w, h, out_png, words=None):
+    """Субтитры одной строки на прозрачном фоне — точно так же, как в клипе (тот же libass,
+    тот же ASS). Для живого предпросмотра в «Настройках»."""
+    need_ffmpeg()
+    words = words or PREVIEW_WORDS
+    ws = [{"s": 0.1 + i * 0.4, "e": 0.45 + i * 0.4, "w": wd} for i, wd in enumerate(words)]
+    cfg = dict(cfg, sub_mode="words", sub_max_words=max(3, len(ws)))
+    import numpy as np
+    with tempfile.TemporaryDirectory(prefix="autoclip_p_") as tmp:
+        build_ass(ws, w, h, os.path.join(tmp, "p.ass"), cfg)
+        # ass не трогает прозрачность — рисуем на чёрном и на белом и из разницы
+        # получаем, где строка и насколько она прозрачна
+        layers = []
+        for bg in ("black", "white"):
+            p = run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                     f"color=c={bg}:s={w}x{h}:d=1:r=10", "-vf",
+                     ass_filter("p.ass", tmp) + ",format=rgb24", "-ss", "0.5",
+                     "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+                    cwd=tmp, binary=True)
+            if p.returncode != 0 or len(p.stdout) != w * h * 3:
+                raise AutoClipError("❌ Предпросмотр не получился: " +
+                                    p.stderr.decode("utf-8", "replace")[-300:])
+            layers.append(np.frombuffer(p.stdout, np.uint8).reshape(h, w, 3).astype(np.float32))
+    black, white = layers
+    alpha = np.clip(1.0 - (white - black).mean(axis=2) / 255.0, 0, 1)
+    rgb = np.where(alpha[..., None] > 0.003, black / np.maximum(alpha[..., None], 0.003), 0)
+    rgba = np.dstack([np.clip(rgb, 0, 255), alpha * 255]).astype(np.uint8)
+    _write_png(out_png, rgba)
+    return out_png
+
+
+def _write_png(path, rgba):
+    """PNG без сторонних библиотек (zlib есть в Python)."""
+    import struct
+    import zlib
+    h, w, _ = rgba.shape
+    raw = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 3)) + chunk(b"IEND", b""))
 
 
 # ---------------- 7. рендер ----------------
@@ -1622,7 +1827,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     if cfg["subs"] and words:
         ass_name = "subs.ass"
         build_ass(words, W, H, os.path.join(tmpdir, ass_name), cfg)
-        vf.append(f"ass={ass_name}")
+        vf.append(ass_filter(ass_name, tmpdir))
     if cfg.get("nick") and str(cfg.get("nick_text", "")).strip():
         build_nick_ass(W, H, os.path.join(tmpdir, "nick.ass"), cfg, total)
         vf.append("ass=nick.ass")
@@ -1869,9 +2074,12 @@ PROJECT_FILE = "project.json"
 PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
-OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick")
+OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
+                 "sub_x", "sub_style") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
+               "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
+               "sub_x", "sub_style",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
                "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook",
                "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity",

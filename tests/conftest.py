@@ -25,6 +25,8 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(update, "REPO", "")          # тесты не ходят на GitHub
     import diag
     monkeypatch.setattr(diag, "LOG_DIR", str(tmp_path / "logs"))   # и не пишут в настоящие логи
+    monkeypatch.setattr(autoclip, "FONTS_DIR", str(tmp_path / "шрифты"))
+    monkeypatch.setattr(autoclip, "STYLES_PATH", str(tmp_path / "стили.json"))
 
 
 @pytest.fixture

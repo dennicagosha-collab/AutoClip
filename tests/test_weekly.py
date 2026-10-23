@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import autoclip
+from qtwait import pump
 
 COLORS = {"red": (200, 40, 40), "green": (40, 200, 40), "blue": (40, 40, 200)}
 
@@ -122,7 +123,6 @@ def test_empty_list_is_clear_error():
 def test_weekly_page(tmp_path, monkeypatch):
     pytest.importorskip("PySide6")
     from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QMessageBox
     monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
     monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
@@ -152,7 +152,7 @@ def test_weekly_page(tmp_path, monkeypatch):
     for _ in range(1200):
         if not page.busy:
             break
-        QTest.qWait(50)
+        pump(50)
     assert page.last and os.path.isfile(page.last), page.state.text()
     assert page.last.startswith(str(tmp_path / "мои подборки"))
     info = _probe(page.last)

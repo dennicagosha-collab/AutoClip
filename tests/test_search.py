@@ -7,6 +7,7 @@ import sys
 import pytest
 
 import autoclip
+from qtwait import pump
 
 SEGS = [
     {"s": 0.0, "e": 3.0, "text": "", "words": [
@@ -114,11 +115,10 @@ def win(tmp_path, monkeypatch):
 
 
 def wait_for(cond, ms=60000):
-    from PySide6.QtTest import QTest
     for _ in range(ms // 50):
         if cond():
             return True
-        QTest.qWait(50)
+        pump(50)
     return cond()
 
 

@@ -4,6 +4,7 @@ import os
 import zipfile
 
 import autoclip
+from qtwait import pump
 import diag
 
 
@@ -90,11 +91,10 @@ def test_report_button(tmp_path, monkeypatch):
     w = A.MainWindow()
     try:
         w.make_report()
-        from PySide6.QtTest import QTest
         for _ in range(100):
             if shown:
                 break
-            QTest.qWait(50)
+            pump(50)
         assert made and shown and shown[0].endswith("отчёт.zip")
         assert "Готово" in w.settings_page.report_state.text() and w.settings_page.report_btn.isEnabled()
     finally:
