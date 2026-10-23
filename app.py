@@ -18,6 +18,7 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 import autoclip  # noqa: E402
 import forecast  # noqa: E402
 import update  # noqa: E402
+import diag  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     QByteArray, QEventLoop, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl,
@@ -204,6 +205,7 @@ class Bus(QObject):
     update_found = Signal(object, bool)    # релиз или None, проверка вручную?
     update_progress = Signal(float)
     update_done = Signal(object, object)   # итог установки, текст ошибки или None
+    report_done = Signal(object, object)   # путь к отчёту об ошибке, текст ошибки или None
 
 
 class Stream:
@@ -2709,6 +2711,19 @@ class SettingsPage(QWidget):
         v.addLayout(row)
         lay.addWidget(box)
 
+        # --- отчёт об ошибке ---
+        box, v = card("Отчёт об ошибке", "Что-то пошло не так — собери отчёт и отправь его. В нём "
+                                         "логи, версии программ, настройки без ключей и токенов, "
+                                         "отчёт последней нарезки. Записей и клипов в нём нет.")
+        row = QHBoxLayout()
+        self.report_btn = QPushButton("Отчёт об ошибке")
+        self.report_btn.clicked.connect(self.win.make_report)
+        row.addWidget(self.report_btn)
+        self.report_state = hint("Архив появится на рабочем столе.")
+        row.addWidget(self.report_state, 1)
+        v.addLayout(row)
+        lay.addWidget(box)
+
         lay.addWidget(hint(f"Настройки хранятся в {autoclip.user_dir()}"))
         lay.addStretch(1)
 
@@ -3188,6 +3203,8 @@ class MainWindow(QMainWindow):
             self.tray_watch.setCheckable(True)
             self.tray_watch.toggled.connect(self.settings_page.cb_watch.setChecked)
             menu.addSeparator()
+            menu.addAction("Отчёт об ошибке", self.make_report)
+            menu.addSeparator()
             menu.addAction("Выход", self.quit_from_tray)
             self.tray.setContextMenu(menu)
             self.tray.activated.connect(lambda r: self.show_window()
@@ -3209,6 +3226,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1200, self.news_after_update)
 
         # --- обновления: тихо спросить GitHub при запуске ---
+        self.bus.report_done.connect(self.report_ready)
         self.bus.update_found.connect(self.update_found)
         self.bus.update_done.connect(self.update_installed)
         self._update_dialog = None
@@ -3246,6 +3264,38 @@ class MainWindow(QMainWindow):
                 self.clips.reload(self.clips.current_clip()["id"] if self.clips.current_clip() else None)
         dlg.finished.connect(done)
         dlg.show()
+
+    # --- отчёт об ошибке ---
+    def make_report(self):
+        st = self.settings_page
+        if not st.report_btn.isEnabled():
+            return
+        st.report_btn.setEnabled(False)
+        st.report_state.setText("Собираю…")
+
+        def work():
+            try:
+                path, err = diag.make_report(), None
+            except Exception as e:
+                path, err = None, f"❌ Отчёт не собрался: {e}"
+            try:
+                self.bus.report_done.emit(path, err)
+            except RuntimeError:                     # окно уже закрыли
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def report_ready(self, path, err):
+        st = self.settings_page
+        st.report_btn.setEnabled(True)
+        if err:
+            st.report_state.setText(err)
+            return
+        st.report_state.setText(f"Готово: {os.path.basename(path)} — на рабочем столе")
+        self.last_report = path
+        if ask_choice(self if self.isVisible() else None,
+                      f"Отчёт собран: {os.path.basename(path)}\nОн на рабочем столе.",
+                      (("show", "Показать в папке"), ("ok", "Готово"))) == "show":
+            show_in_folder(path)
 
     # --- «Что нового» ---
     def news_after_update(self):
@@ -3592,7 +3642,10 @@ def main():
     dark_palette(app)
     # из трея программа выходит сама (окно может быть спрятано, а диалог — закрыться)
     app.setQuitOnLastWindowClosed(False)
+    flog = diag.FileLog()
     win = MainWindow()
+    win.bus.log.connect(flog.write)
+    app.aboutToQuit.connect(flog.close)
     win.standalone = True
     win.show()
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
@@ -3607,6 +3660,10 @@ if __name__ == "__main__":
     except Exception:
         # у pythonw нет консоли — показываем ошибку окном
         msg = traceback.format_exc()[-1500:]
+        try:
+            diag.FileLog().write("❌ Программа упала:\n" + traceback.format_exc())
+        except Exception:
+            pass
         try:
             QMessageBox.critical(None, "AutoClip", msg)
         except Exception:

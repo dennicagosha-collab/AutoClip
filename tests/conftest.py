@@ -23,6 +23,8 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(forecast, "MODEL_PATH", str(tmp_path / "модель.json"))
     import update
     monkeypatch.setattr(update, "REPO", "")          # тесты не ходят на GitHub
+    import diag
+    monkeypatch.setattr(diag, "LOG_DIR", str(tmp_path / "logs"))   # и не пишут в настоящие логи
 
 
 @pytest.fixture
