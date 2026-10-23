@@ -341,25 +341,157 @@ def thumbnail(video, out_png, box=240):
     return vinfo
 
 
+def _boxes(f, start, end):
+    """Боксы mp4 между start и end: [(тип, начало данных, конец)] — читаем только заголовки."""
+    import struct
+    out, pos = [], start
+    while pos + 8 <= end:
+        f.seek(pos)
+        size, kind = struct.unpack(">I4s", f.read(8))
+        head = 8
+        if size == 1:
+            size = struct.unpack(">Q", f.read(8))[0]
+            head = 16
+        elif size == 0:
+            size = end - pos
+        if size < head:
+            break
+        out.append((kind.decode("latin-1"), pos + head, pos + size))
+        pos += size
+    return out
+
+
+def mp4_chapters(path):
+    """Главы mp4 без ffprobe: дорожка глав (handler «text», как пишет OBS Hybrid MP4) или
+    бокс chpl. Из большого файла читаются только боксы moov. [(сек, название)]."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            moov = next(((a, b) for k, a, b in _boxes(f, 0, size) if k == "moov"), None)
+            if not moov:
+                return []
+            f.seek(moov[0])
+            data = f.read(moov[1] - moov[0])
+    except OSError:
+        return []
+
+    def boxes(buf, a, b):
+        out, pos = [], a
+        while pos + 8 <= b:
+            sz, kind = struct.unpack(">I4s", buf[pos:pos + 8])
+            head = 8
+            if sz == 1:
+                sz = struct.unpack(">Q", buf[pos + 8:pos + 16])[0]
+                head = 16
+            if sz < head or pos + sz > b:
+                break
+            out.append((kind.decode("latin-1"), pos + head, pos + sz))
+            pos += sz
+        return out
+
+    def find(buf, a, b, path_):
+        for k, x, y in boxes(buf, a, b):
+            if k == path_[0]:
+                return (x, y) if len(path_) == 1 else find(buf, x, y, path_[1:])
+        return None
+
+    out = []
+    for k, a, b in boxes(data, 0, len(data)):
+        if k == "udta":                                  # Nero chpl
+            ch = find(data, a, b, ["chpl"])
+            if ch:
+                try:
+                    x = ch[0] + 4 + (1 if data[ch[0]] == 1 else 0)   # версия, флаги, запас в v1
+                    n, x = data[x], x + 1
+                    for _ in range(n):
+                        t = struct.unpack(">Q", data[x:x + 8])[0] / 1e7
+                        ln = data[x + 8]
+                        out.append((t, data[x + 9:x + 9 + ln].decode("utf-8", "replace")))
+                        x += 9 + ln
+                except (IndexError, struct.error):
+                    pass
+        if k != "trak":
+            continue
+        hd = find(data, a, b, ["mdia", "hdlr"])
+        if not hd or data[hd[0] + 8:hd[0] + 12] != b"text":
+            continue
+        md = find(data, a, b, ["mdia", "mdhd"])
+        st = find(data, a, b, ["mdia", "minf", "stbl"])
+        if not (md and st):
+            continue
+        ver = data[md[0]]
+        scale = struct.unpack(">I", data[md[0] + (20 if ver == 1 else 12):][:4])[0] or 1000
+        tab = {kk: (x, y) for kk, x, y in boxes(data, st[0], st[1])}
+        if not all(t in tab for t in ("stts", "stsz", "stsc")) or not ("stco" in tab or "co64" in tab):
+            continue
+        x = tab["stts"][0]
+        times, t = [], 0
+        for i in range(struct.unpack(">I", data[x + 4:x + 8])[0]):
+            cnt, delta = struct.unpack(">II", data[x + 8 + 8 * i:x + 16 + 8 * i])
+            for _ in range(cnt):
+                times.append(t)
+                t += delta
+        x = tab["stsz"][0]
+        fixed, n = struct.unpack(">II", data[x + 4:x + 12])
+        sizes = [fixed] * n if fixed else list(struct.unpack(f">{n}I", data[x + 12:x + 12 + 4 * n]))
+        if "stco" in tab:
+            x = tab["stco"][0]
+            m = struct.unpack(">I", data[x + 4:x + 8])[0]
+            chunks = list(struct.unpack(f">{m}I", data[x + 8:x + 8 + 4 * m]))
+        else:
+            x = tab["co64"][0]
+            m = struct.unpack(">I", data[x + 4:x + 8])[0]
+            chunks = list(struct.unpack(f">{m}Q", data[x + 8:x + 8 + 8 * m]))
+        x = tab["stsc"][0]
+        runs = [struct.unpack(">III", data[x + 8 + 12 * i:x + 20 + 12 * i])
+                for i in range(struct.unpack(">I", data[x + 4:x + 8])[0])]
+        offsets, si = [], 0
+        for ci, off in enumerate(chunks, 1):
+            per = next((r[1] for r in reversed(runs) if r[0] <= ci), 1)
+            for _ in range(per):
+                if si >= len(sizes):
+                    break
+                offsets.append(off)
+                off += sizes[si]
+                si += 1
+        try:
+            with open(path, "rb") as f:
+                for i, off in enumerate(offsets[:len(times)]):
+                    f.seek(off)
+                    raw = f.read(min(sizes[i], 1024))
+                    ln = struct.unpack(">H", raw[:2])[0] if len(raw) >= 2 else 0
+                    out.append((times[i] / scale, raw[2:2 + ln].decode("utf-8", "replace")))
+        except OSError:
+            continue
+    return sorted(out)
+
+
 def read_markers(video):
     """Метки, которые стример поставил в OBS горячей клавишей «Добавить маркер главы».
-    OBS (Hybrid MP4) пишет их главами — читаем через ffprobe. [{"t": сек, "name": ...}].
+    OBS (Hybrid MP4) пишет их главами: читаем через ffprobe, а если он ничего не дал —
+    сами из mp4 (дорожка глав / chpl). [{"t": сек, "name": ...}].
     Глава в самом начале записи — не метка, а начало файла."""
+    chapters, how = [], "ffprobe"
     p = run(["ffprobe", "-v", "error", "-show_chapters", "-print_format", "json", video])
-    if p.returncode != 0:
-        return []
-    try:
-        chapters = json.loads(p.stdout).get("chapters", [])
-    except ValueError:
-        return []
-    out = []
-    for ch in chapters:
+    if p.returncode == 0:
         try:
-            t = float(ch["start_time"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if t >= 1.0:
-            out.append({"t": round(t, 2), "name": str(ch.get("tags", {}).get("title", ""))})
+            for ch in json.loads(p.stdout).get("chapters", []):
+                try:
+                    chapters.append((float(ch["start_time"]), str(ch.get("tags", {}).get("title", ""))))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        except ValueError:
+            pass
+    else:
+        log(f"   ⚠️  ffprobe не прочитал главы: {p.stderr.strip()[-200:]}")
+    if not [t for t, _ in chapters if t >= 1.0]:
+        own = mp4_chapters(video)
+        if own:
+            chapters, how = own, "разбор mp4"
+    out = [{"t": round(t, 2), "name": name} for t, name in chapters if t >= 1.0]
+    read_markers.how = how
     return sorted(out, key=lambda m: m["t"])
 
 
@@ -3348,8 +3480,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         prog("расшифровка", 100)
         t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
     marks = read_markers(video) if CONFIG["marks"] else []
-    if marks:
-        log(f"📍 Меток из OBS: {len(marks)} — эти моменты пойдут первыми")
+    if CONFIG["marks"]:
+        log(f"📍 Меток из OBS: {len(marks)}" + (f" ({getattr(read_markers, 'how', '')}) — эти моменты "
+                                                  "пойдут первыми" if marks else ""))
     n_words = sum(len(s["words"]) for s in segments)
     n_mat = sum(is_profane(w["w"]) for s in segments for w in s["words"])
     log(f"   слов: {n_words}, из них мата: {n_mat}")

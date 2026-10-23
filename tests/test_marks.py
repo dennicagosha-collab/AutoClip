@@ -106,3 +106,41 @@ def test_process_with_obs_marks(tmp_path, plain_video, fake_trash):
     autoclip.CONFIG["marks"] = False          # галочка выключена — метки не читаются
     out2 = autoclip.process(str(v))
     assert autoclip.load_project(out2)["marks"] == []
+
+
+def _with_chapters(tmp_path):
+    meta = tmp_path / "meta.txt"
+    meta.write_text(";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=Запустить\n"
+                    "[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=7500\ntitle=Без имени 1\n"
+                    "[CHAPTER]\nTIMEBASE=1/1000\nSTART=7500\nEND=10000\ntitle=Без имени 2\n", encoding="utf-8")
+    v = tmp_path / "главы.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=black:s=64x64:r=10:d=10",
+                    "-i", str(meta), "-map_metadata", "1", "-c:v", "libx264", "-preset", "ultrafast",
+                    str(v)], check=True)
+    return str(v)
+
+
+def test_own_mp4_chapter_reader(tmp_path):
+    v = _with_chapters(tmp_path)
+    got = autoclip.mp4_chapters(v)
+    assert [round(t, 2) for t, _ in got] == [0.0, 3.0, 7.5]
+    assert got[1][1] == "Без имени 1"
+
+
+def test_markers_fall_back_to_own_reader(tmp_path, monkeypatch):
+    v = _with_chapters(tmp_path)
+    real = autoclip.run
+    monkeypatch.setattr(autoclip, "run", lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 1, "", "сбой")
+                        if cmd[0] == "ffprobe" else real(cmd, *a, **k))
+    assert [m["t"] for m in autoclip.read_markers(v)] == [3.0, 7.5]   # ffprobe молчит — читаем сами
+    assert autoclip.read_markers.how == "разбор mp4"
+
+
+REAL = r"D:\Записи\2026-10-24 02-08-08.mp4"
+
+
+@pytest.mark.skipif(not os.path.isfile(REAL), reason="настоящая запись Гоши есть только у него")
+def test_real_obs_recording_markers():
+    got = autoclip.read_markers(REAL)
+    assert [m["t"] for m in got] == pytest.approx([768.93, 1328.33], abs=0.1)
+    assert [round(t, 1) for t, _ in autoclip.mp4_chapters(REAL)] == [0.0, 768.9, 1328.3]
