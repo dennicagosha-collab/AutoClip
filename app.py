@@ -447,6 +447,44 @@ class TelegramLink:
                 self.stop.wait(10)                   # нет связи — не долбим Telegram
 
 
+def fit_on_screen(w, margin=8):
+    """Окно — целиком на мониторе, который сейчас есть. Был на отключённом (или вылез за край) —
+    переезжает на основной монитор и при необходимости уменьшается."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QGuiApplication
+    screens = QGuiApplication.screens()
+    if not screens:
+        return False
+    g = w.normalGeometry() if w.isMaximized() else w.geometry()
+    if not g.isValid():
+        return False
+
+    def overlap(sc):
+        r = sc.availableGeometry().intersected(g)
+        return max(0, r.width()) * max(0, r.height())
+    best = max(screens, key=overlap)
+    if overlap(best) < 0.5 * g.width() * g.height():     # почти всё окно вне мониторов
+        best = QGuiApplication.primaryScreen() or screens[0]
+    area = best.availableGeometry().adjusted(margin, margin, -margin, -margin)
+    if w.minimumWidth() > area.width() or w.minimumHeight() > area.height():
+        # маленький экран — окно может стать меньше обычного минимума
+        w.setMinimumSize(min(w.minimumWidth(), area.width()), min(w.minimumHeight(), area.height()))
+    width = min(g.width(), area.width())
+    height = min(g.height(), area.height())
+    x = min(max(g.x(), area.left()), area.right() - width + 1)
+    y = min(max(g.y(), area.top()), area.bottom() - height + 1)
+    new = QRect(x, y, width, height)
+    if new == g:
+        return False
+    if w.isMaximized():
+        w.showNormal()
+        w.setGeometry(new)
+        w.showMaximized()                             # развёрнутым — уже на видимом мониторе
+    else:
+        w.setGeometry(new)
+    return True
+
+
 def plural(n, one, few, many):
     n = abs(int(n))
     if n % 10 == 1 and n % 100 != 11:
@@ -3662,6 +3700,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 720)
         if self.settings.get("geometry"):
             self.restoreGeometry(QByteArray.fromHex(self.settings["geometry"].encode()))
+            fit_on_screen(self)                       # монитор, где было окно, могли отключить
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -4114,6 +4153,7 @@ class MainWindow(QMainWindow):
             if self.settings.get("player_geometry"):
                 self.detached.restoreGeometry(
                     QByteArray.fromHex(self.settings["player_geometry"].encode()))
+                fit_on_screen(self.detached)          # второй монитор могли отключить
             else:
                 self.detached.resize(560, 960)
             self.clips.detached_note.show()
