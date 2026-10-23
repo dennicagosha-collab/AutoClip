@@ -1591,7 +1591,7 @@ def render_sub_layer(cfg, w, h, out_png, words=None):
     ws = [{"s": 0.1 + i * 0.4, "e": 0.45 + i * 0.4, "w": wd} for i, wd in enumerate(words)]
     cfg = dict(cfg, sub_mode="words", sub_max_words=max(3, len(ws)))
     import numpy as np
-    with tempfile.TemporaryDirectory(prefix="autoclip_p_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="autoclip_p_", ignore_cleanup_errors=True) as tmp:
         build_ass(ws, w, h, os.path.join(tmp, "p.ass"), cfg)
         # ass не трогает прозрачность — рисуем на чёрном и на белом и из разницы
         # получаем, где строка и насколько она прозрачна
