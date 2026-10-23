@@ -60,6 +60,8 @@ CONFIG = {
 
     # --- Whisper ---
     "whisper_model": "large-v3",   # large-v3 / medium / small
+    "retranscribe": False,    # расшифровать заново, даже если кэш есть
+    "subs_team": False,       # субтитры и для тиммейтов (дорожка Discord)
     "language": "ru",
 
     # --- языковая модель для оценки моментов ---
@@ -500,8 +502,8 @@ def read_markers(video):
 
 def extract_audio(video, wav, cancel=None):
     log("🔊 Достаю звук...")
-    p = run(["ffmpeg", "-y", "-v", "error", "-i", video, "-vn", "-ac", "1", "-ar", "16000",
-             "-c:a", "pcm_s16le", wav], quiet=False, cancel=cancel)
+    p = run(["ffmpeg", "-y", "-v", "error", "-i", video, "-map", "0:a:0", "-vn", "-ac", "1",
+             "-ar", "16000", "-c:a", "pcm_s16le", wav], quiet=False, cancel=cancel)
     if p.returncode != 0:
         raise AutoClipError("❌ Не получилось достать звук из видео.")
 
@@ -573,21 +575,77 @@ def drop_hallucinations(segments):
     return out
 
 
-def transcribe(wav, cache_path, dur, progress=None, cancel=None):
-    if os.path.exists(cache_path):
-        log("📝 Расшифровка уже есть, беру из кэша.")
-        with open(cache_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+ASR_VERSION = 2               # 2 — ровная громкость, мягкий VAD, без подсказки, время по звуку
+# фильтр перед Whisper: выровнять громкость и сжать динамику — тихая речь не теряется
+ASR_FILTER = "dynaudnorm=f=150:g=15:p=0.9:m=20,acompressor=threshold=0.05:ratio=4:attack=5:release=100"
+# VAD: общий звук (голос + игра) и чистая дорожка микрофона / Discord (подобрано на записи 24.10)
+VAD_MIX = {"threshold": 0.25, "min_silence_duration_ms": 800, "speech_pad_ms": 600}
+VAD_VOICE = {"threshold": 0.2, "min_silence_duration_ms": 800, "speech_pad_ms": 600}
 
+
+def audio_tracks(video):
+    """Сколько звуковых дорожек в записи (OBS: 1 — общий звук, 2 — микрофон, 3 — Discord)."""
+    p = run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+             "-of", "csv=p=0", video])
+    return len([x for x in p.stdout.split() if x.strip()]) if p.returncode == 0 else 1
+
+
+def asr_audio(video, track, out, cancel=None):
+    """Звук одной дорожки для Whisper: 16 кГц моно, ровная громкость."""
+    p = run(["ffmpeg", "-y", "-v", "error", "-i", video, "-map", f"0:a:{track}", "-vn",
+             "-af", ASR_FILTER, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", out], cancel=cancel)
+    if p.returncode != 0:
+        raise AutoClipError(f"❌ Не получилось достать звук дорожки {track + 1}.")
+    return out
+
+
+def speech_regions(audio):
+    """Где на самом деле звучит речь (Silero VAD, шаг ~30 мс): [(начало, конец)] в секундах."""
+    try:
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+    except ImportError:
+        return []
+    opts = VadOptions(threshold=0.5, min_silence_duration_ms=150, speech_pad_ms=30)
+    return [(r["start"] / 16000, r["end"] / 16000) for r in get_speech_timestamps(audio, opts)]
+
+
+def refine_words(words, regions, max_shift=0.8):
+    """Whisper ставит время слов раньше звука. Подвигаем границы к тому, где речь слышна:
+    начало — к началу речи, если она начинается позже, но до конца слова; конец последнего
+    слова перед паузой — к концу речи (не дальше следующего слова)."""
+    import bisect
+    if not regions:
+        return words
+    starts = [a for a, _ in regions]
+    ws = sorted(words, key=lambda w: w["s"])
+    out = []
+    for i, w in enumerate(ws):
+        s0, e0 = w["s"], w["e"]
+        nxt = ws[i + 1]["s"] if i + 1 < len(ws) else math.inf
+        j = max(0, bisect.bisect_right(starts, s0) - 1)
+        reg = [r for r in regions[j:j + 4] if r[1] > s0 - 0.05 and r[0] < e0 + 0.6]
+        s1, e1 = s0, e0
+        if reg:
+            a, b = reg[0]
+            if s0 < a < e0 - 0.05 and a - s0 <= max_shift:      # звук начался позже
+                s1 = round(a, 2)
+            last = reg[-1]
+            if nxt - e0 > 0.25 and last[0] < e0 + 0.3 and last[1] > e0:   # конец фразы
+                e1 = round(min(last[1], nxt - 0.05, e0 + max_shift), 2)
+        if e1 - s1 < 0.08:
+            s1, e1 = s0, e0
+        out.append(dict(w, s=s1, e=e1))
+    return out
+
+
+def _load_whisper():
     _windows_cuda_dlls()
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         raise AutoClipError("❌ Не установлен faster-whisper. Запусти install.bat.")
-
     global WHISPER_DEVICE
     name = CONFIG["whisper_model"]
-    model = None
     for device, ctype in (("cuda", "float16"), ("cpu", "int8")):
         try:
             log(f"🧠 Загружаю Whisper {name} ({device})... первый раз скачается ~3 ГБ")
@@ -595,50 +653,109 @@ def transcribe(wav, cache_path, dur, progress=None, cancel=None):
             WHISPER_DEVICE = f"{device} {ctype}"
             if device == "cpu":
                 log("⚠️  Видеокарта не подхватилась, считаю на процессоре — будет в разы медленнее.")
-            break
+            return model
         except Exception as e:
             log(f"   не вышло на {device}: {e}")
-    if model is None:
-        raise AutoClipError("❌ Whisper не запустился.")
+    raise AutoClipError("❌ Whisper не запустился.")
 
+
+def _asr(model, audio, vad, dur, spk, progress=None, cancel=None, part=(0, 1)):
+    """Одна дорожка → сегменты со словами (у слова spk — кто сказал)."""
+    # без initial_prompt: на записи 24.10 подсказка «ругательства полностью» убирала слова
+    segments, _info = model.transcribe(audio, language=CONFIG["language"], word_timestamps=True,
+                                       vad_filter=True, vad_parameters=vad, beam_size=5,
+                                       condition_on_previous_text=False)
+    out, last_print = [], 0
+    k, n = part
+    for sg in segments:
+        check_cancel(cancel)
+        words = [{"s": round(w.start, 2), "e": round(w.end, 2), "w": w.word.strip(), "spk": spk}
+                 for w in (sg.words or []) if w.word.strip()]
+        out.append({"s": round(sg.start, 2), "e": round(sg.end, 2), "text": sg.text.strip(),
+                    "words": words, "spk": spk})
+        pct = (k + min(1.0, sg.end / dur)) / n * 100
+        if progress:
+            progress("расшифровка", pct, f"{fmt_time(sg.end)} из {fmt_time(dur)}")
+        if sg.end - last_print > 120:
+            last_print = sg.end
+            log(f"   {fmt_time(sg.end)} из {fmt_time(dur)} ({pct:.0f}%)")
+    return out
+
+
+def _refine_segments(segments, audio):
+    regions = speech_regions(audio)
+    for sg in segments:
+        sg["words"] = refine_words(sg["words"], regions)
+        if sg["words"]:
+            sg["s"], sg["e"] = min(w["s"] for w in sg["words"]), max(w["e"] for w in sg["words"])
+    return segments
+
+
+def cache_paths(video):
+    stem = os.path.splitext(os.path.abspath(video))[0]
+    return stem + ".transcript.v2.json", stem + ".transcript.json"
+
+
+def read_transcript(path):
+    """Расшифровка из файла: новый формат {"version", "segments"} или старый — список."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data["segments"] if isinstance(data, dict) else data
+
+
+def _save_transcript(path, segments, how):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"version": ASR_VERSION, "how": how, "segments": segments}, f, ensure_ascii=False)
+
+
+def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
+    """Расшифровка записи → (сегменты, путь кэша). Кэш новой версии — «.transcript.v2.json».
+    Старая расшифровка («.transcript.json», её используют прежние нарезки) не меняется: слова
+    из неё берутся, но время уточняется по звуку. fresh — расшифровать заново.
+    Дорожки 2 и 3 (микрофон и Discord) — отдельно; у слова spk: me / team."""
+    new_cache, old_cache = cache_paths(video)
+    if not fresh and os.path.exists(new_cache):
+        log("📝 Расшифровка уже есть, беру из кэша.")
+        return read_transcript(new_cache), new_cache
+    tracks = audio_tracks(video)
+    plan = [(1, "me", VAD_VOICE), (2, "team", VAD_VOICE)] if tracks >= 3 else [(0, "me", VAD_MIX)]
+    if tracks >= 3:
+        log("🎙  В записи 3 дорожки: расшифровываю микрофон и Discord отдельно")
+    audios = {}
+    for track, spk, _ in plan:
+        audios[spk] = _read_wav(asr_audio(video, track, os.path.join(tmp, f"asr_{spk}.wav"), cancel))
+    if not fresh and os.path.exists(old_cache) and tracks < 3:
+        log("📝 Расшифровка уже есть, беру из кэша и уточняю время слов по звуку.")
+        segments = _refine_segments(read_transcript(old_cache), audios["me"])
+        _save_transcript(new_cache, segments, "старая расшифровка, время по звуку")
+        return segments, new_cache
+    model = _load_whisper()
     log("📝 Расшифровываю речь (на 3 часа записи — примерно 10–25 минут на видеокарте)...")
     t0 = time.time()
+    segments = []
     try:
-        # звук отдаём массивом: так faster-whisper не зависит от версии PyAV
-        segments, _info = model.transcribe(
-            _read_wav(wav),
-            language=CONFIG["language"],
-            word_timestamps=True,
-            vad_filter=True,
-            beam_size=5,
-            condition_on_previous_text=False,
-            initial_prompt="Запись игрового стрима. Разговорная речь, сленг, ругательства "
-                           "записываются полностью, как произносятся, без звёздочек.",
-        )
-        result = []
-        last_print = 0
-        for s in segments:
-            check_cancel(cancel)
-            words = [{"s": round(w.start, 2), "e": round(w.end, 2), "w": w.word.strip()}
-                     for w in (s.words or []) if w.word.strip()]
-            result.append({"s": round(s.start, 2), "e": round(s.end, 2),
-                           "text": s.text.strip(), "words": words})
-            pct = min(100, s.end / dur * 100)
-            if progress:
-                progress("расшифровка", pct, f"{fmt_time(s.end)} из {fmt_time(dur)}")
-            if s.end - last_print > 120:
-                last_print = s.end
-                log(f"   {fmt_time(s.end)} из {fmt_time(dur)} ({pct:.0f}%)")
+        for k, (track, spk, vad) in enumerate(plan):
+            got = _asr(model, audios[spk], vad, dur, spk, progress, cancel, (k, len(plan)))
+            segments += _refine_segments(got, audios[spk])
     except AutoClipError:
         raise
     except Exception as e:
         raise AutoClipError(f"❌ Ошибка расшифровки: {e}\n"
                             "   Если ошибка про cublas/cudnn — запусти install.bat ещё раз.")
-
+    segments.sort(key=lambda sg: sg["s"])
     log(f"   готово за {(time.time() - t0) / 60:.1f} мин")
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False)
-    return result
+    _save_transcript(new_cache, segments, "whisper")
+    return segments, new_cache
+
+
+def speaker_segments(segments, spk="me"):
+    """Только речь одного говорящего (старые расшифровки — всё «me»)."""
+    out = []
+    for sg in segments:
+        ws = [w for w in sg["words"] if w.get("spk", "me") == spk]
+        if ws:
+            out.append(dict(sg, words=ws))
+    return out
 
 
 # ---------------- 3. мат ----------------
@@ -1995,8 +2112,37 @@ def clip_words(segments, s, e):
             continue
         for wd in seg["words"]:
             if wd["s"] >= s - 0.05 and wd["e"] <= e + 0.05:
-                words.append({"s": round(wd["s"] - s, 3), "e": round(wd["e"] - s, 3), "w": wd["w"]})
+                words.append({"s": round(wd["s"] - s, 3), "e": round(wd["e"] - s, 3), "w": wd["w"],
+                              "spk": wd.get("spk", "me")})
     return words
+
+
+def is_mat_word(w):
+    """Мат по фильтру или по ручной пометке у клипа («это мат» / «не мат»)."""
+    if w.get("nomat"):
+        return False
+    return bool(w.get("mat")) or is_profane(w["w"])
+
+
+def mark_manual_bleeps(words, cfg, s, e, hook, hd):
+    """Ручные правки писка у клипа (время — в записи, чтобы пережить сдвиг границ):
+    bleep_remove — начала слов, где писк снять; bleep_add — [начало, конец] куска, где запикать
+    (слова, которого нет в расшифровке)."""
+    remove = [float(t) for t in cfg.get("bleep_remove") or []]
+    out = [dict(w, nomat=True) if any(abs(w.get("src", -99) - t) < 0.06 for t in remove) else w
+           for w in words]
+    for a, b in cfg.get("bleep_add") or []:
+        a, b = float(a), float(b)
+        parts = []
+        if hook and a < hook[1] and b > hook[0]:
+            parts.append((max(a, hook[0]) - hook[0], min(b, hook[1]) - hook[0], 0))
+        if a < e and b > s:
+            parts.append((max(a, s) - s + hd, min(b, e) - s + hd, 1))
+        for x, y, part in parts:
+            if y - x > 0.02:
+                out.append({"s": round(x, 3), "e": round(y, 3), "w": "", "mat": True, "part": part,
+                            "src": a})
+    return sorted(out, key=lambda w: w["s"])
 
 
 def bleep_spans(words, total, pad):
@@ -2006,10 +2152,10 @@ def bleep_spans(words, total, pad):
     ws = sorted(words, key=lambda w: w["s"])
     spans = []
     for i, wd in enumerate(ws):
-        if not is_profane(wd["w"]):
+        if not is_mat_word(wd):
             continue
-        prev_e = max((w["e"] for w in ws[:i] if not is_profane(w["w"])), default=0.0)
-        nxt = next((w["s"] for w in ws[i + 1:] if not is_profane(w["w"])), total)
+        prev_e = max((w["e"] for w in ws[:i] if not is_mat_word(w)), default=0.0)
+        nxt = next((w["s"] for w in ws[i + 1:] if not is_mat_word(w)), total)
         a = max(0.0, wd["s"] - pad, min(prev_e, wd["s"]))
         b = min(total, wd["e"] + pad, max(nxt, wd["e"]))
         until = min(total, max(nxt, b))
@@ -2041,8 +2187,11 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     words = []
     if hook:
         # субтитры хука исчезают ровно на склейке
-        words += [dict(w, part=0, until=hd) for w in clip_words(segments, hook[0], hook[1])]
-    words += [dict(w, s=w["s"] + hd, e=w["e"] + hd, part=1) for w in clip_words(segments, s, e)]
+        words += [dict(w, part=0, until=hd, src=hook[0] + w["s"])
+                  for w in clip_words(segments, hook[0], hook[1])]
+    words += [dict(w, s=w["s"] + hd, e=w["e"] + hd, part=1, src=s + w["s"])
+              for w in clip_words(segments, s, e)]
+    words = mark_manual_bleeps(words, cfg, s, e, hook, hd)
     zooms = [z - s + hd for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
     if hook:
         zooms = [0.12] + zooms                      # хук — сразу крупно
@@ -2078,9 +2227,10 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         fy = cfg["zoom_focus_y"]
         vf.append(f"scale=w='2*trunc({W}*{Z}/2)':h='2*trunc({H}*{Z}/2)':eval=frame:flags=lanczos")
         vf.append(f"crop={W}:{H}:x='(iw-ow)/2':y='(ih-oh)*{fy}'")
-    if cfg["subs"] and words:
+    sub_words = [w for w in words if w["w"] and (w.get("spk", "me") == "me" or cfg.get("subs_team"))]
+    if cfg["subs"] and sub_words:
         ass_name = "subs.ass"
-        build_ass(words, W, H, os.path.join(tmpdir, ass_name), cfg)
+        build_ass(sub_words, W, H, os.path.join(tmpdir, ass_name), cfg)
         vf.append(ass_filter(ass_name, tmpdir))
     if cfg.get("nick") and str(cfg.get("nick_text", "")).strip():
         build_nick_ass(W, H, os.path.join(tmpdir, "nick.ass"), cfg, total)
@@ -2343,9 +2493,9 @@ PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
-                 "sub_x", "sub_style", "music") + STYLE_KEYS
+                 "sub_x", "sub_style", "music", "bleep_add", "bleep_remove") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
-RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
+RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
                "sub_x", "sub_style",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
@@ -2872,8 +3022,7 @@ def load_segments(proj):
     path = proj.get("transcript", "")
     if not os.path.isfile(path):
         raise AutoClipError(f"❌ Нет расшифровки: {path}\n   Нарежь запись заново.")
-    with open(path, encoding="utf-8") as f:
-        return drop_hallucinations(json.load(f))
+    return drop_hallucinations(read_transcript(path))
 
 
 def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None, cancel=None):
@@ -3362,6 +3511,7 @@ def main():
     ap.add_argument("--clips", type=int, help="сколько клипов")
     ap.add_argument("--llm", choices=["auto", "ollama", "anthropic", "none"])
     ap.add_argument("--build", choices=list(BUILD_MODES), help="сборка: auto, full, background")
+    ap.add_argument("--retranscribe", action="store_true", help="расшифровать заново, без кэша")
     ap.add_argument("--model", help="модель Whisper (large-v3 / medium / small)")
     ap.add_argument("--subs", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--zoom", action=argparse.BooleanOptionalAction, default=None)
@@ -3403,6 +3553,8 @@ def main():
             CONFIG["llm"] = args.llm
         if args.build:
             CONFIG["build_mode"] = args.build
+        if args.retranscribe:
+            CONFIG["retranscribe"] = True
         if args.model:
             CONFIG["whisper_model"] = args.model
         CONFIG.update({k: v for k, v in flags.items() if v is not None})
@@ -3468,9 +3620,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         log(f"⚠️  В записи {vinfo['fps']:g} кадров/с, клипы будут {preset['fps']}. Плавнее от "
             f"этого не станет — лучше сразу писать в OBS {preset['fps']} кадров/с.")
 
-    stem = os.path.splitext(os.path.abspath(video))[0]
     out_dir = new_clip_dir(video)                # каждая нарезка — в свою папку
-    cache = stem + ".transcript.json"
 
     timings = []
 
@@ -3487,7 +3637,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         prog("звук", 100)
         t = mark("звук и громкость", t)
         prog("расшифровка", 0)
-        segments = drop_hallucinations(transcribe(wav, cache, vinfo["dur"], progress, cancel))
+        segments, cache = transcribe(video, vinfo["dur"], tmp, progress, cancel,
+                                     fresh=CONFIG.get("retranscribe", False))
+        segments = drop_hallucinations(segments)
         prog("расшифровка", 100)
         t = mark(f"расшифровка ({WHISPER_DEVICE})", t)
     marks = read_markers(video) if CONFIG["marks"] else []
@@ -3522,7 +3674,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj = new_project(video, vinfo, out_dir, cache)
     proj["marks"] = marks
 
-    smooth, loud_z, parts = score_timeline(loud, segments, moments)
+    # речь и восклицания — по голосу Гоши (если есть его дорожка), громкость — по общему звуку
+    smooth, loud_z, parts = score_timeline(loud, speaker_segments(segments, "me"), moments)
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
     found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks,

@@ -64,7 +64,7 @@ DEFAULTS = {
     "views_days": 3, "check_updates": True, "skip_version": "", "seen_version": "",
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
-    "music_dir": "", "weekly_music": "", "bleep_rel_db": 0,
+    "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
 }
 
 BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
@@ -1296,6 +1296,7 @@ class CutPage(QWidget):
         c["platform_tags"] = dict(s["platform_tags"])
         c["bleep_sound"] = s["sound"]
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
+        c["subs_team"] = bool(s.get("subs_team", False))
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
         c["llm"] = s["llm"]
@@ -1596,6 +1597,23 @@ class ClipsPage(QWidget):
         row.addWidget(self.e_style)
         row.addStretch(1)
         ed.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("Писк"))
+        self.e_bleeps = QComboBox()
+        self.e_bleeps.setMinimumWidth(260)
+        self.e_bleeps.setToolTip("Где в клипе закрыт мат. «Убрать писк» — если запикано зря")
+        row.addWidget(self.e_bleeps, 1)
+        b = QPushButton("Запикать здесь")
+        b.setToolTip("Закрыть звуком полсекунды на месте просмотра — для слова, которого нет в субтитрах")
+        b.clicked.connect(self.bleep_here)
+        row.addWidget(b)
+        b = QPushButton("Убрать писк")
+        b.setObjectName("ghost")
+        b.clicked.connect(self.bleep_toggle)
+        row.addWidget(b)
+        ed.addLayout(row)
+        self.b_add, self.b_rem = [], []
         ed.addWidget(separator())
 
         row = QHBoxLayout()
@@ -2116,6 +2134,57 @@ class ClipsPage(QWidget):
             self._segs_for = pp
         return self._segs
 
+    # ---------- ручной писк ----------
+    def hook_len(self, c):
+        h = c.get("hook") or {}
+        return (h["end"] - h["start"]) if h.get("on") and h.get("start") is not None else 0.0
+
+    def refresh_bleeps(self):
+        """Список писков клипа: по фильтру, снятые и добавленные вручную."""
+        c = self.current_clip()
+        self.e_bleeps.clear()
+        if not c:
+            return
+        segs = self.segments() or []
+        for w in autoclip.clip_words(segs, c["start"], c["end"]):
+            t = c["start"] + w["s"]
+            if not autoclip.is_profane(w["w"]):
+                continue
+            off = any(abs(t - x) < 0.06 for x in self.b_rem)
+            label = (f"{autoclip.fmt_time_exact(t)}  «{autoclip._censor(w['w'])}»  — "
+                     + ("писк снят" if off else "по фильтру"))
+            self.e_bleeps.addItem(label, ("rem", round(t, 2)))
+        for i, (a, b) in enumerate(self.b_add):
+            self.e_bleeps.addItem(f"{autoclip.fmt_time_exact(a)}–{autoclip.fmt_time_exact(b)}  — вручную",
+                                  ("add", i))
+        if not self.e_bleeps.count():
+            self.e_bleeps.addItem("мата в клипе нет", None)
+
+    def bleep_here(self):
+        """Полсекунды писка на месте просмотра (время — в записи, переживёт пересборку)."""
+        c = self.current_clip()
+        if not c:
+            return
+        t = self.player.player.position() / 1000 - self.hook_len(c)   # в готовом клипе есть хук
+        rec = min(c["end"], max(c["start"], c["start"] + t))
+        self.b_add.append([round(max(c["start"], rec - 0.1), 2), round(min(c["end"], rec + 0.4), 2)])
+        self.refresh_bleeps()
+        self._changed()
+
+    def bleep_toggle(self):
+        d = self.e_bleeps.currentData()
+        if not d:
+            return
+        kind, x = d
+        if kind == "add":
+            self.b_add.pop(x)
+        elif any(abs(x - t) < 0.06 for t in self.b_rem):
+            self.b_rem = [t for t in self.b_rem if abs(x - t) >= 0.06]     # вернуть писк
+        else:
+            self.b_rem.append(x)
+        self.refresh_bleeps()
+        self._changed()
+
     # ---------- музыка ----------
     def fill_tracks(self, *_):
         self.m_list.clear()
@@ -2345,6 +2414,8 @@ class ClipsPage(QWidget):
                      "nick": bool(cfg.get("nick")),
                      "style": (c.get("overrides") or {}).get("sub_style") or "",
                      "music": (c.get("overrides") or {}).get("music"),
+                     "bleep_add": list((c.get("overrides") or {}).get("bleep_add") or []),
+                     "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
                    self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style)
@@ -2376,6 +2447,9 @@ class ClipsPage(QWidget):
         for w in widgets:
             w.blockSignals(False)
         self.music = dict(self.base["music"]) if self.base.get("music") else None
+        self.b_add = [list(x) for x in self.base["bleep_add"]]
+        self.b_rem = list(self.base["bleep_remove"])
+        self.refresh_bleeps()
         self.fill_tracks()
         self.show_music()
         good = c["status"] == "good"
@@ -2399,6 +2473,8 @@ class ClipsPage(QWidget):
                 "nick": self.e_nick.isChecked(),
                 "style": self.e_style.currentData() or "",
                 "music": dict(self.music) if self.music else None,
+                "bleep_add": [list(x) for x in self.b_add],
+                "bleep_remove": list(self.b_rem),
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -2991,6 +3067,9 @@ class SettingsPage(QWidget):
                                      "У отдельного клипа всё можно поменять в «Клипах».")
         self.cb_subs = self._toggle("subs")
         v.addWidget(option_row("Субтитры", self.cb_subs))
+        self.cb_subs_team = self._toggle("subs_team")
+        v.addWidget(option_row("Субтитры и для тиммейтов", self.cb_subs_team,
+                               "Если OBS пишет Discord отдельной дорожкой. Мат тиммейтов пикается всегда"))
         self.sub_pos = self._combo(list(autoclip.SUB_POSITIONS) +
                                    ([CUSTOM_POS] if self.s.get("sub_pos") == CUSTOM_POS else []),
                                    "sub_pos")

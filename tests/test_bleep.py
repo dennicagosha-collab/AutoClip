@@ -89,3 +89,78 @@ def test_bleep_matches_voice_loudness(tmp_path, voice_vol):
     beep = autoclip.loudness(out, 4.05, 0.7)
     assert speech is not None and beep is not None
     assert abs(beep - speech) <= 2.0, (beep, speech)
+
+
+def test_manual_bleep_add_and_remove(tmp_path):
+    """«Запикать здесь» — слово, которого нет в расшифровке; «Убрать писк» — ошибочный."""
+    v = tmp_path / "в.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=black:s=270x480:r=30:d=12",
+                    "-f", "lavfi", "-i", "sine=f=300:d=12", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(v)], check=True)
+    segs = [{"s": 2, "e": 8, "text": "", "words": [
+        {"s": 2.0, "e": 2.5, "w": "ну"}, {"s": 4.0, "e": 4.5, "w": "сука"}, {"s": 6.0, "e": 6.5, "w": "да"}]}]
+    vi = autoclip.probe(str(v))
+    clip = {"s": 1.0, "e": 9.0, "zooms": [], "hook": None}
+
+    def render(**over):
+        work = tmp_path / f"w{len(over)}{sorted(over)}"
+        work.mkdir()
+        cfg = dict(autoclip.CONFIG, zoom=False, subs=False, nick=False, bleep=True, music=None, **over)
+        return autoclip.render_clip(str(v), clip, segs, vi, str(tmp_path / "к.mp4"), str(work), cfg)
+    assert render() == 1                                              # «сука» — по фильтру
+    assert render(bleep_remove=[4.0]) == 0                            # сняли ошибочный писк
+    assert render(bleep_add=[[7.0, 7.4]]) == 2                        # добавили пропущенный
+    assert render(bleep_add=[[7.0, 7.4]], bleep_remove=[4.0]) == 1
+    words = autoclip.mark_manual_bleeps(
+        [dict(w, src=w["s"] + 1) for w in autoclip.clip_words(segs, 1.0, 9.0)],
+        {"bleep_add": [[7.0, 7.4]]}, 1.0, 9.0, None, 0.0)
+    added = [w for w in words if w.get("mat") and not w["w"]]
+    assert [(w["s"], w["e"]) for w in added] == [(6.0, 6.4)]          # в клипе — от его начала
+
+
+def test_manual_bleep_in_editor(tmp_path, fake_trash, monkeypatch):
+    import json
+    import sys
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from qtwait import pump
+    monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
+    monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a[2])))
+    v = tmp_path / "запись.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=black:s=270x480:r=30:d=40",
+                    "-f", "lavfi", "-i", "sine=f=300:d=40", "-af", "volume='1+20*between(mod(t,20),10,12)':eval=frame",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(v)], check=True)
+    segs = [{"s": t, "e": t + 2.4, "text": "", "words": [
+        {"s": t + i * 0.6, "e": t + i * 0.6 + 0.5, "w": x} for i, x in enumerate(["ну", "сука", "смотри"])]}
+        for t in range(0, 40, 4)]
+    json.dump(segs, open(tmp_path / "запись.transcript.json", "w", encoding="utf-8"), ensure_ascii=False)
+    autoclip.CONFIG.update(llm="none", clips=1, hook=False, clips_mode="count", min_len=10.0)
+    cut = autoclip.process(str(v))
+    import app as A
+    qapp = QApplication.instance() or QApplication([])  # noqa: F841
+    w = A.MainWindow()
+    try:
+        page = w.clips
+        page.load(cut)
+        c = page.current_clip()
+        n = page.e_bleeps.count()
+        assert n >= 1 and "по фильтру" in page.e_bleeps.itemText(0)
+        page.e_bleeps.setCurrentIndex(0)
+        page.bleep_toggle()                                          # убрать писк
+        assert "писк снят" in page.e_bleeps.itemText(0) and "bleep_remove" in page.pending()
+        page.player.player.setPosition(3000)
+        page.bleep_here()
+        assert page.b_add and "вручную" in page.e_bleeps.itemText(page.e_bleeps.count() - 1)
+        page.rebuild()
+        for _ in range(1200):
+            if not page.busy:
+                break
+            pump(50)
+        got = autoclip.find_clip(autoclip.load_project(cut), c["id"])["overrides"]
+        assert len(got["bleep_remove"]) == 1 and len(got["bleep_add"]) == 1
+        assert not page.pending()                                    # пересборка помнит
+    finally:
+        w.close()
