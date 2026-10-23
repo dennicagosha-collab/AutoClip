@@ -47,7 +47,8 @@ NICK_SIZES = {"Маленький": 32, "Средний": 40, "Крупный": 
 DEFAULTS = {
     "clips": 10, "clips_mode": "count", "auto_min_score": autoclip.CONFIG["auto_min_score"],
     "auto_min_score_plain": autoclip.CONFIG["auto_min_score_plain"],
-    "auto_max": autoclip.CONFIG["auto_max"], "subs": True, "zoom": True, "hook": True, "bleep": True,
+    "auto_max": autoclip.CONFIG["auto_max"], "build_mode": "auto", "game_processes": "",
+    "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
@@ -956,6 +957,8 @@ class CutPage(QWidget):
         s = self.s
         c["clips"] = int(s["clips"])
         c["clips_mode"] = "auto" if s.get("clips_mode") == "auto" else "count"
+        c["build_mode"] = s.get("build_mode") if s.get("build_mode") in autoclip.BUILD_MODES else "auto"
+        c["game_processes"] = s.get("game_processes", "")
         c["auto_min_score"] = float(s.get("auto_min_score", DEFAULTS["auto_min_score"]))
         c["auto_min_score_plain"] = float(s.get("auto_min_score_plain",
                                                 DEFAULTS["auto_min_score_plain"]))
@@ -2709,6 +2712,29 @@ class SettingsPage(QWidget):
         row.addWidget(self.update_btn)
         row.addStretch(1)
         v.addLayout(row)
+        lay.addWidget(box)
+
+        # --- сборка ---
+        box, v = card("Сборка клипов", "«На полную» — несколько клипов сразу, быстрее всего. "
+                                       "«Фоновый» — по одному и с низким приоритетом, чтобы не "
+                                       "мешать игре и стриму. «Авто» сам выбирает: запущены OBS "
+                                       "или игра — фоновый, иначе на полную.")
+        self.build_mode = QComboBox()
+        self.build_mode.setMinimumWidth(190)
+        for key, name in autoclip.BUILD_MODES.items():
+            self.build_mode.addItem(name, key)
+        i = self.build_mode.findData(self.s.get("build_mode", "auto"))
+        self.build_mode.setCurrentIndex(max(0, i))
+        self.build_mode.currentIndexChanged.connect(
+            lambda i: self._set("build_mode", self.build_mode.itemData(i)))
+        v.addWidget(option_row("Как собирать", self.build_mode))
+        self.games = QLineEdit(self.s.get("game_processes", ""))
+        self.games.setPlaceholderText("bg3.exe, cs2.exe")
+        self.games.setMinimumWidth(300)
+        self.games.textChanged.connect(lambda t: self._set("game_processes", t.strip()))
+        v.addWidget(option_row("Мои игры", self.games,
+                               "Для «Авто»: при этих программах — фоновый. Игру на весь экран "
+                               "программа замечает и сама"))
         lay.addWidget(box)
 
         # --- отчёт об ошибке ---

@@ -44,6 +44,9 @@ import wave
 CONFIG = {
     # --- клипы ---
     "clips": 10,              # сколько клипов сделать (режим «Число»)
+    "build_mode": "auto",     # auto / full (несколько клипов сразу) / background (тихо, по одному)
+    "parallel_clips": 3,      # сколько клипов собирать одновременно «на полную»
+    "game_processes": "",     # свои игры через запятую: при них «Авто» собирает в фоне
     "clips_mode": "count",    # count — ровно «clips»; auto — все выше порога, не больше потолка
     "auto_min_score": 2.5,    # порог «Авто» с языковой моделью: на 25-мин записи 11 клипов
     "auto_min_score_plain": 1.7,   # он же без модели (оценки ниже): на той же записи 9 клипов
@@ -160,11 +163,17 @@ def check_cancel(cancel):
 
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # без мигающих консолей под pythonw
+_LOW_PRIORITY = 0x00004000    # BELOW_NORMAL_PRIORITY_CLASS
+_proc_priority = 0            # в фоновой сборке ffmpeg запускается с пониженным приоритетом
+
+
+def _flags():
+    return _NO_WINDOW | (_proc_priority if os.name == "nt" else 0)
 
 
 def run(cmd, cwd=None, quiet=True, cancel=None):
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+                            encoding="utf-8", errors="replace", creationflags=_flags())
     while True:
         try:
             out, err = proc.communicate(timeout=0.3)
@@ -178,6 +187,103 @@ def run(cmd, cwd=None, quiet=True, cancel=None):
     if p.returncode != 0 and not quiet:
         log(p.stderr[-3000:])
     return p
+
+
+# ---------------- режимы сборки ----------------
+
+BUILD_MODES = {"auto": "Авто", "full": "На полную", "background": "Фоновый"}
+# стриминг и запись: при них «Авто» собирает в фоне
+BUSY_PROCESSES = ("obs64.exe", "obs32.exe", "obs.exe", "streamlabs obs.exe")
+
+
+def running_processes():
+    """Имена запущенных программ (нижним регистром). Без psutil — через tasklist."""
+    if os.name != "nt":
+        return set()
+    try:
+        p = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                           encoding="cp866", errors="replace", timeout=10, creationflags=_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {line.split('","')[0].strip('"').lower() for line in p.stdout.splitlines() if line}
+
+
+def fullscreen_app():
+    """Имя программы, которая сейчас на весь экран (игра), или None."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        hwnd = u.GetForegroundWindow()
+        if not hwnd:
+            return None
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(hwnd, cls, 256)
+        if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+            return None                       # рабочий стол и панель задач — не игра
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return None
+        r = wintypes.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not u.GetMonitorInfoW(u.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):
+            return None
+        m = mi.rcMonitor
+        if (r.left, r.top, r.right, r.bottom) != (m.left, m.top, m.right, m.bottom):
+            return None
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid.value)   # PROCESS_QUERY_LIMITED_INFORMATION
+        name = "программа на весь экран"
+        if h:
+            buf = ctypes.create_unicode_buffer(520)
+            size = wintypes.DWORD(520)
+            if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                name = os.path.basename(buf.value)
+            k.CloseHandle(h)
+        return name
+    except Exception:
+        return None
+
+
+def resolve_build_mode(mode=None, procs=None, fullscreen=None):
+    """("full" | "background", почему). «Авто»: OBS или игра запущены — фоновый, иначе на полную."""
+    mode = mode or CONFIG.get("build_mode", "auto")
+    if mode in ("full", "background"):
+        return mode, "выбрано в настройках"
+    procs = running_processes() if procs is None else {p.lower() for p in procs}
+    games = [g.strip().lower() for g in str(CONFIG.get("game_processes", "")).split(",") if g.strip()]
+    games = [g if g.endswith(".exe") else g + ".exe" for g in games]
+    for name in BUSY_PROCESSES:
+        if name in procs:
+            return "background", f"запущен {name}"
+    for name in games:
+        if name in procs:
+            return "background", f"запущена игра {name}"
+    fs = fullscreen_app() if fullscreen is None else fullscreen
+    if fs:
+        return "background", f"на весь экран: {fs}"
+    return "full", "OBS и игры не запущены"
+
+
+def _set_self_priority(low):
+    """Понизить (или вернуть) приоритет самой программы — Whisper считает в ней."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetPriorityClass(k.GetCurrentProcess(), _LOW_PRIORITY if low else 0x00000020)
+    except Exception:
+        pass
 
 
 def need_ffmpeg():
@@ -1642,7 +1748,7 @@ def pick_cover_time(video, vinfo, t, cfg, cancel=None):
     vf = ",".join(frame_filters(vinfo, preset) + [f"fps={COVER_FPS}", f"scale={w}:{h}", "format=gray"])
     p = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{2 * COVER_WINDOW:.3f}",
                         "-i", video, "-vf", vf, "-f", "rawvideo", "-"],
-                       capture_output=True, creationflags=_NO_WINDOW)
+                       capture_output=True, creationflags=_flags())
     check_cancel(cancel)
     raw = np.frombuffer(p.stdout, np.uint8)
     n = len(raw) // (w * h)
@@ -1884,7 +1990,7 @@ def quiet_start(path, seconds=3.0):
     import numpy as np
     p = subprocess.run(["ffmpeg", "-v", "error", "-t", f"{seconds:.2f}", "-i", path, "-vn",
                         "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-                       capture_output=True, creationflags=_NO_WINDOW)
+                       capture_output=True, creationflags=_flags())
     x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768.0
     if p.returncode != 0 or not len(x):
         return None
@@ -2724,6 +2830,7 @@ def main():
                     help="путь к видео (для --rebuild можно папку _clips или project.json)")
     ap.add_argument("--clips", type=int, help="сколько клипов")
     ap.add_argument("--llm", choices=["auto", "ollama", "anthropic", "none"])
+    ap.add_argument("--build", choices=list(BUILD_MODES), help="сборка: auto, full, background")
     ap.add_argument("--model", help="модель Whisper (large-v3 / medium / small)")
     ap.add_argument("--subs", action=argparse.BooleanOptionalAction, default=None)
     ap.add_argument("--zoom", action=argparse.BooleanOptionalAction, default=None)
@@ -2763,6 +2870,8 @@ def main():
             CONFIG["clips"] = args.clips
         if args.llm:
             CONFIG["llm"] = args.llm
+        if args.build:
+            CONFIG["build_mode"] = args.build
         if args.model:
             CONFIG["whisper_model"] = args.model
         CONFIG.update({k: v for k, v in flags.items() if v is not None})
@@ -2779,6 +2888,25 @@ STAGES = ("звук", "расшифровка", "модель", "поиск", "�
 
 
 def process(video, analyze_only=False, progress=None, cancel=None):
+    """Вся обработка одного видео (см. _process) в выбранном режиме сборки:
+    «на полную» — несколько клипов сразу, «фоновый» — по одному, с пониженным приоритетом."""
+    global _proc_priority
+    mode, why = resolve_build_mode()
+    workers = max(1, int(CONFIG.get("parallel_clips", 3))) if mode == "full" else 1
+    log(f"⚙️  Сборка: {BUILD_MODES[mode].lower()} — {why}"
+        + (f", клипов сразу: {workers}" if mode == "full" else ", по одному, тихо"))
+    if mode == "background":
+        _proc_priority = _LOW_PRIORITY
+        _set_self_priority(True)
+    try:
+        return _process(video, analyze_only, progress, cancel, workers)
+    finally:
+        if mode == "background":
+            _proc_priority = 0
+            _set_self_priority(False)
+
+
+def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     """Вся обработка одного видео. Возвращает папку с клипами (или None).
     progress(этап, процент 0–100 внутри этапа, сообщение) — этапы из STAGES;
     cancel — threading.Event или функция; при остановке — исключение Cancelled.
@@ -2919,30 +3047,53 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     save_project(proj)
     register_project(proj["_path"])
 
-    num = 0
-    with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        for i, c in enumerate(clips, 1):
-            check_cancel(cancel)
-            num += 1
-            name = f"{num:02d}_{safe_name(c['title'])}.mp4"
-            log(f"   [{i}/{len(clips)}] {name}")
-            prog("рендер", (i - 1) / len(clips) * 100, name)
-            rec = make_clip_record(c, num, name)
-            cfg = clip_config(proj, rec)
-            span = hook_span(rec, cfg)
-            rec["hook"]["on"] = span is not None
+    import threading
+    lock = threading.Lock()
+    done = [0]
+
+    def build(num, c):
+        """Один клип: рендер, тихое начало, обложка, прогноз. Своя временная папка —
+        клипы можно собирать одновременно."""
+        check_cancel(cancel)
+        name = f"{num:02d}_{safe_name(c['title'])}.mp4"
+        log(f"   [{num}/{len(clips)}] {name}")
+        rec = make_clip_record(c, num, name)
+        cfg = clip_config(proj, rec)
+        span = hook_span(rec, cfg)
+        rec["hook"]["on"] = span is not None
+        with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
             rec["bleeps"] = render_clip(video, dict(c, hook=span), segments, vinfo,
                                         os.path.join(out_dir, name), tmp, cfg, cancel)
-            if rec["bleeps"] is None:
-                num -= 1
-                continue
-            rec["rendered"] = now_iso()
-            rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
-            rec["cover"] = make_cover(video, vinfo, rec, reaction,
-                                      cover_path_for(out_dir, name), cfg, cancel)
-            add_forecast(rec, segments)
+        if rec["bleeps"] is None:
+            return None
+        rec["rendered"] = now_iso()
+        rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
+        rec["cover"] = make_cover(video, vinfo, rec, reaction,
+                                  cover_path_for(out_dir, name), cfg, cancel)
+        add_forecast(rec, segments)
+        with lock:
             proj["clips"].append(rec)
+            proj["clips"].sort(key=lambda r: r["num"])
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
+            done[0] += 1
+            prog("рендер", done[0] / len(clips) * 100, name)
+        return rec
+
+    prog("рендер", 0)
+    if workers <= 1:
+        for num, c in enumerate(clips, 1):
+            build(num, c)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(build, num, c) for num, c in enumerate(clips, 1)]
+            try:
+                for f in futures:
+                    f.result()                   # ошибка или остановка — сразу наверх
+            except BaseException:
+                for f in futures:
+                    f.cancel()                   # ещё не начатые — не начинать
+                raise                            # начатые сами остановятся по cancel
     prog("рендер", 100)
 
     mark("рендер клипов", t)
