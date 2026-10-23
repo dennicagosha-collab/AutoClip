@@ -177,18 +177,91 @@ def test_editor_shift_and_rebuild(win, cut, monkeypatch):
     assert not os.path.exists(os.path.join(cut, gone["file"]))
 
 
+def answer(monkeypatch, key, asked=None):
+    import app as A
+    monkeypatch.setattr(A, "ask_choice", lambda parent, text, choices:
+                        (asked.append(text) if asked is not None else None) or key)
+
+
 def test_unsaved_edits_ask_before_leaving(win, cut, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     page = win.clips
     page.load(cut)
     first = page.current_clip()["id"]
+    second = page.list.item(1).data(0x0100)
     page.shift(page.e_end, 2.0)
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    answer(monkeypatch, "cancel")
     page.list.setCurrentRow(1)
     assert page.current_clip()["id"] == first and page.pending()   # остались на месте
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    answer(monkeypatch, "discard")
     page.list.setCurrentRow(1)
-    assert page.current_clip()["id"] != first and not page.pending()
+    assert page.current_clip()["id"] == second and not page.pending()
+
+    # «Применить» — клип пересобирается, потом выбирается тот, куда шли
+    page.list.setCurrentRow(0)
+    old_end = page.current_clip()["end"]
+    page.shift(page.e_end, 2.0)
+    answer(monkeypatch, "apply")
+    page.list.setCurrentRow(1)
+    assert wait_for(lambda: not page.busy)
+    assert page.current_clip()["id"] == second
+    c = autoclip.find_clip(autoclip.load_project(cut), first)
+    assert c["end"] == pytest.approx(round(old_end, 1) + 2.0, abs=0.06)
+
+
+def test_close_asks_about_edits(win, cut, monkeypatch):
+    page = win.clips
+    page.load(cut)
+    first, old_start = page.current_clip()["id"], page.current_clip()["start"]
+    page.shift(page.e_start, 2.0)
+    asked = []
+    answer(monkeypatch, "cancel", asked)
+    win.close()
+    assert win.isVisible() and asked == ["Есть неприменённые правки."]
+    answer(monkeypatch, "apply")
+    win.close()
+    assert win.isVisible() and page.busy                     # сначала пересборка
+    assert wait_for(lambda: not win.isVisible())             # потом окно закрылось само
+    c = autoclip.find_clip(autoclip.load_project(cut), first)
+    assert c["start"] == pytest.approx(round(old_start, 1) + 2.0, abs=0.06)   # правка применилась
+    win.show()
+    page.load(cut)
+    page.shift(page.e_start, 2.0)
+    answer(monkeypatch, "discard")
+    win.close()
+    assert not win.isVisible()
+
+
+def test_close_while_cutting_and_plain_close(win, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    answer(monkeypatch, "apply")
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.busy = True
+    win.close()
+    assert win.isVisible() and not win.cancel.is_set()       # нарезка идёт — не закрыли
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    win.close()
+    assert not win.isVisible() and win.cancel.is_set()       # остановили и закрыли
+    win.busy = False
+
+    win.show()
+    import app as A
+    monkeypatch.setattr(A, "ask_choice", lambda *a: (_ for _ in ()).throw(AssertionError(a[1])))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a: (_ for _ in ()).throw(AssertionError(a[2])))
+    win.close()                                              # ничего не идёт — без вопросов
+    assert not win.isVisible()
+
+
+def test_tray_exit_asks_when_watching(win, monkeypatch):
+    win.settings["watch"] = True
+    asked = []
+    answer(monkeypatch, "cancel", asked)
+    win.quit_from_tray()
+    assert win.isVisible() and asked == ["Слежка за папкой OBS остановится. Выйти?"]
+    assert not win._quitting
+    answer(monkeypatch, "quit")
+    win.quit_from_tray()
+    assert not win.isVisible()
+    win.settings["watch"] = False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="блокировка файлов — особенность Windows")

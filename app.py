@@ -238,6 +238,27 @@ def plural(n, one, few, many):
 NOTE_MARK = {True: ("+", "#7dd99a"), False: ("−", "#ff7a90"), None: ("·", MUTED)}
 
 
+def ask_choice(parent, text, choices):
+    """Вопрос с кнопками [(ключ, надпись), …]; первая — главная, последняя — «Отмена».
+    Возвращает ключ нажатой кнопки (крестик — ключ последней)."""
+    box = QMessageBox(parent)
+    box.setWindowTitle("AutoClip")
+    box.setText(text)
+    buttons = {}
+    for i, (key, label) in enumerate(choices):
+        role = (QMessageBox.AcceptRole if i == 0 else
+                QMessageBox.RejectRole if i == len(choices) - 1 else QMessageBox.DestructiveRole)
+        buttons[box.addButton(label, role)] = key
+    first = next(iter(buttons))
+    box.setDefaultButton(first)
+    box.setEscapeButton(list(buttons)[-1])
+    box.exec()
+    return buttons.get(box.clickedButton(), choices[-1][0])
+
+
+EDITS_CHOICES = (("apply", "Применить"), ("discard", "Не применять"), ("cancel", "Отмена"))
+
+
 def hint(text):
     h = QLabel(text)
     h.setObjectName("hint")
@@ -1461,24 +1482,35 @@ class ClipsPage(QWidget):
         if row == self._row:
             return
         self.save_desc()
-        if self._row >= 0 and not self._leave_ok():
+        ans = self.ask_edits() if self._row >= 0 else "discard"
+        if ans != "discard":
             self.list.blockSignals(True)
             self.list.setCurrentRow(self._row)
             self.list.blockSignals(False)
+            if ans == "apply":
+                item = self.list.item(row)
+                self._then_select = item.data(Qt.UserRole) if item else None
+                self.rebuild()
             return
         self._row = row
         self.select()
 
-    def _leave_ok(self):
-        """Есть непересобранные правки — спросить, бросить ли их."""
+    def ask_edits(self):
+        """Есть неприменённые правки — «Применить / Не применять / Отмена».
+        Нет правок — "discard" (уходить можно без вопроса)."""
         if not self.pending():
-            return True
-        r = QMessageBox.question(self, "AutoClip",
-                                 "Правки этого клипа ещё не пересобраны и пропадут. Продолжить?")
-        if r == QMessageBox.Yes:
+            return "discard"
+        ans = ask_choice(self, "Есть неприменённые правки.", EDITS_CHOICES)
+        if ans == "discard":
             self.base = {}
-            return True
-        return False
+        return ans
+
+    def _leave_ok(self):
+        """Перед сменой нарезки или фильтра: «Применить» пересобирает и остаётся на месте."""
+        ans = self.ask_edits()
+        if ans == "apply":
+            self.rebuild()
+        return ans == "discard"
 
     # ---------- выбранный клип ----------
     def select(self, *_):
@@ -1795,10 +1827,14 @@ class ClipsPage(QWidget):
     def _rebuilt(self, cid, err):
         self.busy = False
         self.base = {}
-        self.reload(cid)
+        nxt, self._then_select = getattr(self, "_then_select", None), None
+        self.reload(nxt if nxt and not err else cid)
         self.state.setText(err or "Готово ✓")
         if err:
+            self.win._close_after_rebuild = False
             QMessageBox.warning(self, "AutoClip", err)
+        elif getattr(self.win, "_close_after_rebuild", False):
+            QTimer.singleShot(0, self.win.close)    # «Применить» при закрытии — теперь закрываем
 
     def toggle_good(self):
         c = self.current_clip()
@@ -2802,7 +2838,7 @@ class MainWindow(QMainWindow):
             self.tray_watch.setCheckable(True)
             self.tray_watch.toggled.connect(self.settings_page.cb_watch.setChecked)
             menu.addSeparator()
-            menu.addAction("Выход", self.quit_app)
+            menu.addAction("Выход", self.quit_from_tray)
             self.tray.setContextMenu(menu)
             self.tray.activated.connect(lambda r: self.show_window()
                                         if r == QSystemTrayIcon.Trigger else None)
@@ -3010,7 +3046,16 @@ class MainWindow(QMainWindow):
 
     def quit_app(self):
         self._quitting = True
-        self.close()
+        if not self.close():
+            self._quitting = False
+
+    def quit_from_tray(self):
+        if self.settings.get("watch"):
+            if ask_choice(self if self.isVisible() else None,
+                          "Слежка за папкой OBS остановится. Выйти?",
+                          (("quit", "Выйти"), ("cancel", "Отмена"))) != "quit":
+                return
+        self.quit_app()
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
@@ -3105,6 +3150,21 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self.cancel.set()
+        if self.clips.busy:
+            # клип пересобирается — дождаться, иначе файл останется недоделанным
+            self._close_after_rebuild = True
+            e.ignore()
+            return
+        ans = self.clips.ask_edits()
+        if ans != "discard":
+            e.ignore()
+            if ans == "apply":
+                self._close_after_rebuild = True
+                self.clips.rebuild()
+                if not self.clips.busy:              # пересобрать не вышло (ошибка во времени)
+                    self._close_after_rebuild = False
+            return
+        self._close_after_rebuild = False
         if self.detached:
             self.detached.close()
         self.clips.player.clear()
