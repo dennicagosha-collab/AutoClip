@@ -279,7 +279,7 @@ def restart(need_install=False, app_dir=APP_DIR):
     exe = sys.executable
     if exe.lower().endswith("python.exe") and os.path.isfile(exe[:-10] + "pythonw.exe"):
         exe = exe[:-10] + "pythonw.exe"
-    subprocess.Popen([exe, os.path.join(app_dir, "app.py")], cwd=app_dir,
+    subprocess.Popen([exe, os.path.join(app_dir, "app.py"), "--after-update"], cwd=app_dir,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
 
 

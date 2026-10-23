@@ -4528,6 +4528,50 @@ def dark_palette(app):
 
 
 ICON = os.path.join(HERE, "icon", "autoclip.ico")
+INSTANCE = "FinalKFCBoss.AutoClip"     # имя «канала» единственной копии программы
+
+
+def ping_running(name=INSTANCE, message=b"show", wait_ms=800):
+    """Уже запущена копия? Тогда передать ей message («показать окно») и вернуть True."""
+    from PySide6.QtNetwork import QLocalSocket
+    sock = QLocalSocket()
+    sock.connectToServer(name)
+    if not sock.waitForConnected(wait_ms):
+        return False
+    sock.write(message)
+    sock.flush()
+    sock.waitForBytesWritten(wait_ms)
+    sock.disconnectFromServer()
+    return True
+
+
+def wait_old_gone(name=INSTANCE, seconds=20):
+    """После обновления: подождать, пока прежняя копия закроется."""
+    end = time.time() + seconds
+    while time.time() < end and ping_running(name, b"", 300):
+        time.sleep(0.3)
+
+
+class InstanceServer:
+    """Слушает вторые запуски: они просят показать окно первой копии."""
+
+    def __init__(self, on_message, name=INSTANCE):
+        from PySide6.QtNetwork import QLocalServer
+        self.on_message = on_message
+        self.server = QLocalServer()
+        if not self.server.listen(name):
+            QLocalServer.removeServer(name)          # остался от упавшей копии
+            self.server.listen(name)
+        self.server.newConnection.connect(self._new)
+
+    def _new(self):
+        while self.server.hasPendingConnections():
+            c = self.server.nextPendingConnection()
+            c.readyRead.connect(lambda c=c: self.on_message(bytes(c.readAll()).decode("utf-8", "replace")))
+            c.disconnected.connect(c.deleteLater)
+
+    def close(self):
+        self.server.close()
 
 
 def main():
@@ -4541,6 +4585,10 @@ def main():
             pass
     app = QApplication(sys.argv)
     app.setApplicationName("AutoClip")
+    if "--after-update" in sys.argv:
+        wait_old_gone()                              # прежняя копия закрывается — дождаться
+    elif ping_running():
+        return                                       # уже запущена: показали её окно, вторая не нужна
     if os.path.isfile(ICON):
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(ICON))
@@ -4552,6 +4600,8 @@ def main():
     win.bus.log.connect(flog.write)
     app.aboutToQuit.connect(flog.close)
     win.standalone = True
+    instance = InstanceServer(lambda m: win.show_window() if "show" in m else None)
+    app.aboutToQuit.connect(instance.close)
     win.show()
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
     if videos:
