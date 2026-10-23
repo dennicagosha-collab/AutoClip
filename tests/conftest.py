@@ -21,6 +21,8 @@ def clean_config(monkeypatch, tmp_path):
     import forecast
     monkeypatch.setattr(forecast, "HISTORY_PATH", str(tmp_path / "история.json"))
     monkeypatch.setattr(forecast, "MODEL_PATH", str(tmp_path / "модель.json"))
+    import update
+    monkeypatch.setattr(update, "REPO", "")          # тесты не ходят на GitHub
 
 
 @pytest.fixture

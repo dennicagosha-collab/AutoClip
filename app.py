@@ -17,6 +17,7 @@ os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 
 import autoclip  # noqa: E402
 import forecast  # noqa: E402
+import update  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     QByteArray, QEventLoop, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl,
@@ -52,7 +53,7 @@ DEFAULTS = {
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
-    "views_days": 3,
+    "views_days": 3, "check_updates": True, "skip_version": "",
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
@@ -194,6 +195,9 @@ class Bus(QObject):
     weekly_progress = Signal(float, str)
     weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
     trained = Signal(object)               # итог обучения прогноза
+    update_found = Signal(object, bool)    # релиз или None, проверка вручную?
+    update_progress = Signal(float)
+    update_done = Signal(object, object)   # итог установки, текст ошибки или None
 
 
 class Stream:
@@ -2353,6 +2357,26 @@ class SettingsPage(QWidget):
         v.addWidget(option_row("Не предлагать записи короче", mm, "Короткие записи — обычно тесты"))
         lay.addWidget(box)
 
+        # --- обновления ---
+        box, v = card("Обновления", f"Сейчас стоит версия {update.VERSION}. Обновляются только "
+                                    "файлы программы, настройки и клипы остаются на месте.")
+        self.cb_updates = self._toggle("check_updates")
+        v.addWidget(option_row("Проверять при запуске", self.cb_updates,
+                               "Спрашивать, если на GitHub вышла новая версия"))
+        self.update_state = QLabel("" if update.REPO else
+                                   "Репозиторий для обновлений ещё не подключён.")
+        self.update_state.setWordWrap(True)
+        v.addWidget(self.update_state)
+        self.update_btn = QPushButton("Проверить сейчас")
+        self.update_btn.setEnabled(bool(update.REPO))
+        self.update_btn.clicked.connect(lambda: (self.update_state.setText("Проверяю…"),
+                                                 self.win.check_updates(manual=True)))
+        row = QHBoxLayout()
+        row.addWidget(self.update_btn)
+        row.addStretch(1)
+        v.addLayout(row)
+        lay.addWidget(box)
+
         lay.addWidget(hint(f"Настройки хранятся в {autoclip.user_dir()}"))
         lay.addStretch(1)
 
@@ -2594,6 +2618,59 @@ class ViewsDialog(QDialog):
         return saved
 
 
+# ---------------- обновление ----------------
+
+class UpdateDialog(QDialog):
+    """«Вышла версия X» — Обновить / Не сейчас / Пропустить эту версию."""
+
+    def __init__(self, parent, rel):
+        super().__init__(parent)
+        self.rel = rel
+        self.action = "later"
+        self.setWindowTitle("AutoClip — обновление")
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        t = QLabel(f"Вышла версия {rel['version']}")
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+        lay.addWidget(hint(f"Сейчас стоит {update.VERSION}. Настройки, клипы и записи "
+                           "не тронутся, программа перезапустится сама."))
+        if rel.get("notes"):
+            notes = QLabel(rel["notes"])
+            notes.setWordWrap(True)
+            notes.setTextFormat(Qt.PlainText)
+            lay.addWidget(notes)
+        self.state = QLabel("")
+        lay.addWidget(self.state)
+        row = QHBoxLayout()
+        self.skip = QPushButton("Пропустить эту версию")
+        self.skip.setObjectName("ghost")
+        self.skip.clicked.connect(lambda: self._done("skip"))
+        self.later = QPushButton("Не сейчас")
+        self.later.clicked.connect(lambda: self._done("later"))
+        self.go = QPushButton("Обновить")
+        self.go.setObjectName("primary")
+        self.go.setDefault(True)
+        self.go.clicked.connect(lambda: self._done("update"))
+        row.addWidget(self.skip)
+        row.addStretch(1)
+        row.addWidget(self.later)
+        row.addWidget(self.go)
+        lay.addLayout(row)
+
+    def _done(self, action):
+        self.action = action
+        if action == "update":
+            for b in (self.skip, self.later, self.go):
+                b.setEnabled(False)
+            self.state.setText("Скачиваю…")
+            self.parent().install_update(self)
+        else:
+            self.accept()
+
+
 # ---------------- новая запись OBS ----------------
 
 class NewRecordingDialog(QDialog):
@@ -2642,7 +2719,7 @@ class MainWindow(QMainWindow):
         self.detached = None
         self.bus = Bus()
 
-        self.setWindowTitle("AutoClip")
+        self.setWindowTitle(f"AutoClip {update.VERSION}")
         self.resize(1200, 860)
         self.setMinimumSize(980, 720)
         if self.settings.get("geometry"):
@@ -2741,6 +2818,13 @@ class MainWindow(QMainWindow):
         self.retrain()
         QTimer.singleShot(1500, self.ask_views)
 
+        # --- обновления: тихо спросить GitHub при запуске ---
+        self.bus.update_found.connect(self.update_found)
+        self.bus.update_done.connect(self.update_installed)
+        self._update_dialog = None
+        if self.settings.get("check_updates", True) and update.REPO:
+            QTimer.singleShot(3000, self.check_updates)
+
     # --- прогноз ---
     def retrain(self):
         def work():
@@ -2768,6 +2852,74 @@ class MainWindow(QMainWindow):
                 self.clips.reload(self.clips.current_clip()["id"] if self.clips.current_clip() else None)
         dlg.finished.connect(done)
         dlg.show()
+
+    # --- обновления ---
+    def check_updates(self, manual=False):
+        skip = None if manual else self.settings.get("skip_version")
+
+        def work():
+            try:
+                self.bus.update_found.emit(update.check(skip=skip), manual)
+            except autoclip.AutoClipError as e:
+                if manual:
+                    self.bus.update_found.emit({"error": str(e)}, True)
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_found(self, rel, manual):
+        st = self.settings_page.update_state
+        if rel and rel.get("error"):
+            st.setText(rel["error"])
+            return
+        if not rel:
+            st.setText(f"Стоит последняя версия — {update.VERSION}.")
+            return
+        st.setText(f"Есть версия {rel['version']}.")
+        if self._update_dialog:
+            return
+        dlg = UpdateDialog(self, rel)
+        self._update_dialog = dlg
+
+        def done(_):
+            self._update_dialog = None
+            if dlg.action == "skip":
+                self.settings["skip_version"] = rel["version"]
+                save_settings(self.settings)
+        dlg.finished.connect(done)
+        dlg.show()
+
+    def install_update(self, dlg):
+        if self.busy:
+            dlg.state.setText("Идёт нарезка — обновлю, когда она закончится. Нажми «Не сейчас».")
+            dlg.later.setEnabled(True)
+            return
+        self.bus.update_progress.connect(
+            lambda p: dlg.state.setText(f"Скачиваю… {p:.0%}"))
+
+        def work():
+            try:
+                res = update.apply(dlg.rel, progress=self.bus.update_progress.emit)
+                self.bus.update_done.emit(res, None)
+            except autoclip.AutoClipError as e:
+                self.bus.update_done.emit(None, str(e))
+            except Exception as e:
+                self.bus.update_done.emit(None, f"❌ Обновление не встало: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_installed(self, res, err):
+        dlg = self._update_dialog
+        if err:
+            if dlg:
+                dlg.state.setText(err)
+                dlg.later.setEnabled(True)
+            return
+        if dlg:
+            dlg.accept()
+        if res["need_install"]:
+            QMessageBox.information(self, "AutoClip", "Обновление встало. В новой версии новые "
+                                    "библиотеки — сейчас откроется установка, потом запусти "
+                                    "AutoClip снова.")
+        update.restart(res["need_install"])
+        self.quit_app()
 
     # --- слежка за папкой OBS ---
     def watch_changed(self):
