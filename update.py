@@ -23,7 +23,7 @@ import autoclip
 from autoclip import AutoClipError
 
 VERSION = "1.0.0"
-REPO = ""                      # "ник/AutoClip" на GitHub; пусто — обновления выключены
+REPO = "dennicagosha-collab/AutoClip"   # пусто — обновления выключены
 API = "https://api.github.com/repos/{repo}/releases/latest"
 
 APP_DIR = autoclip.SCRIPT_DIR

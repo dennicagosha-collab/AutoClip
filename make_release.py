@@ -7,12 +7,14 @@
 отправляет код на GitHub и создаёт релиз с архивом (нужен GitHub CLI — gh).
 """
 import os
+import shutil
 import subprocess
 import sys
 
 import update
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+GH = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"
 
 
 def run(*args, capture=False):
@@ -40,7 +42,7 @@ def main():
     run("git", "tag", "-a", tag, "-m", f"AutoClip {update.VERSION}")
     branch = run("git", "rev-parse", "--abbrev-ref", "HEAD", capture=True)
     run("git", "push", "origin", branch, tag)
-    run("gh", "release", "create", tag, zip_path, "--repo", update.REPO,
+    run(GH, "release", "create", tag, zip_path, "--repo", update.REPO,
         "--title", f"AutoClip {update.VERSION}", "--notes", notes)
     print(f"Готово: {tag} выложен, у пользователей программа предложит обновиться.")
 
