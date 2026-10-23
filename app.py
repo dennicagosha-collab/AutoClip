@@ -24,7 +24,7 @@ from PySide6.QtCore import (  # noqa: E402
     QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (  # noqa: E402
-    QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
+    QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
@@ -44,7 +44,9 @@ LATER = "Появится в следующих версиях"
 NICK_SIZES = {"Маленький": 32, "Средний": 40, "Крупный": 52}
 
 DEFAULTS = {
-    "clips": 10, "subs": True, "zoom": True, "hook": True, "bleep": True,
+    "clips": 10, "clips_mode": "count", "auto_min_score": autoclip.CONFIG["auto_min_score"],
+    "auto_min_score_plain": autoclip.CONFIG["auto_min_score_plain"],
+    "auto_max": autoclip.CONFIG["auto_max"], "subs": True, "zoom": True, "hook": True, "bleep": True,
     "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
@@ -106,7 +108,7 @@ QPushButton:disabled {{ color: #5c606b; background: #17181d; border-color: #2224
 #danger:hover {{ color: #ff8094; border-color: #5a2a35; background: #2a1a20; }}
 #square {{ padding: 0; min-width: 32px; max-width: 32px; font-size: 12pt; }}
 #filter {{ background: transparent; border: 1px solid {BORDER}; border-radius: 14px;
-          padding: 0 14px; min-height: 28px; color: {MUTED}; }}
+          padding: 0 11px; min-height: 28px; color: {MUTED}; }}
 #filter:hover {{ color: {FG}; }}
 #filter:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: white; }}
 #stepValue {{ font-size: 12pt; font-weight: 600; min-width: 34px; }}
@@ -132,7 +134,7 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
 #step[state="done"] {{ color: #9fe3b4; border-color: #2c4a37; background: #17221b; }}
 #clipList {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
     outline: none; padding: 6px; }}
-#clipList::item {{ padding: 8px 10px; border-radius: 8px; margin: 1px 0; color: {FG}; }}
+#clipList::item {{ padding: 8px 10px; border-radius: 8px; margin: 1px 0; }}
 #clipList::item:selected {{ background: #2a2d37; color: white; }}
 #clipList::item:hover:!selected {{ background: #1e2027; }}
 QSlider::groove:horizontal {{ height: 4px; background: #343845; border-radius: 2px; }}
@@ -330,7 +332,10 @@ def labeled(text, widget):
     lbl = QLabel(text)
     lbl.setObjectName("fieldLabel")
     box.addWidget(lbl)
-    box.addWidget(widget)
+    if isinstance(widget, QWidget):
+        box.addWidget(widget)
+    else:
+        box.addLayout(widget)
     return box
 
 
@@ -817,7 +822,20 @@ class CutPage(QWidget):
         row.setSpacing(18)
         self.count = Stepper(1, 50, int(self.s["clips"]))
         self.count.valueChanged.connect(lambda v: self._set("clips", v))
-        row.addLayout(labeled("Клипов", self.count))
+        cnt = QHBoxLayout()
+        cnt.setSpacing(6)
+        cnt.addWidget(self.count)
+        self.mode_btns = {}
+        for key, name, tip in (("count", "Число", "Ровно столько клипов"),
+                               ("auto", "Авто", "Все яркие моменты — выше порога из «Настроек»")):
+            b = QPushButton(name)
+            b.setObjectName("filter")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _, k=key: self.set_mode(k))
+            cnt.addWidget(b)
+            self.mode_btns[key] = b
+        row.addLayout(labeled("Клипов", cnt))
         self.preset = QComboBox()
         self.preset.setMinimumWidth(200)
         self.preset.setToolTip("Размер, кадры и битрейт клипов. Свой пресет — в «Настройках».")
@@ -864,10 +882,19 @@ class CutPage(QWidget):
         lay.addLayout(row)
 
         self.refresh_presets()
+        self.set_mode(self.s.get("clips_mode", "count"))
 
     def _set(self, key, value):
         self.s[key] = value
         save_settings(self.s)
+
+    def set_mode(self, key):
+        key = "auto" if key == "auto" else "count"
+        for k, b in self.mode_btns.items():
+            b.setChecked(k == key)
+        self.count.setEnabled(key == "count")
+        if self.s.get("clips_mode") != key:
+            self._set("clips_mode", key)
 
     def refresh_presets(self):
         names = [p["name"] for p in autoclip.load_presets()]
@@ -926,6 +953,11 @@ class CutPage(QWidget):
         c = autoclip.CONFIG
         s = self.s
         c["clips"] = int(s["clips"])
+        c["clips_mode"] = "auto" if s.get("clips_mode") == "auto" else "count"
+        c["auto_min_score"] = float(s.get("auto_min_score", DEFAULTS["auto_min_score"]))
+        c["auto_min_score_plain"] = float(s.get("auto_min_score_plain",
+                                                DEFAULTS["auto_min_score_plain"]))
+        c["auto_max"] = int(s.get("auto_max", DEFAULTS["auto_max"]))
         c["subs"] = bool(s["subs"])
         c["zoom"] = bool(s["zoom"])
         c["bleep"] = bool(s["bleep"])
@@ -1038,7 +1070,9 @@ class ClipList(QListWidget):
         return Qt.CopyAction
 
 
-FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}))
+FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}),
+           ("Кандидаты", {"candidate"}))
+CAND = "cand:"       # так в списке помечены кандидаты (моменты без видео)
 SHIFT = 2.0          # шаг сдвига начала и конца, сек
 COVER_W, COVER_H = 34, 60   # обложка в списке клипов
 
@@ -1163,6 +1197,12 @@ class ClipsPage(QWidget):
         self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         rl.addWidget(self.info)
+        self.btn_build = QPushButton("Собрать")
+        self.btn_build.setObjectName("primary")
+        self.btn_build.setToolTip("Сделать из кандидата обычный клип")
+        self.btn_build.clicked.connect(self.build_candidate)
+        self.btn_build.hide()
+        rl.addWidget(self.btn_build, 0, Qt.AlignLeft)
 
         # --- редактор клипа ---
         self.editor, outer = card()
@@ -1375,10 +1415,10 @@ class ClipsPage(QWidget):
         self.editor.setEnabled(False)
 
         split.addWidget(right)
-        left.setMinimumWidth(390)
+        left.setMinimumWidth(430)          # пять фильтров в ряд
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
-        split.setSizes([440, 700])
+        split.setSizes([450, 690])
         self.split = split
         lay.addWidget(split, 1)
 
@@ -1503,10 +1543,26 @@ class ClipsPage(QWidget):
             self.list.addItem(it)
             if c["id"] == select_id:
                 row = i
+        # кандидаты — серыми, внизу списка («Все») или отдельно («Кандидаты»)
+        if want is None or "candidate" in want:
+            gray = QColor(MUTED)
+            blank = QPixmap(COVER_W, COVER_H)          # пустое место вместо обложки — строки ровные
+            blank.fill(Qt.transparent)
+            for k in sorted(self.proj.get("candidates") or [], key=lambda k: -k["score"]):
+                it = QListWidgetItem(
+                    QIcon(blank), f"☆ {k['score']:.1f}   {k['title']}\n"
+                    f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}"
+                    f" · {k['end'] - k['start']:.0f} с · кандидат")
+                it.setForeground(gray)
+                it.setToolTip("Кандидат: момент без видео. «Собрать» — сделать из него клип")
+                it.setData(Qt.UserRole, CAND + k["id"])
+                self.list.addItem(it)
+                if CAND + k["id"] == select_id:
+                    row = self.list.count() - 1
         self.list.blockSignals(False)
         total = sum(c["status"] != "rejected" for c in self.proj["clips"])
-        self.empty.setText("В этой нарезке клипов нет." if total == 0
-                           else "В этом фильтре клипов нет.")
+        self.empty.setText("В этой нарезке клипов нет." if total == 0 and not
+                           self.proj.get("candidates") else "В этом фильтре клипов нет.")
         self.empty.setVisible(self.list.count() == 0)
         self.blank.hide()
         self.split.show()
@@ -1520,9 +1576,17 @@ class ClipsPage(QWidget):
 
     def current_clip(self):
         it = self.list.currentItem()
-        if not (it and self.proj):
+        if not (it and self.proj) or str(it.data(Qt.UserRole)).startswith(CAND):
             return None
         return autoclip.find_clip(self.proj, it.data(Qt.UserRole))
+
+    def current_candidate(self):
+        it = self.list.currentItem()
+        ref = str(it.data(Qt.UserRole)) if (it and self.proj) else ""
+        if not ref.startswith(CAND):
+            return None
+        return next((k for k in self.proj.get("candidates") or []
+                     if k["id"] == ref[len(CAND):]), None)
 
     def cover_icon(self, c):
         """Маленькая обложка клипа для списка (пересчитывается, только если файл изменился)."""
@@ -1587,6 +1651,23 @@ class ClipsPage(QWidget):
     def select(self, *_):
         c = self.current_clip()
         self.editor.setEnabled(bool(c) and not self.busy)
+        k = self.current_candidate()
+        self.btn_build.setVisible(bool(k))
+        if k:
+            self.base = {}
+            src = self.proj["source"]
+            if os.path.isfile(src):
+                self.player.show_at(src, k["start"] * 1000)
+            else:
+                self.player.clear()
+            from html import escape
+            self.btn_build.setEnabled(not self.busy and os.path.isfile(src))
+            self.info.setText(
+                f"<b>{escape(k['title'])}</b> <span style='color:{MUTED}'>· кандидат, без видео</span><br>"
+                f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}, оценка {k['score']:.1f}"
+                + (f"<br><span style='color:{MUTED}'>{escape(k.get('text', ''))}</span>"
+                   if k.get("text") else ""))
+            return
         if not c:
             self.player.clear()
             self.info.setText("")
@@ -1717,11 +1798,32 @@ class ClipsPage(QWidget):
                 bus.added.emit(None, "❌ " + traceback.format_exc()[-800:])
         threading.Thread(target=work, daemon=True).start()
 
+    def build_candidate(self):
+        k = self.current_candidate()
+        if self.busy or not k:
+            return
+        self.busy = True
+        self.btn_build.setEnabled(False)
+        self.btn_build.setText("Собираю…")
+        pp, bus, kid = self.proj["_path"], self.win.bus, k["id"]
+
+        def work():
+            try:
+                rec = autoclip.build_candidate(pp, kid)
+                bus.added.emit(rec["id"], None)
+            except autoclip.AutoClipError as e:
+                bus.added.emit(None, str(e))
+            except Exception:
+                bus.added.emit(None, "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
+
     def _added(self, cid, err):
+        self.btn_build.setText("Собрать")
         self.busy = False
         self.here_state.setText("")
         if err:
             self.btn_here.setEnabled(True)
+            self.btn_build.setEnabled(True)
             QMessageBox.warning(self, "AutoClip", err)
             return
         self.search.blockSignals(True)
@@ -2378,6 +2480,28 @@ class SettingsPage(QWidget):
         self.cb_marks = self._toggle("marks")
         v.addWidget(option_row("Метки из OBS", self.cb_marks,
                                "Моменты, где ты нажал «Добавить маркер главы», идут первыми"))
+        v.addWidget(separator())
+        from PySide6.QtWidgets import QDoubleSpinBox
+
+        def score_box(key):
+            sb = QDoubleSpinBox()
+            sb.setRange(0.5, 10.0)
+            sb.setSingleStep(0.1)
+            sb.setDecimals(1)
+            sb.setValue(float(self.s.get(key, DEFAULTS[key])))
+            sb.setFixedWidth(90)
+            sb.valueChanged.connect(lambda x: self._set(key, round(x, 1)))
+            return sb
+        self.auto_min = score_box("auto_min_score")
+        v.addWidget(option_row("Порог «Авто» с языковой моделью", self.auto_min,
+                               "Оценка, с которой момент становится клипом. Ниже — кандидат"))
+        self.auto_min_plain = score_box("auto_min_score_plain")
+        v.addWidget(option_row("Порог «Авто» без модели", self.auto_min_plain,
+                               "Без модели оценки ниже, поэтому и порог свой"))
+        self.auto_max = Stepper(1, 100, int(self.s.get("auto_max", DEFAULTS["auto_max"])))
+        self.auto_max.valueChanged.connect(lambda x: self._set("auto_max", x))
+        v.addWidget(option_row("Не больше клипов в «Авто»", self.auto_max,
+                               "Остальные яркие моменты — кандидатами, без видео"))
         lay.addWidget(box)
 
         # --- ник в углу ---

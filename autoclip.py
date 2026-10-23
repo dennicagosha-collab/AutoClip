@@ -43,7 +43,12 @@ import wave
 # ======================= CONFIG =======================
 CONFIG = {
     # --- клипы ---
-    "clips": 10,              # сколько клипов сделать
+    "clips": 10,              # сколько клипов сделать (режим «Число»)
+    "clips_mode": "count",    # count — ровно «clips»; auto — все выше порога, не больше потолка
+    "auto_min_score": 2.5,    # порог «Авто» с языковой моделью: на 25-мин записи 11 клипов
+    "auto_min_score_plain": 1.7,   # он же без модели (оценки ниже): на той же записи 9 клипов
+    "auto_max": 30,           # потолок «Авто»
+    "max_candidates": 20,     # сколько моментов сверх отобранных показать кандидатами
     "min_len": 15.0,          # мин. длина клипа, сек
     "max_len": 55.0,          # макс. длина клипа, сек
     "pre": 14.0,              # сколько секунд взять ДО пика
@@ -909,6 +914,50 @@ def mark_peaks(smooth, marks, window=None):
     return out
 
 
+def split_clips(found, cfg=None):
+    """Отобранные клипы и кандидаты. Метки из OBS — всегда в клипах.
+    «Число»: первые clips по оценке. «Авто»: все с оценкой не ниже порога, не больше потолка."""
+    cfg = cfg or CONFIG
+    found = sorted(found, key=lambda c: -c["score"])
+    marked = [c for c in found if c.get("marks")]
+    rest = [c for c in found if not c.get("marks")]
+    if cfg.get("clips_mode") == "auto":
+        room = max(0, int(cfg["auto_max"]) - len(marked))
+        good = [c for c in rest if c["score"] >= float(cfg["auto_min_score"])][:room]
+    else:
+        good = rest[:max(0, int(cfg["clips"]) - len(marked))]
+    ids = {id(c) for c in good}
+    clips = sorted(marked + good, key=lambda c: -c["score"])
+    cands = [c for c in rest if id(c) not in ids][:int(cfg.get("max_candidates", 20))]
+    return clips, cands
+
+
+def candidate_record(c, num, segments):
+    """Кандидат: момент без собранного видео — можно собрать потом кнопкой."""
+    return {"id": f"k{num:02d}", "start": c["s"], "end": c["e"], "peak": c["peak"],
+            "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
+            "title": c["title"], "reason": c.get("reason", ""), "zooms": c["zooms"],
+            "marks": c.get("marks", []),
+            "text": " ".join(_censor(w) for w in text_between(segments, c["s"], c["e"]).split())[:160],
+            "created": now_iso()}
+
+
+def build_candidate(path, ref, progress=None, cancel=None):
+    """«Собрать»: кандидат становится обычным клипом."""
+    proj = load_project(path)
+    cand = next((k for k in proj.get("candidates", []) if k["id"] == ref), None)
+    if not cand:
+        raise AutoClipError(f"❌ Нет кандидата «{ref}».")
+    c = {"s": cand["start"], "e": cand["end"], "peak": cand["peak"], "score": cand["score"],
+         "zooms": cand["zooms"], "parts": cand.get("score_parts", {}), "title": cand["title"],
+         "reason": cand.get("reason", ""), "marks": cand.get("marks", [])}
+    rec = add_clip(path, c, "candidate", progress, cancel)
+    proj = load_project(path)
+    proj["candidates"] = [k for k in proj.get("candidates", []) if k["id"] != ref]
+    save_project(proj)
+    return rec
+
+
 def shape_clip(peak, s, e, words, dur):
     """Длина 15–55 с вокруг пика и границы в паузах между фразами (не на полуслове)."""
     min_len, max_len = CONFIG["min_len"], CONFIG["max_len"]
@@ -954,9 +1003,11 @@ def moment_title(title, segments, s, e, peak):
     return " ".join(_censor(w) for w in title.split())
 
 
-def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=()):
+def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=(),
+               limit=None):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
-    marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо."""
+    marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо.
+    limit — сколько моментов искать (по умолчанию CONFIG["clips"])."""
     import numpy as np
     order = np.argsort(-smooth)
     clips = []
@@ -964,7 +1015,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
     words = all_words(segments)
     min_len = CONFIG["min_len"]
     marked = mark_peaks(smooth, marks) if marks else []
-    limit = max(CONFIG["clips"], len(marked))
+    limit = max(CONFIG["clips"] if limit is None else limit, len(marked))
     candidates = marked + [(int(p), None) for p in order]
     for peak, mark in candidates:
         if len(clips) >= limit:
@@ -1940,6 +1991,12 @@ def write_report(proj):
             rep.append("    свои настройки: " +
                        ", ".join(f"{k}={v}" for k, v in c["overrides"].items()))
         rep.append("")
+    cands = proj.get("candidates") or []
+    if cands:
+        rep.append(f"Кандидаты (без видео, собрать — в «Клипах»): {len(cands)}")
+        rep += [f"    {fmt_time(k['start'])}–{fmt_time(k['end'])}, оценка {k['score']:.1f} — {k['title']}"
+                for k in cands]
+        rep.append("")
     run_info = proj.get("run", {})
     rep += [f"Запись: {fmt_time(vi['dur'])}, {vi['w']}x{vi['h']}, {vi.get('fps', 0):g} к/с"]
     pr = get_preset(proj.get("settings", {}).get("preset", CONFIG["preset"]))
@@ -2807,12 +2864,21 @@ def process(video, analyze_only=False, progress=None, cancel=None):
 
     smooth, loud_z, parts = score_timeline(loud, segments, moments)
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
-    clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks)
-    if not clips:
+    want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
+    found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks,
+                       limit=int(want) + int(CONFIG.get("max_candidates", 20)))
+    thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
+    clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
+    proj["candidates"] = [candidate_record(c, i, segments) for i, c in enumerate(cands, 1)]
+    if CONFIG.get("clips_mode") == "auto":
+        log(f"   режим «Авто»: оценка от {thr:g}, не больше {CONFIG['auto_max']}")
+    if not clips and cands:
+        log("   выше порога моментов нет — все найденные в кандидатах")
+    if not clips and not cands:
         prog("поиск", 100)
         log("😕 Ярких моментов не нашлось. Попробуй уменьшить min_len или подключить модель.")
         return None
-    log(f"✂️  Нашёл {len(clips)} клипов")
+    log(f"✂️  Нашёл {len(clips)} клипов" + (f", ещё {len(cands)} — кандидаты" if cands else ""))
 
     reaction = reaction_curve(parts)
     thr = hook_threshold(reaction)
