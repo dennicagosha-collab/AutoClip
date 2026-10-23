@@ -909,6 +909,51 @@ def mark_peaks(smooth, marks, window=None):
     return out
 
 
+def shape_clip(peak, s, e, words, dur):
+    """Длина 15–55 с вокруг пика и границы в паузах между фразами (не на полуслове)."""
+    min_len, max_len = CONFIG["min_len"], CONFIG["max_len"]
+    s, e = max(0.0, s), min(dur, e)
+    if e - s > max_len:                    # слишком длинно — центрируем на пике
+        s = max(0.0, min(peak - max_len * 0.65, e - max_len))
+        e = s + max_len
+    if e - s < min_len:
+        extra = min_len - (e - s)
+        s = max(0.0, s - extra * 0.6)
+        e = min(dur, s + min_len)
+    # границы — в паузах между фразами: не начинать с середины и дать договорить
+    s = snap_start(s, words, lo=max(0.0, e - max_len), hi=max(0.0, min(peak - 1, e - min_len)))
+    e = snap_end(e, words, lo=min(dur, max(peak + 1, s + min_len * 0.8)),
+                 hi=min(dur, s + max_len))
+    return s, e
+
+
+def zoom_points(s, e, peak, loud_z):
+    """Точки зума: самые громкие пики внутри клипа."""
+    zooms = []
+    a, b = int(s), min(len(loud_z), int(e))
+    cand = sorted(range(a, b), key=lambda i: -loud_z[i])
+    for i in cand:
+        if len(zooms) >= CONFIG["max_zooms"] or loud_z[i] < 2.0:
+            break
+        if i - s < 1.0 or e - i < 2.0:
+            continue
+        if all(abs(i - z) >= 5 for z in zooms):
+            zooms.append(float(i))
+    if not zooms and s + 1 < peak < e - 2:
+        zooms = [peak]
+    return zooms
+
+
+def moment_title(title, segments, s, e, peak):
+    """Название: от модели или первые слова клипа; мат скрыт."""
+    if not title:
+        first = [w["w"] for seg in segments if seg["e"] > s and seg["s"] < e
+                 for w in seg["words"] if s <= w["s"] < e][:6]
+        title = " ".join(first) or f"момент {fmt_time(peak)}"
+    # без мата в названии файла и отчёте
+    return " ".join(_censor(w) for w in title.split())
+
+
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=()):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
     marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо."""
@@ -917,7 +962,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
     clips = []
     busy = [{"s": a, "e": b} for a, b in taken]
     words = all_words(segments)
-    min_len, max_len = CONFIG["min_len"], CONFIG["max_len"]
+    min_len = CONFIG["min_len"]
     marked = mark_peaks(smooth, marks) if marks else []
     limit = max(CONFIG["clips"], len(marked))
     candidates = marked + [(int(p), None) for p in order]
@@ -944,43 +989,14 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
         else:
             s, e = peak - CONFIG["pre"], peak + CONFIG["post"]
             title, reason = "", ""
-        s, e = max(0.0, s), min(dur, e)
-        if e - s > max_len:                    # слишком длинно — центрируем на пике
-            s = max(0.0, min(peak - max_len * 0.65, e - max_len))
-            e = s + max_len
-        if e - s < min_len:
-            extra = min_len - (e - s)
-            s = max(0.0, s - extra * 0.6)
-            e = min(dur, s + min_len)
-        # границы — в паузах между фразами: не начинать с середины и дать договорить
-        s = snap_start(s, words, lo=max(0.0, e - max_len), hi=max(0.0, min(peak - 1, e - min_len)))
-        e = snap_end(e, words, lo=min(dur, max(peak + 1, s + min_len * 0.8)),
-                     hi=min(dur, s + max_len))
+        s, e = shape_clip(peak, s, e, words, dur)
         if e - s < min_len * 0.8:
             continue
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
 
-        # точки зума: самые громкие пики внутри клипа
-        zooms = []
-        a, b = int(s), min(len(loud_z), int(e))
-        cand = sorted(range(a, b), key=lambda i: -loud_z[i])
-        for i in cand:
-            if len(zooms) >= CONFIG["max_zooms"] or loud_z[i] < 2.0:
-                break
-            if i - s < 1.0 or e - i < 2.0:
-                continue
-            if all(abs(i - z) >= 5 for z in zooms):
-                zooms.append(float(i))
-        if not zooms and s + 1 < peak < e - 2:
-            zooms = [peak]
-
-        if not title:
-            first = [w["w"] for seg in segments if seg["e"] > s and seg["s"] < e
-                     for w in seg["words"] if s <= w["s"] < e][:6]
-            title = " ".join(first) or f"момент {fmt_time(peak)}"
-        # без мата в названии файла и отчёте
-        title = " ".join(_censor(w) for w in title.split())
+        zooms = zoom_points(s, e, peak, loud_z)
+        title = moment_title(title, segments, s, e, peak)
         pk = int(peak)
         clip_parts = {k: round(float(v[pk]), 2) for k, v in (parts or {}).items()}
         score = float(smooth[pk])
@@ -1805,6 +1821,7 @@ def make_clip_record(c, num, file):
         "status": "new", "overrides": {}, "bleeps": None,
         "created": now_iso(), "rendered": None,
         "published": {},       # площадка → {"date", "url", "views": [...]}
+        "origin": "auto",      # откуда клип: auto, search (поиск), candidate (кандидат)
     }
 
 
@@ -1834,6 +1851,8 @@ def clip_tags(c):
         tags.append("тихое начало")
     if c.get("marks"):
         tags.append("метка")
+    if c.get("origin") == "search":
+        tags.append("из поиска")
     return tags
 
 
@@ -2063,6 +2082,120 @@ def hook_text(c):
     if h.get("auto"):
         return f"без хука — выключен галочкой (был бы: {h['why']})"
     return f"без хука — {h.get('why') or 'нет данных'}"
+
+
+def norm_text(text):
+    """Для поиска: без регистра, ё = е."""
+    return str(text).lower().replace("ё", "е")
+
+
+def search_transcript(segments, query, limit=300):
+    """Места в расшифровке, где встречается query (часть слова тоже: «смеш» → «смешно»).
+    Возвращает [{t, s, e, text, hl: (начало, конец) подсветки в text}] по времени."""
+    q = " ".join(norm_text(query).split())
+    if len(q) < 2:
+        return []
+    hits = []
+    for seg in segments:
+        words = [w for w in seg.get("words", []) if str(w.get("w", "")).strip()]
+        if not words:
+            continue
+        text, starts, shown, sh = "", [], "", []          # shown — с мат скрытым, как в субтитрах
+        for w in words:
+            if text:
+                text += " "
+                shown += " "
+            starts.append(len(text))
+            text += str(w["w"]).strip()
+            a = len(shown)
+            shown += _censor(str(w["w"]).strip())
+            sh.append((a, len(shown)))
+        low = norm_text(text)
+        pos = low.find(q)
+        while pos >= 0:
+            i = max(k for k, st in enumerate(starts) if st <= pos)   # слово, где началось
+            j = max(k for k, st in enumerate(starts) if st < pos + len(q))
+            hits.append({"t": float(words[i]["s"]), "s": float(seg["s"]), "e": float(seg["e"]),
+                         "text": text, "hl": (pos, pos + len(q)),
+                         "shown": shown, "hl_shown": (sh[i][0], sh[j][1])})
+            if len(hits) >= limit:
+                return hits
+            pos = low.find(q, pos + len(q))
+    return sorted(hits, key=lambda h: h["t"])
+
+
+def next_clip_num(proj):
+    return max((c.get("num", 0) for c in proj["clips"]), default=0) + 1
+
+
+def add_clip(path, c, origin, progress=None, cancel=None):
+    """Собрать новый клип по моменту c ({s, e, peak, score, zooms, parts, title, …})
+    и добавить в project.json. origin — откуда клип («search», «candidate»)."""
+    need_ffmpeg()
+    prepare_sounds()
+    proj = load_project(path)
+    src = proj["source"]
+    if not os.path.isfile(src):
+        raise AutoClipError(f"❌ Не найдена исходная запись: {src}")
+    segments = load_segments(proj)
+    out_dir = os.path.dirname(proj["_path"])
+    if not c.get("hook"):
+        c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments,
+                                threshold=proj.get("hook_threshold"),
+                                cfg=dict(CONFIG, **proj.get("settings", {})))
+    num = next_clip_num(proj)
+    name = f"{num:02d}_{safe_name(c['title'])}.mp4"
+    rec = make_clip_record(c, num, name)
+    rec["origin"] = origin
+    cfg = clip_config(proj, rec)
+    span = hook_span(rec, cfg)
+    rec["hook"]["on"] = span is not None
+    log(f"➕ Новый клип {name} ({fmt_time(c['s'])}–{fmt_time(c['e'])})")
+    if progress:
+        progress("рендер", 0, name)
+    with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
+        rec["bleeps"] = render_clip(src, dict(c, hook=span), segments, proj["source_info"],
+                                    os.path.join(out_dir, name), tmp, cfg, cancel)
+    if rec["bleeps"] is None:
+        raise AutoClipError("❌ ffmpeg не смог собрать клип.")
+    rec["rendered"] = now_iso()
+    rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
+    rec["cover"] = make_cover(src, proj["source_info"], rec, proj.get("reaction") or [],
+                              cover_path_for(out_dir, name), cfg, cancel)
+    add_forecast(rec, segments)
+    proj = load_project(path)                    # за время рендера проект могли поменять
+    proj["clips"].append(rec)
+    save_project(proj)
+    write_report(proj)
+    register_project(proj["_path"])
+    if progress:
+        progress("рендер", 100, name)
+    return rec
+
+
+def moment_at(proj, t, segments):
+    """Момент вокруг места t в записи — по тем же правилам, что и автоматический:
+    до места — pre секунд, после — post, длина 15–55 с, границы по фразам."""
+    dur = proj["source_info"]["dur"]
+    t = max(0.0, min(float(t), dur))
+    s, e = shape_clip(t, t - CONFIG["pre"], t + CONFIG["post"], all_words(segments), dur)
+    loud_z = proj.get("loud_z") or []
+    reaction = proj.get("reaction") or []
+    inside = [i for i in range(int(s), min(len(reaction), int(e)))]
+    peak = max(inside, key=lambda i: reaction[i], default=t) if inside else t
+    score = float(reaction[int(peak)]) if inside else 0.0
+    return {"s": round(s, 2), "e": round(e, 2), "peak": float(peak), "score": score,
+            "zooms": zoom_points(s, e, peak, loud_z) if loud_z else [],
+            "parts": {}, "title": moment_title("", segments, s, e, peak), "reason": "",
+            "marks": []}
+
+
+def clip_from_search(path, t, progress=None, cancel=None):
+    """«Клип отсюда»: клип вокруг найденного в расшифровке места."""
+    proj = load_project(path)
+    c = moment_at(proj, t, load_segments(proj))
+    c["reason"] = f"из поиска по расшифровке, место {fmt_time(t)}"
+    return add_clip(path, c, "search", progress, cancel)
 
 
 def load_segments(proj):
@@ -2673,6 +2806,7 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     proj["marks"] = marks
 
     smooth, loud_z, parts = score_timeline(loud, segments, moments)
+    proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     clips = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks)
     if not clips:
         prog("поиск", 100)

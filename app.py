@@ -195,6 +195,7 @@ class Bus(QObject):
     done = Signal(object)
     thumb = Signal(int, str, object)
     rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
+    added = Signal(object, object)         # новый клип (id) или None, текст ошибки или None
     weekly_progress = Signal(float, str)
     weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
     trained = Signal(object)               # итог обучения прогноза
@@ -609,14 +610,31 @@ class PlayerPanel(QWidget):
         self.player.mediaStatusChanged.connect(self._loaded)
         self._first_frame = False
         self._may_play = False         # играть можно только после действия пользователя
+        self._seek = 0                 # куда перемотать после открытия, мс
+        self._pending_seek = None
+        self.player.seekableChanged.connect(self._seekable)
+        self.player.durationChanged.connect(lambda _: self._seekable(self.player.isSeekable()))
 
-    def open(self, path, autoplay=False):
+    def open(self, path, autoplay=False, at_ms=0):
         self._first_frame = not autoplay
         self._may_play = autoplay
+        self._seek = int(at_ms)
+        self._pending_seek = int(at_ms) or None
         self.audio.setMuted(not autoplay)    # пока показываем первый кадр — без звука
         self.player.setSource(QUrl.fromLocalFile(path))
         if autoplay:
             self.play()
+
+    def show_at(self, path, ms):
+        """Перемотать на место (открыть файл, если открыт другой), на паузе."""
+        if self.player.source() == QUrl.fromLocalFile(path) and \
+                self.player.mediaStatus() not in (QMediaPlayer.NoMedia, QMediaPlayer.InvalidMedia,
+                                                  QMediaPlayer.LoadingMedia):
+            self._may_play = False
+            self.player.pause()
+            self.player.setPosition(int(ms))
+        else:
+            self.open(path, at_ms=ms)
 
     def play(self):
         self._may_play = True
@@ -624,16 +642,25 @@ class PlayerPanel(QWidget):
         self.player.play()
 
     def _loaded(self, status):
+        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            self._seekable(self.player.isSeekable())
         # пауза сразу после загрузки показывает первый кадр без звука
         if status == QMediaPlayer.LoadedMedia and self._first_frame:
             self._first_frame = False
             self.player.pause()
             QTimer.singleShot(400, self._ensure_frame)
 
+    def _seekable(self, ok):
+        # перемотка до готовности файла теряется — делаем её, как только можно
+        # (сначала приходит «загружено» ещё про прежний файл — ждём длину нового;
+        # перемотку во время загрузки проигрыватель может сбросить — повторяем, пока не встанет)
+        if ok and self._pending_seek is not None and self.player.duration() > self._pending_seek:
+            self.player.setPosition(self._pending_seek)
+
     def _ensure_frame(self):
         # бывает, что первый кадр не пришёл — просим его ещё раз
         if not self._may_play and not self.video.videoSink().videoFrame().isValid():
-            self.player.setPosition(0)
+            self.player.setPosition(self._seek)
             self.player.pause()
 
     def clear(self):
@@ -656,6 +683,8 @@ class PlayerPanel(QWidget):
             self.play()
 
     def _pos(self, ms):
+        if self._pending_seek is not None and abs(ms - self._pending_seek) < 1000:
+            self._pending_seek = None                # встали куда надо
         if not self.slider.isSliderDown():
             self.slider.setValue(ms)
         self.time.setText(f"{fmt_ms(ms)} / {fmt_ms(self.player.duration())}")
@@ -1059,6 +1088,39 @@ class ClipsPage(QWidget):
         ll.addLayout(frow)
         self.filter = 0
         self.filter_btns[0].setChecked(True)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Поиск по расшифровке записи")
+        self.search.setClearButtonEnabled(True)
+        self.search.setToolTip("Можно часть слова: «смеш» найдёт «смешно». Регистр и ё не важны")
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(250)
+        self._search_timer.timeout.connect(self.run_search)
+        self.search.textChanged.connect(lambda _: self._search_timer.start())
+        ll.addWidget(self.search)
+        self.left_stack = QStackedWidget()
+        ll.addWidget(self.left_stack, 1)
+        found = QWidget()
+        fl = QVBoxLayout(found)
+        fl.setContentsMargins(0, 0, 0, 0)
+        self.found_count = hint("")
+        fl.addWidget(self.found_count)
+        self.found = QListWidget()
+        self.found.setObjectName("clipList")
+        self.found.currentRowChanged.connect(self.show_found)
+        fl.addWidget(self.found, 1)
+        frow2 = QHBoxLayout()
+        self.btn_here = QPushButton("Клип отсюда")
+        self.btn_here.setObjectName("primary")
+        self.btn_here.setToolTip("Собрать новый клип вокруг этого места — по тем же правилам, "
+                                 "что и автоматические")
+        self.btn_here.setEnabled(False)
+        self.btn_here.clicked.connect(self.clip_here)
+        frow2.addWidget(self.btn_here)
+        self.here_state = hint("")
+        frow2.addWidget(self.here_state, 1)
+        fl.addLayout(frow2)
+        self.hits = []
         self.list = ClipList()
         self.list.setObjectName("clipList")
         self.list.setToolTip("Клип можно перетащить мышкой прямо в окно загрузки на сайте")
@@ -1069,7 +1131,8 @@ class ClipsPage(QWidget):
         self._covers = {}              # обложки списка: путь → (время изменения, значок)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
-        ll.addWidget(self.list, 1)
+        self.left_stack.addWidget(self.list)
+        self.left_stack.addWidget(found)
         split.addWidget(left)
 
         right = QWidget()
@@ -1343,6 +1406,7 @@ class ClipsPage(QWidget):
         lay.addWidget(self.empty)
         self.empty.hide()
         self.win.bus.rebuilt.connect(self._rebuilt)
+        self.win.bus.added.connect(self._added)
         self.refresh_recent()
 
     # ---------- нарезки ----------
@@ -1390,6 +1454,10 @@ class ClipsPage(QWidget):
         except OSError:
             pass
         self.projects.setCurrentIndex(0)
+        self.search.blockSignals(True)
+        self.search.clear()                          # поиск — по расшифровке этой записи
+        self.search.blockSignals(False)
+        self.left_stack.setCurrentIndex(0)
         self.refill(select_id)
 
     def reload(self, select_id=None):
@@ -1555,8 +1623,8 @@ class ClipsPage(QWidget):
         self.info.setText("<br>".join(lines))
         self.fill_editor(c)
 
-    def features(self, c):
-        """Признаки старых клипов (до прогноза) — из расшифровки, она кэшируется."""
+    def segments(self):
+        """Расшифровка записи этой нарезки (кэшируется; нет — None)."""
         pp = self.proj["_path"]
         if getattr(self, "_segs_for", None) != pp:
             try:
@@ -1564,7 +1632,108 @@ class ClipsPage(QWidget):
             except autoclip.AutoClipError:
                 self._segs = None
             self._segs_for = pp
-        return forecast.clip_features(c, self._segs) if self._segs is not None else None
+        return self._segs
+
+    def features(self, c):
+        """Признаки старых клипов (до прогноза) — из расшифровки."""
+        segs = self.segments()
+        return forecast.clip_features(c, segs) if segs is not None else None
+
+    # ---------- поиск по расшифровке ----------
+    def run_search(self):
+        q = self.search.text().strip()
+        if q == getattr(self, "_last_q", None) and self.left_stack.currentIndex() == 1:
+            return                                    # тот же запрос — выбор не сбрасываем
+        self._last_q = q
+        if not self.proj or len(q) < 2:
+            self._last_q = None
+            if self.left_stack.currentIndex() == 1:
+                self.left_stack.setCurrentIndex(0)
+                self.select()                         # вернуть выбранный клип в просмотр
+            return
+        segs = self.segments()
+        self.left_stack.setCurrentIndex(1)
+        self.editor.setEnabled(False)
+        self.found.blockSignals(True)
+        self.found.clear()
+        self.found.blockSignals(False)
+        self.btn_here.setEnabled(False)
+        if segs is None:
+            self.hits = []
+            self.found_count.setText("Нет расшифровки этой записи.")
+            return
+        self.hits = autoclip.search_transcript(segs, q)
+        n = len(self.hits)
+        self.found_count.setText(f"Нашлось: {n}" if n else "Ничего не нашлось.")
+        from html import escape
+        for h in self.hits:
+            a, b = h["hl_shown"]
+            text = h["shown"]
+            lo, hi = max(0, a - 28), min(len(text), b + 40)   # одна строка вокруг найденного
+            snip = (("…" if lo else "") + escape(text[lo:a])
+                    + f"<span style='color:{ACCENT}; font-weight:600'>{escape(text[a:b])}</span>"
+                    + escape(text[b:hi]) + ("…" if hi < len(text) else ""))
+            it = QListWidgetItem()
+            it.setToolTip(text)
+            lbl = QLabel(f"<b>{autoclip.fmt_time(h['t'])}</b>&nbsp;&nbsp;{snip}")
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setContentsMargins(10, 0, 10, 0)
+            lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+            it.setSizeHint(QSize(100, 36))
+            self.found.addItem(it)
+            self.found.setItemWidget(it, lbl)
+
+    def show_found(self, row):
+        if not (0 <= row < len(self.hits)):
+            self.btn_here.setEnabled(False)
+            return
+        h = self.hits[row]
+        src = self.proj["source"]
+        self.btn_here.setEnabled(not self.busy and os.path.isfile(src))
+        if os.path.isfile(src):
+            self.player.show_at(src, max(0.0, h["t"] - 1.0) * 1000)
+            from html import escape
+            self.info.setText(f"<b>Запись, {autoclip.fmt_time(h['t'])}</b><br>{escape(h['shown'])}")
+        else:
+            self.info.setText("Исходной записи нет на месте — перемотать некуда.")
+
+    def clip_here(self):
+        row = self.found.currentRow()
+        if self.busy or not (0 <= row < len(self.hits)):
+            return
+        t = self.hits[row]["t"]
+        self.busy = True
+        self.btn_here.setEnabled(False)
+        self.here_state.setText("Собираю клип…")
+        pp, bus = self.proj["_path"], self.win.bus
+
+        def work():
+            try:
+                rec = autoclip.clip_from_search(pp, t)
+                bus.added.emit(rec["id"], None)
+            except autoclip.AutoClipError as e:
+                bus.added.emit(None, str(e))
+            except Exception:
+                bus.added.emit(None, "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _added(self, cid, err):
+        self.busy = False
+        self.here_state.setText("")
+        if err:
+            self.btn_here.setEnabled(True)
+            QMessageBox.warning(self, "AutoClip", err)
+            return
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.left_stack.setCurrentIndex(0)
+        if self.filter not in (0, 1):                # новый клип виден в «Все» и «Новые»
+            self.filter = 0
+            for j, b in enumerate(self.filter_btns):
+                b.setChecked(j == 0)
+        self.base = {}
+        self.reload(cid)
 
     def fill_editor(self, c):
         cfg = autoclip.clip_config(self.proj, c)
