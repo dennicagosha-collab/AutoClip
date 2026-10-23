@@ -63,7 +63,24 @@ def test_voice_matters_more_than_game_noise():
 def test_hook_window_snaps_to_words():
     words = [{"s": 39.3, "e": 39.9, "w": "ну"}, {"s": 40.6, "e": 41.2, "w": "ааа"}]
     hs, he = autoclip._hook_window(40, 25.0, 50.0, words)
-    assert (hs, he) == (39.3, 41.2)
+    assert hs == pytest.approx(39.3 - autoclip.PAD_BEFORE)           # с запасом до первого слова
+    assert 39.9 < he < 40.6 and he - hs <= autoclip.HOOK_MAX          # конец — в паузе, слово целое
+
+
+def test_hook_never_cuts_words_and_keeps_padding():
+    import random
+    rnd = random.Random(5)
+    for _ in range(300):
+        t, words = 10.0, []
+        while t < 40:
+            d = rnd.uniform(0.15, 0.7)
+            words.append({"s": round(t, 2), "e": round(t + d, 2), "w": "слово"})
+            t += d + rnd.choice([0.05, 0.1, 0.2, 0.4, 0.9])
+        i = rnd.randint(15, 35)
+        hs, he = autoclip._hook_window(i, 10.0, 40.0, words)
+        assert 10.0 <= hs < he <= 40.0 and he - hs <= autoclip.HOOK_MAX + 1e-6
+        for w in words:
+            assert not (w["s"] < hs < w["e"]) and not (w["s"] < he < w["e"])   # не режет слово
 
 
 def _rec(start=10.0, end=30.0, auto=True, hs=20.0, he=21.5, override=None):

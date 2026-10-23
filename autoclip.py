@@ -564,13 +564,33 @@ _HALLUCINATIONS = re.compile(
     r"|подписывайтесь на канал.*", re.I)
 
 
-def drop_hallucinations(segments):
-    """Убирает фразы, которые Whisper выдумал, а не услышал."""
+def unnatural(w):
+    """Слово неестественной длины: так долго не произносят (Whisper растянул шум)."""
+    letters = len(re.sub(r"[^\w]", "", w["w"]))
+    return (w["e"] - w["s"]) > max(2.0, 0.3 * letters + 1.2)
+
+
+def drop_hallucinations(segments, regions=None):
+    """Убирает то, что Whisper выдумал, а не услышал: известные фразы-«титры», слова
+    неестественной длины и (если известно, где голос) куски, где голоса нет вовсе.
+    Кусок, от которого почти ничего не осталось, уходит целиком."""
+    import bisect
+    starts = [a for a, _ in regions or []]
     out = []
     for seg in segments:
         text = re.sub(r"[^\w\s]", "", seg["text"].lower().replace("ё", "е")).strip()
         if text and _HALLUCINATIONS.fullmatch(text):
             continue
+        words = seg.get("words", [])
+        if regions and words:                             # голос не нашёлся вовсе — не судим
+            j = max(0, bisect.bisect_right(starts, seg["s"]) - 1)
+            if not any(a < seg["e"] and b > seg["s"] for a, b in regions[j:j + 50] if a < seg["e"]):
+                continue                                  # голоса нет — Whisper выдумал
+        good = [w for w in words if not unnatural(w)]
+        if words and len(good) < len(words):
+            if len(good) < 2 or len(good) < len(words) / 2:
+                continue                                  # почти всё растянуто — кусок целиком
+            seg = dict(seg, words=good, text=" ".join(w["w"] for w in good))
         out.append(seg)
     return out
 
@@ -683,9 +703,18 @@ def _asr(model, audio, vad, dur, spk, progress=None, cancel=None, part=(0, 1)):
 
 
 def _refine_segments(segments, audio):
+    """Уточнить время слов по звуку — по всем словам сразу, чтобы слово не заехало на
+    первое слово следующего куска Whisper."""
     regions = speech_regions(audio)
+    segments = drop_hallucinations(segments, regions)
+    flat = [(k, j, w) for k, sg in enumerate(segments) for j, w in enumerate(sg["words"])]
+    order = sorted(range(len(flat)), key=lambda n: flat[n][2]["s"])
+    refined = refine_words([dict(flat[n][2], _n=n) for n in order], regions)
+    for w in refined:
+        k, j, _ = flat[w.pop("_n")]
+        segments[k]["words"][j] = w
+    segments = [sg for sg in segments if sg["words"] or not sg.get("text")]
     for sg in segments:
-        sg["words"] = refine_words(sg["words"], regions)
         if sg["words"]:
             sg["s"], sg["e"] = min(w["s"] for w in sg["words"]), max(w["e"] for w in sg["words"])
     return segments
@@ -1040,6 +1069,19 @@ def score_timeline(loud, segments, moments):
 # ---------------- хук ----------------
 
 HOOK_MIN, HOOK_MAX = 1.0, 2.0     # длина хука, сек
+PAD_BEFORE, PAD_AFTER = 0.15, 0.4  # запас до первого и после последнего слова (клип и хук)
+
+
+def pad_before(w, prev):
+    """Где начать перед словом w: за PAD_BEFORE до него, в короткой паузе — посередине."""
+    gap = (w["s"] - prev["e"]) if prev else math.inf
+    return max(0.0, w["s"] - (PAD_BEFORE if gap >= 2 * PAD_BEFORE else max(0.0, gap) / 2))
+
+
+def pad_after(w, nxt):
+    """Где закончить после слова w: через PAD_AFTER, в короткой паузе — посередине."""
+    gap = (nxt["s"] - w["e"]) if nxt else math.inf
+    return w["e"] + (PAD_AFTER if gap >= 2 * PAD_AFTER else max(0.0, gap) / 2)
 HOOK_SKIP_START = 3.0             # пик в первые 3 с — клип и так начинается с действия
 
 
@@ -1053,18 +1095,41 @@ def reaction_curve(parts):
 
 
 def _hook_window(i, s, e, words):
-    """1–2 с вокруг секунды i, по границам слов, строго внутри клипа [s, e]."""
-    hs = max(s, i - 0.5)
-    he = min(e, hs + 1.6)
-    for w in words:
-        if w["s"] < hs < w["e"] and w["s"] >= s and he - w["s"] <= HOOK_MAX:
-            hs = w["s"]
-        if w["s"] < he < w["e"] and w["e"] <= e and w["e"] - hs <= HOOK_MAX:
-            he = w["e"]
-    if he - hs < HOOK_MIN:
-        he = min(e, hs + HOOK_MIN)
-        hs = max(s, he - HOOK_MIN)
-    return round(hs, 2), round(he, 2)
+    """1–2 с вокруг секунды i, строго внутри клипа [s, e]. Начало — в паузе перед фразой,
+    конец — в паузе после слова, с запасом: хук не режет слово (время слов у Whisper
+    внутри фразы неточное, поэтому середину фразы не берём)."""
+    ws = sorted((w for w in words if w["s"] >= s and w["e"] <= e), key=lambda w: w["s"])
+    target = max(s, i - 0.5)
+    starts = []
+    for k, w in enumerate(ws):
+        prev = ws[k - 1] if k else None
+        if prev is None or w["s"] - prev["e"] >= PAUSE:
+            starts.append((max(s, pad_before(w, prev)), k))
+    best = None
+    for hs, k in sorted(starts, key=lambda x: (abs(x[0] - target), x[0] > i)):
+        ends = []
+        for j in range(k, len(ws)):
+            nxt = ws[j + 1] if j + 1 < len(ws) else None
+            if nxt is not None and nxt["s"] - ws[j]["e"] < 0.08:
+                continue                              # между словами нет зазора — тут не резать
+            he = min(e, pad_after(ws[j], nxt))
+            if he - hs > HOOK_MAX:
+                break
+            if he - hs >= HOOK_MIN * 0.8:
+                ends.append(he)
+        if ends:
+            best = (hs, min(ends, key=lambda x: abs(x - hs - 1.6)))
+            break
+    if best is None and ws:
+        return None, None                             # без разреза слова хук не поставить
+    if best is None:                                  # слов нет — просто 1,6 с вокруг пика
+        hs = max(s, i - 0.5)
+        he = min(e, hs + 1.6)
+        if he - hs < HOOK_MIN:
+            he = min(e, hs + HOOK_MIN)
+            hs = max(s, he - HOOK_MIN)
+        best = (hs, he)
+    return round(best[0], 2), round(best[1], 2)
 
 
 def _what_reaction(i, parts):
@@ -1105,7 +1170,9 @@ def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None):
     rec["start"], rec["end"] = _hook_window(i, s, e, words)
     if threshold is None:
         threshold = hook_threshold(reaction, cfg)
-    if peak < threshold:
+    if rec["start"] is None:
+        rec["why"] = "нет места для хука без разреза слова"
+    elif peak < threshold:
         rec["why"] = "нет яркой реакции в клипе"
     elif start_level >= 0.7 * peak:
         rec["why"] = "клип и так начинается с сильного момента"
@@ -1210,8 +1277,8 @@ def _end_points(words):
         # пауза, спрятанная в растянутом слове, — менее надёжна, чем настоящая
         pause = gap if gap >= PAUSE else max(gap, 0.6 * _stretch(w))
         if pause >= PAUSE or _SENTENCE_END.search(w["w"]):
-            # чуть позже конца слова, чтобы не съесть последний звук, но не на следующем слове
-            pts.append((w["e"] + min(0.3, max(0.0, gap) / 2), pause, w, nxt))
+            # после конца слова с запасом, чтобы не съесть последний звук, но не на следующем слове
+            pts.append((pad_after(w, nxt), pause, w, nxt))
     return pts
 
 
@@ -1224,7 +1291,7 @@ def _start_points(words):
         gap = (w["s"] - prev["e"]) if prev else math.inf
         pause = gap if (not prev or gap >= PAUSE) else max(gap, 0.6 * _stretch(prev))
         if pause >= PAUSE or (prev and _SENTENCE_END.search(prev["w"])):
-            pts.append((max(0.0, w["s"] - min(0.2, max(0.0, gap) / 2)), pause, prev, w))
+            pts.append((pad_before(w, prev), pause, prev, w))
     return pts
 
 
@@ -1369,6 +1436,20 @@ def moment_title(title, segments, s, e, peak):
     return " ".join(_censor(w) for w in title.split())
 
 
+def _stems(text):
+    """Основы значимых слов (первые 4 буквы слов длиннее 3 букв) — для сравнения текста."""
+    return {norm_text(w)[:4] for w in re.findall(r"\w+", str(text)) if len(w) > 3}
+
+
+def title_fits(title, clip_text):
+    """Название — про этот клип: хоть одно значимое слово названия звучит в клипе."""
+    t = _stems(title)
+    return not t or bool(t & _stems(clip_text))
+
+
+START_SILENT = 30.0   # клип без единого слова в первые столько секунд записи не берём
+
+
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=(),
                limit=None):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
@@ -1411,8 +1492,13 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
             continue
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
+        if mark is None and s < START_SILENT and not any(
+                s <= w["s"] < e for w in words):
+            continue                     # без речи в первых секундах — шум начала записи, не момент
 
         zooms = zoom_points(s, e, peak, loud_z)
+        if title and not title_fits(title, text_between(segments, s, e)):
+            title = ""                   # модель назвала по соседнему куску — берём слова клипа
         title = moment_title(title, segments, s, e, peak)
         pk = int(peak)
         clip_parts = {k: round(float(v[pk]), 2) for k, v in (parts or {}).items()}
@@ -3710,13 +3796,17 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                          (f" — {why}" if why else ""))
         if mode != "none":
             prog("поиск", i / len(clips) * 100, "название и хэштеги")
-            c["meta"] = llm_clip_meta(text_between(segments, c["s"], c["e"]), mode)
+            text = text_between(segments, c["s"], c["e"])
+            c["meta"] = llm_clip_meta(text, mode) if text.strip() else None
+            if c["meta"] and c["meta"]["title"] and not title_fits(c["meta"]["title"], text):
+                c["meta"]["title"] = moment_title("", segments, c["s"], c["e"], c["peak"])
             if c["meta"] and c["meta"]["title"]:
                 c["title"] = c["meta"]["title"]          # и имя файла станет понятным
     prog("поиск", 100)
     t = mark("поиск моментов", t)
 
     if analyze_only:
+        process.last = {"clips": clips, "candidates": cands, "segments": segments}
         for i, c in enumerate(clips, 1):
             log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
                 f"оценка {c['score']:.1f} — {c['title']}")

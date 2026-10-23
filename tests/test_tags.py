@@ -210,3 +210,17 @@ def test_llm_failure_warned_once_per_cut(tmp_path, monkeypatch, fake_trash):
     out = autoclip.process(str(v))
     assert len(autoclip.load_project(out)["clips"]) >= 2
     assert sum("про название" in m for m in logs) == 1               # одна строка, а не на каждый клип
+
+
+def test_title_only_from_this_clip():
+    """Клип 7 записи 24.10: в клипе одно слово «просто», а модель назвала «Бессмертная вайпер умерла»."""
+    assert not autoclip.title_fits("Бессмертная вайпер умерла", "просто")
+    assert autoclip.title_fits("Вайпер бессмертная, но умерла", "просто вайпер бессмертная она умерла")
+    import numpy as np
+    n = 120
+    smooth = np.zeros(n)
+    smooth[60] = 4.0
+    segs = [{"s": 50, "e": 70, "text": "просто", "words": [{"s": 58.0, "e": 58.4, "w": "просто"}]}]
+    moments = [{"s": 40, "e": 80, "score": 9, "title": "Бессмертная вайпер умерла", "reason": ""}]
+    clips = autoclip.pick_clips(smooth, np.zeros(n), segs, moments, 120.0)
+    assert clips and clips[0]["title"] == "просто"                    # название — из слов клипа

@@ -437,7 +437,12 @@ class TelegramLink:
                     job(bot)
                 except Exception as e:
                     self._log(f"⚠️  Telegram: {e} Работаю без него.")
-            actions = bot.poll(timeout=5)
+            try:
+                actions = bot.poll(timeout=5)
+            except OSError as e:                     # например, файл состояния занят — не падаем
+                self._log(f"⚠️  Telegram: {e}")
+                self.stop.wait(1)
+                continue
             if actions:
                 self._warned = False
             for kind, arg in actions:

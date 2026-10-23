@@ -117,7 +117,14 @@ def save_state(st):
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, STATE_PATH)
+    for attempt in range(20):                  # файл может читать поток связи — Windows не даст заменить
+        try:
+            os.replace(tmp, STATE_PATH)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 def is_connected():

@@ -94,3 +94,34 @@ def test_team_words_bleeped_but_not_subtitled(tmp_path):
     ass = open(work / "subs.ass", encoding="utf-8-sig").read()
     events = ass.split("[Events]")[1].upper()
     assert "ПРИВЕТ" in events and "БЛЯ" not in events and "Б**" not in events   # тиммейта в субтитрах нет
+
+
+# ---------- галлюцинации (3.7) ----------
+
+def seg(s, e, *words):
+    return {"s": s, "e": e, "text": " ".join(w for w, _, _ in words),
+            "words": [{"s": a, "e": b, "w": w} for w, a, b in words]}
+
+
+def test_hallucinations_dropped_whole():
+    segs = [seg(3.75, 30.3, ("Субтитры", 3.75, 5.15), ("делал", 6.94, 8.34), ("DimaTorzok", 21.36, 30.3)),
+            seg(81.6, 119.1, ("я", 81.6, 82.3), ("в", 87.7, 96.0), ("кахал", 100.7, 107.5)),
+            seg(140.0, 142.0, ("есть", 140.0, 140.3), ("минусов", 140.3, 140.9), ("на", 141.0, 141.2)),
+            seg(200.0, 204.0, ("ну", 200.0, 200.3), ("вот", 200.4, 200.8), ("ааа", 201.0, 204.0),
+                ("да", 203.0, 203.3))]
+    got = autoclip.drop_hallucinations(segs)
+    assert [g["s"] for g in got] == [140.0, 200.0]                    # «титры» и растянутый кусок — прочь
+    assert [w["w"] for w in got[1]["words"]] == ["ну", "вот", "да"]   # одно растянутое слово — только оно
+    voice = [(140.0, 142.0)]                                          # голос есть только тут
+    assert [g["s"] for g in autoclip.drop_hallucinations(segs, voice)] == [140.0]
+
+
+def test_no_silent_clip_at_record_start():
+    import numpy as np
+    n = 200
+    smooth = np.zeros(n)
+    smooth[5] = 9.0                                                   # громко в начале — заставка игры
+    smooth[120] = 3.0
+    segs = [seg(110, 125, ("ну", 112.0, 112.4), ("смотри", 113.0, 113.5), ("сюда", 118.0, 118.4))]
+    clips = autoclip.pick_clips(smooth, np.zeros(n), segs, [], 200.0)
+    assert clips and all(c["s"] > 30 for c in clips)                  # шум первых секунд не взят
