@@ -180,7 +180,8 @@ def _flags():
 
 def run(cmd, cwd=None, quiet=True, cancel=None, binary=False):
     text = {} if binary else {"encoding": "utf-8", "errors": "replace"}
-    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
                             creationflags=_flags(), **text)
     while True:
         try:
@@ -1953,7 +1954,8 @@ def pick_cover_time(video, vinfo, t, cfg, cancel=None):
     vf = ",".join(frame_filters(vinfo, preset) + [f"fps={COVER_FPS}", f"scale={w}:{h}", "format=gray"])
     p = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t0:.3f}", "-t", f"{2 * COVER_WINDOW:.3f}",
                         "-i", video, "-vf", vf, "-f", "rawvideo", "-"],
-                       capture_output=True, creationflags=_flags())
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       creationflags=_flags())
     check_cancel(cancel)
     raw = np.frombuffer(p.stdout, np.uint8)
     n = len(raw) // (w * h)
@@ -2198,7 +2200,8 @@ def quiet_start(path, seconds=3.0):
     import numpy as np
     p = subprocess.run(["ffmpeg", "-v", "error", "-t", f"{seconds:.2f}", "-i", path, "-vn",
                         "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-                       capture_output=True, creationflags=_flags())
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       creationflags=_flags())
     x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768.0
     if p.returncode != 0 or not len(x):
         return None
