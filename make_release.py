@@ -1,7 +1,7 @@
 """Выпуск новой версии AutoClip на GitHub (для разработки, не для пользователя).
 
-1. Поднять VERSION в update.py и закоммитить.
-2. python make_release.py "Что нового: ..."
+1. Поднять VERSION в update.py, дописать ЧТО_НОВОГО.md, закоммитить.
+2. python make_release.py   (или с текстом: python make_release.py "Что нового: ...")
 
 Скрипт собирает архив из закоммиченных файлов (git archive), ставит метку vX.Y.Z,
 отправляет код на GitHub и создаёт релиз с архивом (нужен GitHub CLI — gh).
@@ -26,9 +26,9 @@ def run(*args, capture=False):
 
 
 def main():
-    notes = " ".join(sys.argv[1:]).strip()
+    notes = " ".join(sys.argv[1:]).strip() or update.release_notes()
     if not notes:
-        sys.exit('Напиши, что нового:  python make_release.py "Что нового: ..."')
+        sys.exit(f"В ЧТО_НОВОГО.md нет раздела «## {update.VERSION}» — допиши его.")
     if not update.REPO:
         sys.exit("В update.py не задан REPO.")
     if run("git", "status", "--porcelain", "--untracked-files=no", capture=True):

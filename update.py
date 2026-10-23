@@ -30,6 +30,47 @@ APP_DIR = autoclip.SCRIPT_DIR
 BACKUP_NAME = "прежняя версия"
 MANIFEST_NAME = "файлы программы.json"
 NEEDED = ("app.py", "autoclip.py", "update.py")    # без них архив — не AutoClip
+CHANGELOG = os.path.join(APP_DIR, "ЧТО_НОВОГО.md")
+
+
+def parse_changelog(text):
+    """«## 1.1.0 — дата» + пункты «- …» → [{version, date, items}], новые сверху."""
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"##\s+v?(\d+(?:\.\d+){0,2})\s*(?:[—–-]\s*(.+))?$", line.strip())
+        if m:
+            out.append({"version": m.group(1), "date": (m.group(2) or "").strip(), "items": []})
+        elif out and line.strip().startswith(("- ", "* ")):
+            out[-1]["items"].append(line.strip()[2:].strip())
+        elif out and out[-1]["items"] and line.startswith("  ") and line.strip():
+            out[-1]["items"][-1] += " " + line.strip()      # перенос длинного пункта
+    out.sort(key=lambda e: parse_version(e["version"]) or (0,), reverse=True)
+    return out
+
+
+def changelog(path=None):
+    try:
+        with open(path or CHANGELOG, encoding="utf-8") as f:
+            return parse_changelog(f.read())
+    except OSError:
+        return []
+
+
+def news_since(seen, entries=None):
+    """Версии новее seen и не новее текущей — что показать после обновления."""
+    entries = changelog() if entries is None else entries
+    cur, old = parse_version(VERSION), parse_version(seen or "0")
+    return [e for e in entries
+            if old < (parse_version(e["version"]) or (0,)) <= (cur or (0,))]
+
+
+def release_notes(version=None):
+    """Текст «Что нового» этой версии — для релиза на GitHub."""
+    v = parse_version(version or VERSION)
+    for e in changelog():
+        if parse_version(e["version"]) == v:
+            return "\n".join(f"- {i}" for i in e["items"])
+    return ""
 
 
 def parse_version(text):

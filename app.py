@@ -53,7 +53,7 @@ DEFAULTS = {
     "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
-    "views_days": 3, "check_updates": True, "skip_version": "",
+    "views_days": 3, "check_updates": True, "skip_version": "", "seen_version": "",
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
 }
@@ -69,6 +69,9 @@ QScrollArea {{ background: {BG}; border: none; }}
 #side {{ background: #0c0d10; border-right: 1px solid {BORDER}; }}
 #brand {{ font-size: 14pt; font-weight: 700; color: white; padding: 22px 22px 14px 24px; }}
 #brandDot {{ color: {ACCENT}; }}
+#version {{ color: {MUTED}; font-size: 8pt; text-align: left; padding: 0 0 12px 25px;
+            border: none; background: transparent; }}
+#version:hover {{ color: {FG}; }}
 #nav {{ background: transparent; border: none; outline: none; padding: 0 10px; }}
 #nav::item {{ padding: 10px 14px; border-radius: 8px; margin: 2px 0; color: {MUTED}; }}
 #nav::item:selected {{ background: {SURFACE2}; color: white; }}
@@ -2654,6 +2657,54 @@ class ViewsDialog(QDialog):
         return saved
 
 
+# ---------------- «Что нового» ----------------
+
+class NewsDialog(QDialog):
+    """Список версий, новые сверху, с изменениями простыми словами."""
+
+    def __init__(self, parent, entries, only_new=False):
+        super().__init__(parent)
+        self.setWindowTitle("AutoClip — что нового")
+        self.setMinimumSize(560, 460)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        t = QLabel(f"AutoClip обновился до {update.VERSION}" if only_new else "Что нового")
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+        body = QLabel(self.html(entries) if entries else "Список изменений не найден.")
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.RichText)
+        body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        body.setContentsMargins(0, 0, 8, 0)
+        self.body = body
+        sa = QScrollArea()
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setWidget(body)
+        lay.addWidget(sa, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        ok = QPushButton("Понятно")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+    @staticmethod
+    def html(entries):
+        from html import escape
+        parts = []
+        for e in entries:
+            date = f" <span style='color:{MUTED}'>· {escape(e['date'])}</span>" if e["date"] else ""
+            cur = " <span style='color:#7dd99a'>· сейчас</span>" if e["version"] == update.VERSION else ""
+            items = "".join(f"<li style='margin-bottom:4px'>{escape(i)}</li>" for i in e["items"])
+            parts.append(f"<p style='margin-top:10px'><b>Версия {escape(e['version'])}</b>{date}{cur}</p>"
+                         f"<ul style='margin-left:-18px'>{items}</ul>")
+        return "".join(parts)
+
+
 # ---------------- обновление ----------------
 
 class UpdateDialog(QDialog):
@@ -2774,6 +2825,12 @@ class MainWindow(QMainWindow):
         brand = QLabel('Auto<span style="color:%s">Clip</span>' % ACCENT)
         brand.setObjectName("brand")
         sl.addWidget(brand)
+        self.version_btn = QPushButton(f"версия {update.VERSION}")
+        self.version_btn.setObjectName("version")
+        self.version_btn.setCursor(Qt.PointingHandCursor)
+        self.version_btn.setToolTip("Что нового")
+        self.version_btn.clicked.connect(lambda: self.show_news())
+        sl.addWidget(self.version_btn)
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
         f = QFont("Segoe UI", 10)
@@ -2854,6 +2911,10 @@ class MainWindow(QMainWindow):
         self.retrain()
         QTimer.singleShot(1500, self.ask_views)
 
+        # --- после обновления один раз показать «Что нового» ---
+        self._news = None
+        QTimer.singleShot(1200, self.news_after_update)
+
         # --- обновления: тихо спросить GitHub при запуске ---
         self.bus.update_found.connect(self.update_found)
         self.bus.update_done.connect(self.update_installed)
@@ -2865,9 +2926,13 @@ class MainWindow(QMainWindow):
     def retrain(self):
         def work():
             try:
-                self.bus.trained.emit(forecast.train())
+                res = forecast.train()
             except Exception as e:
-                self.bus.trained.emit({"error": str(e)})
+                res = {"error": str(e)}
+            try:
+                self.bus.trained.emit(res)
+            except RuntimeError:                     # окно уже закрыли
+                pass
         threading.Thread(target=work, daemon=True).start()
 
     def ask_views(self):
@@ -2888,6 +2953,26 @@ class MainWindow(QMainWindow):
                 self.clips.reload(self.clips.current_clip()["id"] if self.clips.current_clip() else None)
         dlg.finished.connect(done)
         dlg.show()
+
+    # --- «Что нового» ---
+    def news_after_update(self):
+        seen = self.settings.get("seen_version") or ""
+        if seen == update.VERSION or not self.isVisible():
+            return
+        self.settings["seen_version"] = update.VERSION
+        save_settings(self.settings)
+        fresh = update.news_since(seen)
+        if seen and fresh:                       # первый запуск вообще — без окна
+            self.show_news(fresh)
+
+    def show_news(self, entries=None):
+        if self._news:
+            self._news.raise_()
+            return
+        self._news = NewsDialog(self, entries if entries is not None else update.changelog(),
+                                only_new=entries is not None)
+        self._news.finished.connect(lambda _: setattr(self, "_news", None))
+        self._news.show()
 
     # --- обновления ---
     def check_updates(self, manual=False):

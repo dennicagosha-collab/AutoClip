@@ -205,3 +205,67 @@ def test_update_dialog_and_settings(win):
     w.update_found({"version": "9.0.1", "notes": "", "url": "u", "size": 1}, False)
     w.update_installed(None, "❌ не скачалось")
     assert "не скачалось" in w._update_dialog.state.text()
+
+
+# ---------- «Что нового» ----------
+
+NEWS = """# Что нового
+
+## 1.2.0
+- Третья версия
+  с переносом строки
+
+## 1.0.0 — 23.10.2026
+- Первая
+
+## 1.1.0
+- Вторая
+"""
+
+
+def test_changelog_parse_and_news_since(tmp_path, monkeypatch):
+    entries = update.parse_changelog(NEWS)
+    assert [e["version"] for e in entries] == ["1.2.0", "1.1.0", "1.0.0"]     # новые сверху
+    assert entries[0]["items"] == ["Третья версия с переносом строки"]
+    assert entries[2]["date"] == "23.10.2026"
+    monkeypatch.setattr(update, "VERSION", "1.1.0")
+    assert [e["version"] for e in update.news_since("1.0.0", entries)] == ["1.1.0"]
+    assert update.news_since("1.1.0", entries) == []
+    f = tmp_path / "ЧТО_НОВОГО.md"
+    f.write_text(NEWS, encoding="utf-8")
+    monkeypatch.setattr(update, "CHANGELOG", str(f))
+    assert update.release_notes() == "- Вторая"
+    assert update.release_notes("9.9.9") == ""
+
+
+def test_real_changelog_has_current_version():
+    entries = update.changelog()
+    assert entries and entries[0]["version"] == update.VERSION or \
+        any(e["version"] == update.VERSION for e in entries)
+    assert all(e["items"] for e in entries)
+    assert 5 <= len(next(e for e in entries if e["version"] == "1.0.0")["items"]) <= 8
+
+
+def test_news_shown_once_after_update(win, monkeypatch):
+    A, w = win
+    assert w.version_btn.text() == f"версия {update.VERSION}"
+    w.show_news()
+    assert "Версия 1.0.0" in w._news.body.text()
+    w._news.accept()
+    assert w._news is None
+
+    monkeypatch.setattr(update, "VERSION", "1.1.0")
+    monkeypatch.setattr(update, "changelog", lambda path=None: update.parse_changelog(NEWS))
+    w.show()
+    w.settings["seen_version"] = ""
+    w.news_after_update()                      # первый запуск — без окна, только запомнили
+    assert w._news is None and w.settings["seen_version"] == "1.1.0"
+    w.settings["seen_version"] = "1.0.0"
+    w.news_after_update()                      # обновились с 1.0.0
+    assert w._news is not None
+    text = w._news.body.text()
+    assert "Версия 1.1.0" in text and "1.0.0" not in text and "1.2.0" not in text
+    w._news.accept()
+    w.news_after_update()                      # второй раз не показываем
+    assert w._news is None
+    assert A.load_settings()["seen_version"] == "1.1.0"
