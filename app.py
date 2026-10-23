@@ -64,6 +64,7 @@ DEFAULTS = {
     "views_days": 3, "check_updates": True, "skip_version": "", "seen_version": "",
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
+    "music_dir": "", "weekly_music": "",
 }
 
 BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
@@ -213,6 +214,7 @@ class Bus(QObject):
     report_done = Signal(object, object)   # путь к отчёту об ошибке, текст ошибки или None
     sub_layer = Signal(int, str)           # номер запроса, картинка субтитров для предпросмотра
     tg_action = Signal(str, object)        # действие из Telegram: cut / no / views
+    music_ready = Signal(str, object)      # «Прослушать с клипом»: файл или текст ошибки
     tg_state = Signal(str)                 # что с подключением Telegram (текст для «Настроек»)
 
 
@@ -483,6 +485,73 @@ def fit_on_screen(w, margin=8):
     else:
         w.setGeometry(new)
     return True
+
+
+MUSIC_HINT = ("Для TikTok лучше добавить звук в самом TikTok. Сюда — только свои треки или "
+              "свободные: YouTube Audio Library, Pixabay Music.")
+
+
+class WaveView(QWidget):
+    """Волна трека и рамка длиной с клип: двигаешь рамку — выбираешь кусок трека."""
+    moved = Signal(float)             # начало куска, секунды трека
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(70)
+        self.setCursor(Qt.SizeHorCursor)
+        self.peaks, self.dur, self.length, self.offset = [], 0.0, 0.0, 0.0
+        self._drag = None
+
+    def set_track(self, peaks, dur):
+        self.peaks, self.dur = list(peaks), float(dur)
+        self.update()
+
+    def set_window(self, length, offset):
+        self.length = float(length)
+        self.offset = self._clamp(offset)
+        self.update()
+
+    def _clamp(self, off):
+        return max(0.0, min(float(off), max(0.0, self.dur - self.length)))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), QColor("#0d0e11"))
+        if self.peaks and self.dur:
+            n = len(self.peaks)
+            bw = w / n
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#5c606b"))
+            for i, v in enumerate(self.peaks):
+                bh = max(1.0, v * (h - 8))
+                p.drawRect(QRectF(i * bw, (h - bh) / 2, max(1.0, bw - 0.5), bh))
+            x0 = self.offset / self.dur * w
+            x1 = min(w, (self.offset + self.length) / self.dur * w)
+            c = QColor(ACCENT)
+            c.setAlpha(70)
+            p.setBrush(c)
+            p.setPen(QPen(QColor(ACCENT), 2))
+            p.drawRoundedRect(QRectF(x0, 1, max(4.0, x1 - x0), h - 2), 4, 4)
+        else:
+            p.setPen(QColor(MUTED))
+            p.drawText(self.rect(), Qt.AlignCenter, "Выбери трек")
+        p.end()
+
+    def mousePressEvent(self, e):
+        if self.dur:
+            self._drag = (e.position().x(), self.offset)
+
+    def mouseMoveEvent(self, e):
+        if self._drag and self.dur:
+            x, off = self._drag
+            self.offset = self._clamp(off + (e.position().x() - x) / self.width() * self.dur)
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self._drag:
+            self._drag = None
+            self.moved.emit(round(self.offset, 2))
 
 
 def plural(n, one, few, many):
@@ -1463,7 +1532,7 @@ class ClipsPage(QWidget):
         tabs = QHBoxLayout()
         tabs.setSpacing(6)
         self.ed_tabs = []
-        for i, name in enumerate(("Клип", "Описание", "Публикация")):
+        for i, name in enumerate(("Клип", "Описание", "Публикация", "Музыка")):
             b = QPushButton(name)
             b.setObjectName("filter")
             b.setCheckable(True)
@@ -1661,6 +1730,76 @@ class ClipsPage(QWidget):
         pl.addWidget(self.pub_state)
         pl.addStretch(1)
         self.ed_stack.addWidget(page)
+
+        # --- музыка ---
+        page = QWidget()
+        ml = QVBoxLayout(page)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(8)
+        ml.addWidget(hint(MUSIC_HINT))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.m_search = QLineEdit()
+        self.m_search.setPlaceholderText("Поиск трека в папке «Музыка»")
+        self.m_search.setClearButtonEnabled(True)
+        self.m_search.textChanged.connect(self.fill_tracks)
+        row.addWidget(self.m_search, 1)
+        b = QPushButton("Файл…")
+        b.setToolTip("Выбрать свой трек: mp3, wav, ogg, flac, m4a")
+        b.clicked.connect(self.pick_track)
+        row.addWidget(b)
+        self.m_none = QPushButton("Без музыки")
+        self.m_none.setObjectName("ghost")
+        self.m_none.clicked.connect(lambda: self.set_track(None))
+        row.addWidget(self.m_none)
+        ml.addLayout(row)
+        self.m_list = QListWidget()
+        self.m_list.setFixedHeight(84)
+        self.m_list.itemClicked.connect(lambda it: self.set_track(it.data(Qt.UserRole)))
+        ml.addWidget(self.m_list)
+        self.m_name = hint("Без музыки")
+        ml.addWidget(self.m_name)
+        self.m_wave = WaveView()
+        self.m_wave.moved.connect(lambda off: self._music_set(offset=off))
+        ml.addWidget(self.m_wave)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("Громкость"))
+        self.m_vol = QSlider(Qt.Horizontal)
+        self.m_vol.setRange(-40, -3)
+        self.m_vol.setValue(-18)
+        self.m_vol.setFixedWidth(150)
+        self.m_vol_l = hint("−18 дБ к голосу")
+        self.m_vol.valueChanged.connect(lambda v: (self.m_vol_l.setText(f"−{abs(v)} дБ к голосу"),
+                                                   self._music_set(volume=float(v))))
+        row.addWidget(self.m_vol)
+        row.addWidget(self.m_vol_l)
+        row.addSpacing(10)
+        self.m_duck = Toggle(True, tip="Когда говорят — музыка уходит ещё тише")
+        self.m_duck.toggled.connect(lambda v: self._music_set(duck=bool(v)))
+        row.addWidget(self.m_duck)
+        row.addWidget(QLabel("Тише под речью"))
+        row.addSpacing(10)
+        row.addWidget(QLabel("Края"))
+        self.m_fade = Stepper(0, 5, 1)
+        self.m_fade.valueChanged.connect(lambda v: self._music_set(fade=float(v)))
+        row.addWidget(self.m_fade)
+        row.addWidget(hint("с"))
+        row.addStretch(1)
+        ml.addLayout(row)
+        row = QHBoxLayout()
+        self.m_listen = QPushButton("Прослушать с клипом")
+        self.m_listen.setToolTip("Клип и музыка вместе, с этой громкостью. В клип — после «Пересобрать»")
+        self.m_listen.clicked.connect(self.listen_music)
+        row.addWidget(self.m_listen)
+        self.m_state = hint("")
+        row.addWidget(self.m_state, 1)
+        ml.addLayout(row)
+        ml.addStretch(1)
+        self.ed_stack.addWidget(page)
+        self.music = None
+        self._waves = {}
+        self.win.bus.music_ready.connect(self._music_ready)
 
         self.desc_platform = "tiktok"
         self._desc_clip = None
@@ -1975,6 +2114,104 @@ class ClipsPage(QWidget):
             self._segs_for = pp
         return self._segs
 
+    # ---------- музыка ----------
+    def fill_tracks(self, *_):
+        self.m_list.clear()
+        folder = self.win.settings.get("music_dir", "")
+        if not folder:
+            it = QListWidgetItem("Папка «Музыка» не выбрана — «Настройки» → «Музыка»")
+            it.setFlags(Qt.NoItemFlags)
+            self.m_list.addItem(it)
+            return
+        for path in autoclip.list_music(folder, self.m_search.text()):
+            it = QListWidgetItem(os.path.relpath(path, folder))
+            it.setData(Qt.UserRole, path)
+            self.m_list.addItem(it)
+
+    def pick_track(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Трек", self.win.settings.get("music_dir", ""),
+            "Музыка (" + " ".join("*" + e for e in autoclip.MUSIC_EXT) + ")")
+        if path:
+            self.set_track(path)
+
+    def wave(self, path):
+        key = (path, os.path.getmtime(path) if os.path.exists(path) else 0)
+        if key not in self._waves:
+            try:
+                self._waves[key] = autoclip.waveform(path, 400)
+            except autoclip.AutoClipError:
+                self._waves[key] = ([], 0.0)
+        return self._waves[key]
+
+    def clip_len(self):
+        c = self.current_clip()
+        if not c:
+            return 0.0
+        hook = c.get("hook") or {}
+        hd = (hook["end"] - hook["start"]) if hook.get("on") and hook.get("start") is not None else 0
+        return c["end"] - c["start"] + hd
+
+    def set_track(self, path):
+        if path is None:
+            self.music = None
+        else:
+            old = self.music or {}
+            self.music = dict(autoclip.MUSIC_DEFAULT, file=path, offset=0.0,
+                              volume=old.get("volume", -18.0), duck=old.get("duck", True),
+                              fade=old.get("fade", 1.0))
+        self.show_music()
+        self._changed()
+
+    def _music_set(self, **kw):
+        if self.music is None or getattr(self, "_filling_music", False):
+            return
+        self.music.update(kw)
+        self._changed()
+
+    def show_music(self):
+        m = self.music
+        self._filling_music = True
+        for w in (self.m_vol, self.m_duck, self.m_fade, self.m_listen, self.m_wave):
+            w.setEnabled(m is not None)
+        if m:
+            peaks, dur = self.wave(m["file"])
+            self.m_wave.set_track(peaks, dur)
+            self.m_wave.set_window(self.clip_len(), m.get("offset", 0))
+            self.m_name.setText(f"♪ {os.path.basename(m['file'])}  ·  с {autoclip.fmt_time(m.get('offset', 0))}")
+            self.m_vol.setValue(int(round(m.get("volume", -18))))
+            self.m_duck.setChecked(bool(m.get("duck", True)))
+            self.m_fade.setValue(int(round(m.get("fade", 1))))
+        else:
+            self.m_wave.set_track([], 0)
+            self.m_name.setText("Без музыки")
+        self._filling_music = False
+
+    def listen_music(self):
+        c = self.current_clip()
+        if not (c and self.music):
+            return
+        self.m_state.setText("Смешиваю…")
+        self.m_listen.setEnabled(False)
+        self.player.release_file()
+        pp, cid, m, bus = self.proj["_path"], c["id"], dict(self.music), self.win.bus
+        out = os.path.join(tempfile.gettempdir(), f"autoclip_music_{os.getpid()}.mp4")
+
+        def work():
+            try:
+                bus.music_ready.emit(autoclip.music_preview(pp, cid, m, out), None)
+            except autoclip.AutoClipError as e:
+                bus.music_ready.emit("", str(e))
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _music_ready(self, path, err):
+        self.m_listen.setEnabled(self.music is not None)
+        self.m_state.setText(err or "Играет клип с музыкой. В сам клип — после «Пересобрать».")
+        if path and not err:
+            self.player.open(path, autoplay=True)
+
     def features(self, c):
         """Признаки старых клипов (до прогноза) — из расшифровки."""
         segs = self.segments()
@@ -2105,6 +2342,7 @@ class ClipsPage(QWidget):
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
                      "nick": bool(cfg.get("nick")),
                      "style": (c.get("overrides") or {}).get("sub_style") or "",
+                     "music": (c.get("overrides") or {}).get("music"),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
                    self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style)
@@ -2135,6 +2373,9 @@ class ClipsPage(QWidget):
         self.e_end.setText(autoclip.fmt_time_exact(b["end"]))
         for w in widgets:
             w.blockSignals(False)
+        self.music = dict(self.base["music"]) if self.base.get("music") else None
+        self.fill_tracks()
+        self.show_music()
         good = c["status"] == "good"
         self.btn_good.setText("↩  Убрать из хороших" if good else "👍  Хороший")
         self._changed()
@@ -2155,6 +2396,7 @@ class ClipsPage(QWidget):
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
                 "nick": self.e_nick.isChecked(),
                 "style": self.e_style.currentData() or "",
+                "music": dict(self.music) if self.music else None,
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -2535,6 +2777,20 @@ class WeeklyPage(QWidget):
         self.btn.setObjectName("accent")
         self.btn.setMinimumWidth(260)
         self.btn.clicked.connect(self.build)
+        mrow = QHBoxLayout()
+        mrow.setSpacing(6)
+        b = QPushButton("Музыка…")
+        b.setToolTip("Один трек на всю подборку — свой или свободный")
+        b.clicked.connect(self.pick_music)
+        mrow.addWidget(b)
+        self.music_none = QPushButton("Без музыки")
+        self.music_none.setObjectName("ghost")
+        self.music_none.clicked.connect(lambda: self.set_music(""))
+        mrow.addWidget(self.music_none)
+        self.music_label = hint("")
+        mrow.addWidget(self.music_label, 1)
+        lay.addLayout(mrow)
+        self.set_music(self.s.get("weekly_music", ""))
         row.addWidget(self.btn)
         col = QVBoxLayout()
         col.setSpacing(6)
@@ -2648,6 +2904,20 @@ class WeeklyPage(QWidget):
         self.list.setCurrentRow(new)
         self._summary()
 
+    def pick_music(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Трек для подборки", self.s.get("music_dir", ""),
+            "Музыка (" + " ".join("*" + e for e in autoclip.MUSIC_EXT) + ")")
+        if path:
+            self.set_music(path)
+
+    def set_music(self, path):
+        self.s["weekly_music"] = path or ""
+        save_settings(self.s)
+        self.music_none.setVisible(bool(path))
+        self.music_label.setText(f"♪ {os.path.basename(path)} — тихо, под голосом ещё тише"
+                                 if path else "Без музыки. " + MUSIC_HINT)
+
     # ---------- сборка ----------
     def build(self):
         paths = [p for p, _ in self.chosen()]
@@ -2660,13 +2930,15 @@ class WeeklyPage(QWidget):
         self.bar.setValue(0)
         self.state.setText("Собираю…")
         fmt = self.s["weekly_format"]
+        music = self.s.get("weekly_music", "")
         autoclip.WEEKLY_DIR = self.s["weekly_dir"]
         bus = self.win.bus
 
         def work():
             try:
                 out = autoclip.build_compilation(
-                    paths, fmt, progress=lambda st, pct, msg: bus.weekly_progress.emit(float(pct), msg))
+                    paths, fmt, progress=lambda st, pct, msg: bus.weekly_progress.emit(float(pct), msg),
+                    music=dict(autoclip.MUSIC_DEFAULT, file=music) if music else None)
                 bus.weekly_done.emit(out, None)
             except autoclip.AutoClipError as e:
                 bus.weekly_done.emit("", str(e))
@@ -3086,6 +3358,23 @@ class SettingsPage(QWidget):
         v.addWidget(option_row("Мои игры", self.games,
                                "Для «Авто»: при этих программах — фоновый. Игру на весь экран "
                                "программа замечает и сама"))
+        lay.addWidget(box)
+
+        # --- музыка ---
+        box, v = card("Музыка", "Папка со своими треками — они появятся во вкладке «Музыка» у клипа. "
+                                "По умолчанию клипы без музыки. " + MUSIC_HINT)
+        mrow = QHBoxLayout()
+        mrow.setSpacing(6)
+        self.music_dir = QLineEdit(self.s.get("music_dir", ""))
+        self.music_dir.setPlaceholderText("Папка «Музыка»")
+        self.music_dir.setMinimumWidth(300)
+        self.music_dir.textChanged.connect(lambda t: self._set("music_dir", t.strip()))
+        mrow.addWidget(self.music_dir)
+        b = QPushButton("Выбрать…")
+        b.clicked.connect(lambda: (lambda d: d and self.music_dir.setText(d))(
+            QFileDialog.getExistingDirectory(self, "Папка с музыкой", self.music_dir.text())))
+        mrow.addWidget(b)
+        v.addWidget(option_row("Папка «Музыка»", mrow))
         lay.addWidget(box)
 
         # --- Telegram ---

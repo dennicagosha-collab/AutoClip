@@ -1734,6 +1734,115 @@ def frame_filters(vinfo, preset):
     return vf
 
 
+# ---------------- музыка (свои треки) ----------------
+# Музыка — только из своих файлов. Скачивания с площадок и стримингов нет и не будет.
+
+MUSIC_EXT = (".mp3", ".wav", ".ogg", ".flac", ".m4a")
+MUSIC_DEFAULT = {"volume": -18.0, "duck": True, "fade": 1.0}   # громкость — дБ к голосу
+DUCK_DB = 8.0                 # под речью музыка уходит ещё на столько дБ
+_loudness_cache = {}
+
+
+def list_music(folder, query=""):
+    """Треки из папки «Музыка» (и подпапок), с поиском по имени без учёта регистра."""
+    out = []
+    if folder and os.path.isdir(folder):
+        q = norm_text(query).strip()
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if f.lower().endswith(MUSIC_EXT) and (not q or q in norm_text(f)):
+                    out.append(os.path.join(root, f))
+    return sorted(out, key=lambda x: norm_text(os.path.basename(x)))
+
+
+def loudness(path, start=0.0, dur=None):
+    """Средняя громкость (LUFS, EBU R128) файла или его куска. Тишина — None."""
+    key = (os.path.abspath(path), round(start, 2), dur and round(dur, 2),
+           os.path.getmtime(path) if os.path.exists(path) else 0)
+    if key in _loudness_cache:
+        return _loudness_cache[key]
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{start:.3f}"]
+    if dur:
+        cmd += ["-t", f"{dur:.3f}"]
+    cmd += ["-i", path, "-vn", "-af", "ebur128=framelog=quiet", "-f", "null", "-"]
+    p = run(cmd)
+    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", p.stderr)
+    val = float(m[-1]) if m else None
+    if val is not None and val < -69:            # почти тишина — громкость не посчитать
+        val = None
+    _loudness_cache[key] = val
+    return val
+
+
+def waveform(path, bins=600):
+    """Волна трека: [0..1] по bins кусочкам и длина в секундах."""
+    import numpy as np
+    p = run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "4000",
+             "-f", "s16le", "-"], binary=True)
+    x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if not len(x):
+        raise AutoClipError(f"❌ Не получилось прочитать трек: {os.path.basename(path)}")
+    dur = len(x) / 4000.0
+    chunks = np.array_split(np.abs(x), bins)
+    peaks = np.array([c.max() if len(c) else 0.0 for c in chunks])
+    top = peaks.max() or 1.0
+    return [round(float(v / top), 3) for v in peaks], dur
+
+
+def speech_spans(words, gap=0.5):
+    """Где говорят: слова, слитые в куски (пауза меньше gap — один кусок)."""
+    spans = []
+    for w in sorted(words, key=lambda w: w["s"]):
+        if spans and w["s"] - spans[-1][1] < gap:
+            spans[-1][1] = max(spans[-1][1], w["e"])
+        else:
+            spans.append([w["s"], w["e"]])
+    return [tuple(x) for x in spans]
+
+
+def music_chain(m_in, total, mcfg, gain_db, speech=(), bleeps=()):
+    """Фильтры для музыки: громкость, приглушение под речью, тишина под звуком на мат,
+    плавные края. Возвращает строку фильтра, которая из m_in делает [mus]."""
+    fade = max(0.0, min(float(mcfg.get("fade", 1.0)), total / 3))
+    base = 10 ** (gain_db / 20)
+    expr = f"{base:.5f}"
+    if mcfg.get("duck", True) and speech:
+        k = 1 - 10 ** (-DUCK_DB / 20)
+        env = "+".join(f"clip((t-{a - 0.25:.2f})/0.2,0,1)*clip(({b + 0.4:.2f}-t)/0.3,0,1)"
+                       for a, b in speech)
+        expr += f"*(1-{k:.3f}*min(1,{env}))"
+    if bleeps:
+        # под звуком на мат музыка молчит — не заезжает на него и не глушит его
+        expr += "*(1-min(1," + "+".join(f"between(t,{a:.3f},{u:.3f})" for a, _, u in bleeps) + "))"
+    chain = (f"{m_in}aformat=sample_rates=48000:channel_layouts=stereo,"
+             f"atrim=0:{total:.3f},asetpts=PTS-STARTPTS,volume='{expr}':eval=frame")
+    if fade > 0:
+        chain += f",afade=t=in:d={fade:.2f},afade=t=out:st={max(0.0, total - fade):.3f}:d={fade:.2f}"
+    return chain + "[mus]"
+
+
+def music_gain(mcfg, voice_lufs):
+    """Усиление музыки (дБ), чтобы она была на mcfg["volume"] дБ тише голоса."""
+    ml = loudness(mcfg["file"], float(mcfg.get("offset", 0)), mcfg.get("_len"))
+    rel = float(mcfg.get("volume", MUSIC_DEFAULT["volume"]))
+    if ml is None or voice_lufs is None:
+        return rel                                   # не измерить — просто громкость ползунка
+    return (voice_lufs + rel) - ml
+
+
+def check_music(mcfg):
+    if not mcfg:
+        return None
+    f = mcfg.get("file")
+    if not f or not os.path.isfile(f):
+        log(f"⚠️  Трек не найден, клип без музыки: {f}")
+        return None
+    if not f.lower().endswith(MUSIC_EXT):
+        log(f"⚠️  Этот файл не похож на трек, клип без музыки: {os.path.basename(f)}")
+        return None
+    return dict(MUSIC_DEFAULT, **mcfg)
+
+
 def clip_words(segments, s, e):
     """Слова клипа со временем относительно его начала."""
     words = []
@@ -1863,6 +1972,18 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             agraph = agraph.replace("[am]", "[aout]")
     else:
         agraph = f"{ain}{fmt}[aout]"
+
+    # --- музыка ---
+    music = check_music(cfg.get("music"))
+    if music:
+        mi = snd_in + (1 if extra_in else 0)
+        extra_in += ["-ss", f"{float(music.get('offset', 0)):.3f}", "-t", f"{total:.3f}",
+                     "-i", os.path.abspath(music["file"])]
+        voice = loudness(src, s, dur)
+        gain = music_gain(dict(music, _len=total), voice)
+        agraph = agraph.replace("[aout]", "[voice]")
+        agraph += ";" + music_chain(f"[{mi}:a]", total, music, gain, speech_spans(words), bleeps)
+        agraph += ";[voice][mus]amix=inputs=2:duration=first:normalize=0[aout]"
 
     tmp_out = os.path.join(tmpdir, "render.mp4")
     graph += ";" + agraph
@@ -2077,7 +2198,7 @@ PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
-                 "sub_x", "sub_style") + STYLE_KEYS
+                 "sub_x", "sub_style", "music") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
@@ -2572,6 +2693,38 @@ def clip_from_search(path, t, progress=None, cancel=None):
     return add_clip(path, c, "search", progress, cancel)
 
 
+def music_preview(path, ref, mcfg, out_path):
+    """Готовый клип + выбранная музыка с текущей громкостью — быстро, без пережатия видео."""
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    src = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    music = check_music(mcfg)
+    if not (music and os.path.isfile(src)):
+        raise AutoClipError("❌ Нет клипа или трека для прослушивания.")
+    total = _probe_dur(src)
+    hd = 0.0
+    if (clip.get("hook") or {}).get("on") and clip["hook"].get("start") is not None:
+        hd = clip["hook"]["end"] - clip["hook"]["start"]
+    try:
+        segs = load_segments(proj)
+        words = [dict(w, s=w["s"] + hd, e=w["e"] + hd)
+                 for w in clip_words(segs, clip["start"], clip["end"])]
+    except AutoClipError:
+        words = []
+    cfg = clip_config(proj, clip)
+    bleeps = bleep_spans(words, total, cfg["bleep_pad"]) if cfg["bleep"] else []
+    gain = music_gain(dict(music, _len=total), loudness(src))
+    graph = (music_chain("[1:a]", total, music, gain, speech_spans(words), bleeps) +
+             ";[0:a]aformat=sample_rates=48000:channel_layouts=stereo[voice];"
+             "[voice][mus]amix=inputs=2:duration=first:normalize=0[aout]")
+    p = run(["ffmpeg", "-y", "-v", "error", "-i", src, "-ss", f"{float(music.get('offset', 0)):.3f}",
+             "-t", f"{total:.3f}", "-i", music["file"], "-filter_complex", graph,
+             "-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", out_path])
+    if p.returncode != 0:
+        raise AutoClipError("❌ Не получилось смешать музыку:\n" + p.stderr[-500:])
+    return out_path
+
+
 def load_segments(proj):
     path = proj.get("transcript", "")
     if not os.path.isfile(path):
@@ -2736,9 +2889,11 @@ def _probe_dur(path):
         raise AutoClipError(f"❌ Не читается клип: {os.path.basename(path)}")
 
 
-def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cancel=None):
+def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cancel=None,
+                      music=None):
     """Склеивает готовые клипы (в заданном порядке) в одну подборку с затемнением на стыках.
-    fmt — "vertical" (1080×1920) или "horizontal" (1920×1080). Возвращает путь к файлу."""
+    fmt — "vertical" (1080×1920) или "horizontal" (1920×1080). music — один трек на всю
+    подборку ({file, offset, volume, duck, fade}) или None. Возвращает путь к файлу."""
     global _ENCODER
     need_ffmpeg()
     if not paths:
@@ -2787,6 +2942,28 @@ def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cance
                  "-c", "copy", "-movflags", "+faststart", tmp_out], cancel=cancel)
         if p.returncode != 0:
             raise AutoClipError("❌ Не получилось склеить подборку:\n" + p.stderr[-800:])
+        music = check_music(music)
+        if music:
+            check_cancel(cancel)
+            if progress:
+                progress("подборка", 95, "музыка")
+            total = _probe_dur(tmp_out)
+            gain = music_gain(dict(music, _len=total), loudness(tmp_out))
+            # слов у подборки под рукой нет — приглушаем под любым звуком клипов (sidechain)
+            duck = ";[mus][sc]sidechaincompress=threshold=0.05:ratio=6:attack=20:release=400[md]" \
+                if music.get("duck", True) else ";[mus]anull[md]"
+            graph = (music_chain("[1:a]", total, dict(music, duck=False), gain) +
+                     ";[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice][sc]" +
+                     duck + ";[voice][md]amix=inputs=2:duration=first:normalize=0[aout]")
+            mixed = os.path.join(tmp, "music.mp4")
+            p = run(["ffmpeg", "-y", "-v", "error", "-i", tmp_out,
+                     "-ss", f"{float(music.get('offset', 0)):.3f}", "-t", f"{total:.3f}",
+                     "-i", music["file"], "-filter_complex", graph, "-map", "0:v", "-map", "[aout]",
+                     "-c:v", "copy", "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
+                     "-movflags", "+faststart", mixed], cancel=cancel)
+            if p.returncode != 0:
+                raise AutoClipError("❌ Не получилось наложить музыку на подборку:\n" + p.stderr[-800:])
+            tmp_out = mixed
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         replace_file(tmp_out, out_path)
     with open(os.path.splitext(out_path)[0] + ".json", "w", encoding="utf-8") as f:
