@@ -185,3 +185,16 @@ def test_forecast_in_clip_info_and_settings(win, tmp_path):
     assert "Оценок" in w.settings_page.model_state.text()
     w.settings_page.show_model(forecast.train(samples=_synthetic(60)))
     assert "смех" in w.settings_page.model_state.text()
+
+
+def test_training_uses_all_cuts(tmp_path):
+    """Оценки «Хороший» / «В корзину» из всех прошлых нарезок, а не только из последней."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    _project(a, [{"status": "good"}, {"status": "rejected"}], name="первая")
+    _project(b, [{"status": "good"}], name="вторая")
+    got = forecast.collect()
+    assert len(got) == 3 and len({s["project"] for s in got}) == 2
+    assert sorted(s["like"] for s in got) == [0, 1, 1]
