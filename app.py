@@ -64,7 +64,7 @@ DEFAULTS = {
     "views_days": 3, "check_updates": True, "skip_version": "", "seen_version": "",
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
-    "music_dir": "", "weekly_music": "",
+    "music_dir": "", "weekly_music": "", "bleep_rel_db": 0,
 }
 
 BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
@@ -1295,6 +1295,7 @@ class CutPage(QWidget):
         c["hashtags"] = s["hashtags"]
         c["platform_tags"] = dict(s["platform_tags"])
         c["bleep_sound"] = s["sound"]
+        c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
         c["llm"] = s["llm"]
@@ -3023,6 +3024,24 @@ class SettingsPage(QWidget):
         b.clicked.connect(self.open_sounds)
         snd.addWidget(b)
         v.addWidget(option_row("Звук на мат", snd))
+        brow = QHBoxLayout()
+        brow.setSpacing(8)
+        self.bleep_db = QSlider(Qt.Horizontal)
+        self.bleep_db.setRange(-12, 6)
+        self.bleep_db.setValue(int(self.s.get("bleep_rel_db", 0)))
+        self.bleep_db.setFixedWidth(180)
+        self.bleep_db_l = QLabel()
+        self.bleep_db_l.setFixedWidth(110)
+
+        def show_bleep_db(v):
+            self.bleep_db_l.setText("на уровне голоса" if v == 0 else f"{v:+d} дБ к голосу")
+            self._set("bleep_rel_db", int(v))
+        self.bleep_db.valueChanged.connect(show_bleep_db)
+        show_bleep_db(self.bleep_db.value())
+        brow.addWidget(self.bleep_db)
+        brow.addWidget(self.bleep_db_l)
+        v.addWidget(option_row("Громкость звука на мат", brow,
+                               "Подстраивается под голос рядом с матом"))
         v.addWidget(separator())
         self.cb_marks = self._toggle("marks")
         v.addWidget(option_row("Метки из OBS", self.cb_marks,

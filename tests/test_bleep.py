@@ -65,3 +65,27 @@ def test_bleep_spans_respect_neighbours():
     assert a1 >= 0.98 and b1 <= 1.42 and until1 <= 1.42   # не трогает «ну» и «вот»
     assert a2 == pytest.approx(2.94) and b2 == pytest.approx(3.36)
     assert until2 == 5.0                                  # дальше слов нет — до конца клипа
+
+
+@pytest.mark.parametrize("voice_vol", [0.05, 0.5])
+def test_bleep_matches_voice_loudness(tmp_path, voice_vol):
+    """Звук на мат — на уровне речи рядом (±2 дБ), и для тихого голоса, и для громкого."""
+    autoclip.prepare_sounds()
+    v = tmp_path / f"голос{voice_vol}.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=black:s=270x480:r=30:d=12",
+                    "-f", "lavfi", "-i", "anoisesrc=color=pink:sample_rate=48000:duration=12",
+                    "-af", f"bandpass=f=900:width_type=o:w=2,volume={voice_vol}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest", str(v)], check=True)
+    words = [{"s": 2.0 + i, "e": 2.8 + i, "w": w} for i, w in enumerate(["ну", "вот", "блять", "так", "да"])]
+    segs = [{"s": 2.0, "e": 7.0, "text": "", "words": words}]
+    out = str(tmp_path / "клип.mp4")
+    cfg = dict(autoclip.CONFIG, zoom=False, subs=False, nick=False, bleep=True, bleep_sound="бип",
+               bleep_pad=0.0, music=None)
+    work = tmp_path / "w"
+    work.mkdir()
+    assert autoclip.render_clip(str(v), {"s": 0.0, "e": 10.0, "zooms": [], "hook": None}, segs,
+                                autoclip.probe(str(v)), out, str(work), cfg) == 1
+    speech = autoclip.loudness(out, 2.0, 1.8)
+    beep = autoclip.loudness(out, 4.05, 0.7)
+    assert speech is not None and beep is not None
+    assert abs(beep - speech) <= 2.0, (beep, speech)

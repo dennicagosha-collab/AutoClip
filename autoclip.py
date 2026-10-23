@@ -105,7 +105,8 @@ CONFIG = {
     # звук поверх мата: перелистывание / буп / свист / тишина / бип —
     # или имя своего файла из папки «звуки» (mp3, wav, ogg...)
     "bleep_sound": "перелистывание",
-    "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче
+    "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче (если речь не измерить)
+    "bleep_rel_db": 0.0,      # громкость звука на мат относительно речи рядом, дБ (0 — на уровне голоса)
     "bleep_pad": 0.06,        # запас вокруг слова, сек
 
     # --- описание к клипу: хэштеги (всего не больше 5) ---
@@ -1975,6 +1976,20 @@ def check_music(mcfg):
     return dict(MUSIC_DEFAULT, **mcfg)
 
 
+def bleep_gains(src, s, hook, hd, bleeps, snd, cfg):
+    """Усиление звука на мат (дБ) для каждого места: под громкость речи рядом (окно ±1,5 с
+    в записи, LUFS) плюс поправка bleep_rel_db. Не измерить — фиксированная bleep_volume."""
+    fixed = 20 * math.log10(max(0.01, float(cfg.get("bleep_volume", 1.0))))
+    sl = loudness(snd)
+    out = []
+    for a, b, _ in bleeps:
+        t = hook[0] + a if hook and a < hd else s + a - hd    # где это место в записи
+        voice = loudness(src, max(0.0, t - 1.5), (b - a) + 3.0)
+        out.append(fixed if (sl is None or voice is None)
+                   else voice + float(cfg.get("bleep_rel_db", 0.0)) - sl)
+    return out
+
+
 def clip_words(segments, s, e):
     """Слова клипа со временем относительно его начала."""
     words = []
@@ -2089,15 +2104,15 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             sdur = sound_duration(snd)
             extra_in = ["-i", os.path.abspath(snd)]
             n = len(bleeps)
-            agraph += f";[{snd_in}:a]{fmt},volume={cfg['bleep_volume']},asplit={n}" + \
-                      "".join(f"[s{i}]" for i in range(n))
+            agraph += f";[{snd_in}:a]{fmt},asplit={n}" + "".join(f"[s{i}]" for i in range(n))
+            gains = bleep_gains(src, s, hook, hd, bleeps, snd, cfg)
             for i, (a, b, until) in enumerate(bleeps):
                 # звук не дольше, чем до следующего слова без мата
                 L = max(0.05, min(sdur, until - a))
                 fd = min(0.06, L / 3)
                 ms = int(a * 1000)
-                agraph += (f";[s{i}]atrim=0:{L:.3f},afade=t=out:st={L - fd:.3f}:d={fd:.3f},"
-                           f"adelay={ms}:all=1[d{i}]")
+                agraph += (f";[s{i}]atrim=0:{L:.3f},volume={gains[i]:.2f}dB,"
+                           f"afade=t=out:st={L - fd:.3f}:d={fd:.3f},adelay={ms}:all=1[d{i}]")
             agraph += ";[am]" + "".join(f"[d{i}]" for i in range(n)) + \
                       f"amix=inputs={n + 1}:duration=first:normalize=0[aout]"
         else:
@@ -2336,7 +2351,7 @@ RENDER_KEYS = ("subs", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_wo
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
                "sub_x", "sub_style",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
-               "bleep_sound", "bleep_volume", "bleep_pad", "preset", "hook",
+               "bleep_sound", "bleep_volume", "bleep_rel_db", "bleep_pad", "preset", "hook",
                "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity",
                "hashtags", "platform_tags")
 
