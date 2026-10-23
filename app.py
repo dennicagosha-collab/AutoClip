@@ -19,6 +19,7 @@ import autoclip  # noqa: E402
 import forecast  # noqa: E402
 import update  # noqa: E402
 import diag  # noqa: E402
+import telegram_bot  # noqa: E402
 
 from PySide6.QtCore import (  # noqa: E402
     QByteArray, QEventLoop, QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl,
@@ -211,6 +212,8 @@ class Bus(QObject):
     update_done = Signal(object, object)   # итог установки, текст ошибки или None
     report_done = Signal(object, object)   # путь к отчёту об ошибке, текст ошибки или None
     sub_layer = Signal(int, str)           # номер запроса, картинка субтитров для предпросмотра
+    tg_action = Signal(str, object)        # действие из Telegram: cut / no / views
+    tg_state = Signal(str)                 # что с подключением Telegram (текст для «Настроек»)
 
 
 class Stream:
@@ -388,6 +391,60 @@ class LivePreview(QWidget):
             if self.offset != (0.0, 0.0):
                 x, y, _ = self.center()
                 self.moved.emit((x + self.offset[0]) / self.W, (y + self.offset[1]) / self.H)
+
+
+class TelegramLink:
+    """Связь с ботом в фоне: забирает ответы (long polling) и отправляет уведомления.
+    Всё общение с Telegram — в этом потоке, по очереди, чтобы не мешать окну."""
+
+    def __init__(self, bus):
+        import queue
+        self.bus = bus
+        self.jobs = queue.Queue()
+        self.stop = threading.Event()
+        self._warned = False
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
+
+    def do(self, job):
+        """job(bot) — выполнить в потоке связи, если Telegram подключён."""
+        if telegram_bot.is_connected():
+            self.jobs.put(job)
+
+    def _log(self, text):
+        if not self._warned:                         # нет связи — в лог один раз
+            self._warned = True
+            try:
+                self.bus.log.emit(text)
+            except RuntimeError:
+                pass
+
+    def loop(self):
+        bot = None
+        while not self.stop.is_set():
+            st = telegram_bot.load_state()
+            if not (st.get("token") and st.get("chat_id")):
+                bot = None
+                self.stop.wait(2)
+                continue
+            if bot is None or (st["token"], st["chat_id"]) != (bot.st.get("token"), bot.st.get("chat_id")):
+                bot = telegram_bot.Bot(log=self._log)    # подключили заново — новый бот
+            while not self.jobs.empty():
+                job = self.jobs.get()
+                try:
+                    job(bot)
+                except Exception as e:
+                    self._log(f"⚠️  Telegram: {e} Работаю без него.")
+            actions = bot.poll(timeout=5)
+            if actions:
+                self._warned = False
+            for kind, arg in actions:
+                try:
+                    self.bus.tg_action.emit(kind, arg)
+                except RuntimeError:
+                    return
+            if bot._offline_logged:
+                self.stop.wait(10)                   # нет связи — не долбим Telegram
 
 
 def plural(n, one, few, many):
@@ -2993,6 +3050,42 @@ class SettingsPage(QWidget):
                                "программа замечает и сама"))
         lay.addWidget(box)
 
+        # --- Telegram ---
+        box, v = card("Telegram", "Уведомления в телефон: нарезка готова, новая запись в OBS "
+                                  "(«Нарезать» прямо оттуда), вопросы про просмотры. Работает, пока "
+                                  "AutoClip запущен, хотя бы в трее.")
+        v.addWidget(hint("1. В Telegram найди @BotFather, отправь ему /newbot и придумай имя боту.\n"
+                         "2. Он пришлёт токен — длинную строку с двоеточием. Вставь её сюда и нажми "
+                         "«Подключить».\n3. Открой своего бота и напиши ему /start."))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.tg_token = QLineEdit()
+        self.tg_token.setPlaceholderText("Токен бота от @BotFather")
+        self.tg_token.setEchoMode(QLineEdit.Password)
+        self.tg_token.setMinimumWidth(320)
+        row.addWidget(self.tg_token, 1)
+        self.tg_connect = QPushButton("Подключить")
+        self.tg_connect.setObjectName("primary")
+        self.tg_connect.clicked.connect(self.connect_telegram)
+        row.addWidget(self.tg_connect)
+        v.addLayout(row)
+        row = QHBoxLayout()
+        self.tg_status = QLabel("")
+        self.tg_status.setWordWrap(True)
+        row.addWidget(self.tg_status, 1)
+        self.tg_test = QPushButton("Проверить")
+        self.tg_test.setToolTip("Отправить боту тестовое сообщение")
+        self.tg_test.clicked.connect(self.test_telegram)
+        row.addWidget(self.tg_test)
+        self.tg_off = QPushButton("Отключить")
+        self.tg_off.setObjectName("ghost")
+        self.tg_off.clicked.connect(self.disconnect_telegram)
+        row.addWidget(self.tg_off)
+        v.addLayout(row)
+        lay.addWidget(box)
+        self.win.bus.tg_state.connect(self.show_telegram)
+        self.show_telegram()
+
         # --- отчёт об ошибке ---
         box, v = card("Отчёт об ошибке", "Что-то пошло не так — собери отчёт и отправь его. В нём "
                                          "логи, версии программ, настройки без ключей и токенов, "
@@ -3043,6 +3136,54 @@ class SettingsPage(QWidget):
     def _nick_opacity(self, v):
         self.nick_op_label.setText(f"{v}%")
         self._set("nick_opacity", int(v))
+
+    # --- Telegram ---
+    def show_telegram(self, text=None):
+        st = telegram_bot.load_state()
+        on = bool(st.get("token") and st.get("chat_id"))
+        self.tg_test.setEnabled(on)
+        self.tg_off.setEnabled(bool(st.get("token")))
+        self.tg_connect.setEnabled(True)
+        if text:
+            self.tg_status.setText(text)
+        elif on:
+            self.tg_status.setText(f"Подключён: @{st.get('bot', 'бот')}.")
+        else:
+            self.tg_status.setText("Не подключён.")
+
+    def connect_telegram(self):
+        token = self.tg_token.text().strip()
+        if not token:
+            self.show_telegram("Вставь токен от @BotFather.")
+            return
+        self.tg_connect.setEnabled(False)
+        self.tg_status.setText("Проверяю токен…")
+        bus = self.win.bus
+
+        def work():
+            try:
+                bot = telegram_bot.Bot(log=lambda m: None)
+                name = bot.set_token(token)
+                bus.tg_state.emit(f"Теперь открой @{name} в Telegram и напиши ему /start. Жду 2 минуты…")
+                if bot.wait_start(120):
+                    bus.tg_state.emit(f"Подключён: @{name}. Тестовое сообщение уже в Telegram.")
+                else:
+                    bus.tg_state.emit(f"Не дождался /start. Напиши @{name} /start и нажми «Подключить» ещё раз.")
+            except telegram_bot.TelegramError as e:
+                bus.tg_state.emit(str(e))
+            except RuntimeError:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+        self.tg_token.clear()                            # токен на экране не держим
+
+    def test_telegram(self):
+        self.tg_status.setText("Отправляю…")
+        self.win.telegram.do(lambda bot: (bot.test(), self.win.bus.tg_state.emit(
+            "Тестовое сообщение отправлено — проверь Telegram.")))
+
+    def disconnect_telegram(self):
+        telegram_bot.disconnect()
+        self.show_telegram("Отключён. Бот больше ничего не пришлёт.")
 
     # --- субтитры ---
     def fill_style_widgets(self):
@@ -3618,6 +3759,10 @@ class MainWindow(QMainWindow):
         self.watch_timer.timeout.connect(self.scan_obs)
         self.watch_changed()
 
+        # --- Telegram ---
+        self.telegram = TelegramLink(self.bus)
+        self.bus.tg_action.connect(self.telegram_action)
+
         # --- прогноз: обучиться на том, что есть, и спросить про просмотры ---
         self.bus.trained.connect(self.settings_page.show_model)
         self.retrain()
@@ -3649,7 +3794,14 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def ask_views(self):
-        qs = forecast.due_questions(int(self.settings.get("views_days", 3)))
+        days = int(self.settings.get("views_days", 3))
+        if telegram_bot.is_connected():                  # вопросы — в Telegram, по одному
+            def ask(bot):
+                bot.st["days"] = days
+                bot.ask_views(days)
+            self.telegram.do(ask)
+            return
+        qs = forecast.due_questions(days)
         if not qs or getattr(self, "_views_dialog", None):
             return
         dlg = ViewsDialog(self, qs)
@@ -3826,8 +3978,9 @@ class MainWindow(QMainWindow):
             self.offer(path, info)
 
     def offer(self, path, info):
-        """Уведомление Windows; сам вопрос — когда окно на экране (не поверх игры)."""
+        """Уведомление Windows и Telegram; вопрос в окне — когда оно на экране (не поверх игры)."""
         self._pending.append((path, info))
+        self.telegram.do(lambda bot: bot.notify_recording(path, info))
         text = (f"{os.path.basename(path)}, {autoclip.fmt_time(info['dur'])}, "
                 f"меток: {info['marks']}. Нарезать?")
         if self.tray:
@@ -3846,12 +3999,30 @@ class MainWindow(QMainWindow):
 
     def _answered(self, path, result):
         self._dialog = None
+        self.telegram.do(lambda bot: bot.drop_recording(path))     # кнопки в Telegram — не нужны
         if result == QDialog.Accepted:
             autoclip.set_recording_state(path, "cut")
             self.cut_recording(path)
         else:
             autoclip.set_recording_state(path, "declined")
         QTimer.singleShot(0, self.ask_pending)
+
+    def telegram_action(self, kind, arg):
+        """Ответ из Telegram: «Нарезать» / «Не надо» по новой записи или записанные просмотры."""
+        if kind in ("cut", "no"):
+            if self._dialog and getattr(self._dialog, "path", None) == arg:
+                self._dialog.blockSignals(True)
+                self._dialog.close()
+                self._dialog = None
+            self._pending = [(p, i) for p, i in self._pending if p != arg]
+            autoclip.set_recording_state(arg, "cut" if kind == "cut" else "declined")
+            if kind == "cut":
+                self.cut_recording(arg)
+        elif kind == "views":
+            self.retrain()
+            c = self.clips.current_clip() if self.clips.proj else None
+            if self.clips.proj:
+                self.clips.reload(c["id"] if c else None)
 
     def cut_recording(self, path):
         if self.busy:
@@ -3925,6 +4096,7 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.cut.finished(out)
         if out:
+            self.telegram.do(lambda bot: bot.notify_cut(out))
             self.clips.load(out)
             self.cut.write("Клипы — в разделе «Клипы».")
         if self._queue:
@@ -4002,6 +4174,7 @@ class MainWindow(QMainWindow):
         save_settings(self.settings)
         if self.tray:
             self.tray.hide()
+        self.telegram.stop.set()
         super().closeEvent(e)
         if getattr(self, "standalone", False):
             QApplication.quit()                      # окно закрыли по-настоящему — выходим

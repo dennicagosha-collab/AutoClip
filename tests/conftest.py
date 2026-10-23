@@ -27,6 +27,8 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(diag, "LOG_DIR", str(tmp_path / "logs"))   # и не пишут в настоящие логи
     monkeypatch.setattr(autoclip, "FONTS_DIR", str(tmp_path / "шрифты"))
     monkeypatch.setattr(autoclip, "STYLES_PATH", str(tmp_path / "стили.json"))
+    import telegram_bot
+    monkeypatch.setattr(telegram_bot, "STATE_PATH", str(tmp_path / "telegram.json"))   # не настоящий бот
 
 
 @pytest.fixture
