@@ -113,7 +113,7 @@ def test_description_tab(tmp_path, monkeypatch):
     st.tags.setText("#стрим")
     st.ptags["youtube"].setText("#shorts")
     page.load(path)
-    page.show_tab(1)
+    page.show_tab(2)
     page.set_desc_platform("youtube")
     assert page.desc.toPlainText() == "Мяч улетел в космос\n\n#shorts #стрим #bg3 #фейл"
     assert "4 из 5" in page.desc_tags.text() and not page.btn_desc_reset.isEnabled()

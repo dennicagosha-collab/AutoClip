@@ -399,8 +399,11 @@ class TelegramLink:
     """Связь с ботом в фоне: забирает ответы (long polling) и отправляет уведомления.
     Всё общение с Telegram — в этом потоке, по очереди, чтобы не мешать окну."""
 
+    alive = []                                        # все потоки связи (тесты гасят их после себя)
+
     def __init__(self, bus):
         import queue
+        TelegramLink.alive.append(self)
         self.bus = bus
         self.jobs = queue.Queue()
         self.stop = threading.Event()
@@ -1571,7 +1574,7 @@ class ClipsPage(QWidget):
         tabs = QHBoxLayout()
         tabs.setSpacing(6)
         self.ed_tabs = []
-        for i, name in enumerate(("Клип", "Описание", "Публикация", "Музыка")):
+        for i, name in enumerate(("Клип", "Текст", "Описание", "Публикация", "Музыка")):
             b = QPushButton(name)
             b.setObjectName("filter")
             b.setCheckable(True)
@@ -1816,6 +1819,7 @@ class ClipsPage(QWidget):
         self.ed_stack.addWidget(page)
 
         # --- музыка ---
+        self._build_text_tab()
         page = QWidget()
         ml = QVBoxLayout(page)
         ml.setContentsMargins(0, 0, 0, 0)
@@ -2205,6 +2209,77 @@ class ClipsPage(QWidget):
             self._segs_for = pp
         return self._segs
 
+    # ---------- текст: слова субтитров, мат, название ----------
+    def _build_text_tab(self):
+        from PySide6.QtWidgets import QTableWidget, QHeaderView
+        page = QWidget()
+        tl = QVBoxLayout(page)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(8)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Название"))
+        self.t_title = QLineEdit()
+        self.t_title.setPlaceholderText("Название клипа — оно же в имени файла после «Пересобрать»")
+        self.t_title.textEdited.connect(self._changed)
+        row.addWidget(self.t_title, 1)
+        tl.addLayout(row)
+        tl.addWidget(hint("Двойной клик по слову — исправить. Галочка «мат» — закрыть звуком; "
+                          "снять — если запикано зря. Пустое слово уберётся из субтитров."))
+        self.t_words = QTableWidget(0, 3)
+        self.t_words.setHorizontalHeaderLabels(["Время", "Слово", "Мат"])
+        self.t_words.verticalHeader().setVisible(False)
+        self.t_words.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.t_words.setMinimumHeight(150)
+        self.t_words.itemChanged.connect(self._word_changed)
+        tl.addWidget(self.t_words, 1)
+        # вкладки: Клип, Текст, Описание, Публикация, Музыка
+        self.ed_stack.insertWidget(1, page)
+        self.w_edit, self.m_words = {}, []
+
+    def fill_words(self, c):
+        from PySide6.QtWidgets import QTableWidgetItem
+        self._filling_words = True
+        self.t_words.setRowCount(0)
+        for w in autoclip.clip_words(self.segments() or [], c["start"], c["end"]):
+            src = round(c["start"] + w["s"], 2)
+            key = next((k for k in self.w_edit if abs(float(k) - src) < 0.06), None)
+            text = self.w_edit[key] if key is not None else w["w"]
+            auto = autoclip.is_profane(w["w"])
+            on = (auto and not any(abs(src - t) < 0.06 for t in self.b_rem)) or \
+                any(abs(src - t) < 0.06 for t in self.m_words)
+            r = self.t_words.rowCount()
+            self.t_words.insertRow(r)
+            ti = QTableWidgetItem(autoclip.fmt_time_exact(src))
+            ti.setFlags(Qt.ItemIsEnabled)
+            ti.setData(Qt.UserRole, (src, w["w"], auto))
+            self.t_words.setItem(r, 0, ti)
+            self.t_words.setItem(r, 1, QTableWidgetItem(text))
+            mi = QTableWidgetItem("")
+            mi.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            mi.setCheckState(Qt.Checked if on else Qt.Unchecked)
+            self.t_words.setItem(r, 2, mi)
+        self._filling_words = False
+
+    def _word_changed(self, item):
+        if getattr(self, "_filling_words", False):
+            return
+        src, orig, auto = self.t_words.item(item.row(), 0).data(Qt.UserRole)
+        if item.column() == 1:
+            text = item.text().strip()
+            self.w_edit = {k: v for k, v in self.w_edit.items() if abs(float(k) - src) >= 0.06}
+            if text != orig:
+                self.w_edit[f"{src:.2f}"] = text
+        elif item.column() == 2:
+            on = item.checkState() == Qt.Checked
+            self.b_rem = [t for t in self.b_rem if abs(t - src) >= 0.06]
+            self.m_words = [t for t in self.m_words if abs(t - src) >= 0.06]
+            if auto and not on:
+                self.b_rem.append(src)                  # «не мат» — снять писк
+            elif on and not auto:
+                self.m_words.append(src)                # «это мат» — фильтр пропустил
+            self.refresh_bleeps()
+        self._changed()
+
     # ---------- хук: ручная подстройка ----------
     def show_hook(self):
         h = self.hook_at
@@ -2552,6 +2627,9 @@ class ClipsPage(QWidget):
                      "music": (c.get("overrides") or {}).get("music"),
                      "bleep_add": list((c.get("overrides") or {}).get("bleep_add") or []),
                      "hook_at": (c.get("overrides") or {}).get("hook_at"),
+                     "words_edit": dict((c.get("overrides") or {}).get("words_edit") or {}),
+                     "mat_words": list((c.get("overrides") or {}).get("mat_words") or []),
+                     "title": (c.get("overrides") or {}).get("title") or c["title"],
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
@@ -2591,6 +2669,10 @@ class ClipsPage(QWidget):
         self.base["hook_at"] = list(self.hook_at) if self.hook_at else None   # показанный — не правка
         self.show_hook()
         self.b_rem = list(self.base["bleep_remove"])
+        self.w_edit = dict(self.base["words_edit"])
+        self.m_words = list(self.base["mat_words"])
+        self.t_title.setText(self.base["title"])
+        self.fill_words(c)
         self.refresh_bleeps()
         self.fill_tracks()
         self.show_music()
@@ -2617,6 +2699,9 @@ class ClipsPage(QWidget):
                 "music": dict(self.music) if self.music else None,
                 "bleep_add": [list(x) for x in self.b_add],
                 "hook_at": list(self.hook_at) if self.hook_at else None,
+                "words_edit": dict(self.w_edit),
+                "mat_words": list(self.m_words),
+                "title": self.t_title.text().strip() or (self.base or {}).get("title", ""),
                 "bleep_remove": list(self.b_rem),
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
@@ -2790,7 +2875,7 @@ class ClipsPage(QWidget):
             return
         self.base = {}
         self.reload(c["id"])
-        self.show_tab(2)
+        self.show_tab(3)                          # «Публикация»
 
     def save_link(self, platform):
         c = self.current_clip()
@@ -2810,7 +2895,8 @@ class ClipsPage(QWidget):
         if now["end"] - now["start"] < 3:
             QMessageBox.warning(self, "AutoClip", "Клип получается короче 3 секунд.")
             return
-        overrides = {k: v for k, v in p.items() if k in autoclip.OVERRIDE_KEYS}
+        overrides = {k: (v if v not in ({}, [], "") else None) for k, v in p.items()
+                     if k in autoclip.OVERRIDE_KEYS}
         if "style" in p:                              # свой стиль — все его значения клипу
             st = autoclip.get_style(p["style"]) if p["style"] else None
             overrides.update({k: (st[k] if st else None) for k in autoclip.STYLE_KEYS})

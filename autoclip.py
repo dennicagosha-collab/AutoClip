@@ -2229,6 +2229,26 @@ def is_mat_word(w):
     return bool(w.get("mat")) or is_profane(w["w"])
 
 
+def apply_word_edits(words, cfg):
+    """Правки текста клипа: words_edit — {время слова в записи: новый текст} (пусто — убрать
+    из субтитров), mat_words — времена слов, которые фильтр пропустил, а это мат."""
+    edits = {round(float(k), 2): v for k, v in (cfg.get("words_edit") or {}).items()}
+    mats = [float(t) for t in cfg.get("mat_words") or []]
+    out = []
+    for w in words:
+        src = w.get("src")
+        if src is not None and w["w"]:
+            key = next((k for k in edits if abs(k - src) < 0.06), None)
+            if key is not None:
+                w = dict(w, w=str(edits[key]).strip())
+                if not w["w"]:
+                    continue
+            if any(abs(t - src) < 0.06 for t in mats):
+                w = dict(w, mat=True)
+        out.append(w)
+    return out
+
+
 def mark_manual_bleeps(words, cfg, s, e, hook, hd):
     """Ручные правки писка у клипа (время — в записи, чтобы пережить сдвиг границ):
     bleep_remove — начала слов, где писк снять; bleep_add — [начало, конец] куска, где запикать
@@ -2297,6 +2317,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     words += [dict(w, s=w["s"] + hd, e=w["e"] + hd, part=1, src=s + w["s"])
               for w in clip_words(segments, s, e)]
     words = mark_manual_bleeps(words, cfg, s, e, hook, hd)
+    words = apply_word_edits(words, cfg)
     zooms = [z - s + hd for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
     if hook:
         zooms = [0.12] + zooms                      # хук — сразу крупно
@@ -2598,7 +2619,8 @@ PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
-                 "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at") + STYLE_KEYS
+                 "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
+                 "words_edit", "mat_words", "title") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
@@ -3171,7 +3193,12 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         clip["hook"] = dict(clip.get("hook") or {}, start=round(float(at[0]), 2),
                             end=round(float(at[1]), 2), auto=True, why="выбран вручную")
     span = hook_span(dict(clip, start=s, end=e), cfg)
-    out = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    folder = os.path.dirname(proj["_path"])
+    old_file = clip["file"]
+    title = str(clip.get("overrides", {}).get("title") or "").strip()
+    if title and title != clip["title"]:
+        clip["file"] = f"{clip['num']:02d}_{safe_name(title)}.mp4"      # новое название — новое имя
+    out = os.path.join(folder, clip["file"])
     log(f"🔁 Пересобираю {clip['file']} ({fmt_time(s)}–{fmt_time(e)})")
     if progress:
         progress("рендер", 0, clip["file"])
@@ -3183,6 +3210,18 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
                 quiet_start=quiet_start(out))
+    if clip["file"] != old_file:                       # переименовали: прежний файл и обложку — в корзину
+        try:
+            trash(os.path.join(folder, old_file))
+        except AutoClipError:
+            trash(out)                                 # прежний занят — новый убираем, клип цел
+            raise AutoClipError(f"❌ Файл {old_file} занят другой программой — закрой его там и "
+                                "пересобери ещё раз. Клип не тронут.")
+        trash(cover_path_for(folder, old_file))
+    if title:
+        clip["title"] = title
+        if clip.get("meta"):
+            clip["meta"]["title"] = title
     clip["cover"] = make_cover(src, proj["source_info"], clip, proj.get("reaction") or [],
                                cover_path_for(os.path.dirname(proj["_path"]), clip["file"]),
                                cfg, cancel)

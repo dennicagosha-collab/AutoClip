@@ -280,3 +280,59 @@ def test_trash_waits_for_locked_file(tmp_path, fake_trash):
         with pytest.raises(autoclip.AutoClipError):
             autoclip.trash(str(g), wait=0.5)             # так и не отпустили — понятная ошибка
     assert g.exists()                                    # и файл не пропал
+
+
+# ---------- 3.11, 3.13 ----------
+
+def test_three_rebuilds_keep_one_file(cut, fake_trash):
+    c = autoclip.load_project(cut)["clips"][0]
+    for _ in range(3):
+        autoclip.rebuild_clip(cut, c["id"])
+    mp4 = [f for f in os.listdir(cut) if f.endswith(".mp4")]
+    assert mp4.count(c["file"]) == 1 and len([f for f in mp4 if f.startswith(c["file"][:3])]) == 1
+    old = [f for f in os.listdir(fake_trash) if f.endswith(c["file"])]
+    assert len(old) == 3                                             # прежние версии — в корзине
+
+
+def test_title_edit_renames_file(cut, fake_trash):
+    c = autoclip.load_project(cut)["clips"][0]
+    new = autoclip.rebuild_clip(cut, c["id"], overrides={"title": "Мой новый заголовок"})
+    assert new["title"] == "Мой новый заголовок" and new["file"].startswith(f"{c['num']:02d}_Мой_новый")
+    files = os.listdir(cut)
+    assert new["file"] in files and c["file"] not in files            # один файл на клип
+    assert any(f.endswith(c["file"]) for f in os.listdir(fake_trash))
+    again = autoclip.rebuild_clip(cut, c["id"])                       # название помнится
+    assert again["file"] == new["file"] and again["title"] == "Мой новый заголовок"
+
+
+def test_word_edits_and_mat_flags(tmp_path):
+    words = [{"s": 0.5, "e": 0.9, "w": "на", "src": 10.5}, {"s": 1.0, "e": 1.4, "w": "бывает", "src": 11.0},
+             {"s": 2.0, "e": 2.4, "w": "ёпта", "src": 12.0}, {"s": 3.0, "e": 3.4, "w": "э", "src": 13.0}]
+    cfg = {"words_edit": {"10.5": "ну", "13.0": ""}, "mat_words": [12.0]}
+    got = autoclip.apply_word_edits(words, cfg)
+    assert [w["w"] for w in got] == ["ну", "бывает", "ёпта"]           # «на» → «ну», «э» убрано
+    assert got[2].get("mat") and autoclip.is_mat_word(got[2])          # «это мат»
+
+
+def test_text_tab_edits_survive_rebuild(win, cut, monkeypatch):
+    import app as A
+    from qtwait import pump
+    page = win.clips
+    page.load(cut)
+    c = page.current_clip()
+    assert page.t_words.rowCount() > 0 and page.t_title.text() == c["title"] and not page.pending()
+    page.t_words.item(0, 1).setText("исправил")                       # ошибка распознавания
+    page.t_words.item(1, 2).setCheckState(A.Qt.Checked)               # «это мат»
+    page.t_title.setText("Новое имя")
+    page.t_title.textEdited.emit("Новое имя")
+    assert {"words_edit", "mat_words", "title"} <= set(page.pending())
+    page.rebuild()
+    for _ in range(1200):
+        if not page.busy:
+            break
+        pump(50)
+    c2 = autoclip.find_clip(autoclip.load_project(cut), c["id"])
+    assert c2["title"] == "Новое имя" and "Новое_имя" in c2["file"]
+    assert list(c2["overrides"]["words_edit"].values()) == ["исправил"] and len(c2["overrides"]["mat_words"]) == 1
+    assert page.t_words.item(0, 1).text() == "исправил" and not page.pending()
+    assert c2["bleeps"] >= 1                                           # «это мат» — запикано

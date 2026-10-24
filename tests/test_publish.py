@@ -97,7 +97,7 @@ def test_publish_tab_and_drag(tmp_path, monkeypatch):
     win.settings["platform_tags"] = {"tiktok": "", "youtube": "#shorts", "instagram": "#reels"}
     page = win.clips
     page.load(path)
-    page.show_tab(2)
+    page.show_tab(3)
 
     # перетаскивание: в «посылке» — сам файл клипа
     md = page.list.mimeData([page.list.item(0)])

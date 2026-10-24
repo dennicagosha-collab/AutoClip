@@ -57,3 +57,14 @@ def no_modal_questions(monkeypatch):
     def fail(self, *a, **k):
         raise AssertionError(f"неожиданный вопрос в окне: {self.text()}")
     monkeypatch.setattr(QMessageBox, "exec", fail)
+
+
+@pytest.fixture(autouse=True)
+def stop_telegram_threads():
+    """Поток связи с Telegram от окна прошлого теста не должен читать данные следующего."""
+    yield
+    app = sys.modules.get("app")
+    for link in getattr(getattr(app, "TelegramLink", None), "alive", []):
+        link.stop.set()
+    if app is not None:
+        app.TelegramLink.alive.clear()
