@@ -235,6 +235,7 @@ def test_clip_style_override(win, tmp_path, fake_trash):
         for t in range(0, 40, 4)]
     with open(tmp_path / "чёрное.transcript.json", "w", encoding="utf-8") as f:
         json.dump(segs, f, ensure_ascii=False)
+    autoclip.CONFIG.update(max_silence_share=1.0)          # синтетика — фразы с паузами, это не тишина
     autoclip.CONFIG.update(llm="none", clips=1, hook=False, clips_mode="count", build_mode="full")
     autoclip.CONFIG["min_len"] = 10.0
     cut = autoclip.process(str(video))

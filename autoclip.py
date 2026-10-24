@@ -57,6 +57,15 @@ CONFIG = {
     "pre": 14.0,              # сколько секунд взять ДО пика
     "post": 7.0,              # сколько секунд взять ПОСЛЕ пика
     "min_gap": 8.0,           # мин. зазор между клипами, сек
+    # границы клипа — по речи, а не по ответу модели (её границы — только подсказка)
+    "tail_after": 8.0,        # конец — не дальше стольких секунд после пика…
+    "tail_max": 15.0,         # …если договаривает без пауз — до конца фразы, но не дальше этого
+    "talk_gap": 1.5,          # пауза короче этой — речь ещё продолжается
+    "lead_before": 1.5,       # начало — не раньше стольких секунд до первой речи (кроме громкой реакции)
+    "max_silence": 6.0,       # пауза без речи длиннее — клип обрезается по неё со стороны без пика
+    "soft_silence": 3.0,      # пауза длиннее — тоже обрезается со стороны без пика, если клип не короче min_tight
+    "min_tight": 8.0,         # после обрезки клип не короче этого, иначе — в кандидаты
+    "max_silence_share": 0.45,  # тишины (паузы >1 с) в клипе больше этой доли — в кандидаты
 
     # --- Whisper ---
     "whisper_model": "large-v3",   # large-v3 / medium / small
@@ -635,6 +644,14 @@ def unnatural(w):
     return (w["e"] - w["s"]) > max(2.0, 0.3 * letters + 1.2)
 
 
+def _voiced_share(words, regions):
+    """Какая доля длины слов приходится на голос по Silero."""
+    total = sum(w["e"] - w["s"] for w in words) or 1.0
+    voiced = sum(max(0.0, min(w["e"], b) - max(w["s"], a)) for w in words for a, b in regions
+                 if a < w["e"] and b > w["s"])
+    return voiced / total
+
+
 def drop_hallucinations(segments, regions=None):
     """Убирает то, что Whisper выдумал, а не услышал: известные фразы-«титры», слова
     неестественной длины и (если известно, где голос) куски, где голоса нет вовсе.
@@ -651,6 +668,10 @@ def drop_hallucinations(segments, regions=None):
             j = max(0, bisect.bisect_right(starts, seg["s"]) - 1)
             if not any(a < seg["e"] and b > seg["s"] for a, b in regions[j:j + 50] if a < seg["e"]):
                 continue                                  # голоса нет — Whisper выдумал
+        if seg["s"] < START_SILENT and words and (
+                (len(words) < 3 and all(w["e"] - w["s"] > 1.0 for w in words))
+                or (regions and _voiced_share(words, regions) < 0.5)):
+            continue                                      # «слова» в начале записи без голоса — шум
         good = [w for w in words if not unnatural(w)]
         if words and len(good) < len(words):
             if len(good) < 2 or len(good) < len(words) / 2:
@@ -771,7 +792,6 @@ def _refine_segments(segments, audio):
     """Уточнить время слов по звуку — по всем словам сразу, чтобы слово не заехало на
     первое слово следующего куска Whisper."""
     regions = speech_regions(audio)
-    segments = drop_hallucinations(segments, regions)
     flat = [(k, j, w) for k, sg in enumerate(segments) for j, w in enumerate(sg["words"])]
     order = sorted(range(len(flat)), key=lambda n: flat[n][2]["s"])
     refined = refine_words([dict(flat[n][2], _n=n) for n in order], regions)
@@ -782,7 +802,7 @@ def _refine_segments(segments, audio):
     for sg in segments:
         if sg["words"]:
             sg["s"], sg["e"] = min(w["s"] for w in sg["words"]), max(w["e"] for w in sg["words"])
-    return segments
+    return drop_hallucinations(segments, regions)     # уже по уточнённому времени
 
 
 def cache_paths(video):
@@ -1423,8 +1443,9 @@ def split_clips(found, cfg=None):
     «Число»: первые clips по оценке. «Авто»: все с оценкой не ниже порога, не больше потолка."""
     cfg = cfg or CONFIG
     found = sorted(found, key=lambda c: -c["score"])
-    marked = [c for c in found if c.get("marks")]
-    rest = [c for c in found if not c.get("marks")]
+    marked = [c for c in found if c.get("marks") and not c.get("short")]
+    rest = [c for c in found if not c.get("marks") and not c.get("short")]
+    shorts = [c for c in found if c.get("short")]
     if cfg.get("clips_mode") == "auto":
         room = max(0, int(cfg["auto_max"]) - len(marked))
         good = [c for c in rest if c["score"] >= float(cfg["auto_min_score"])][:room]
@@ -1432,7 +1453,7 @@ def split_clips(found, cfg=None):
         good = rest[:max(0, int(cfg["clips"]) - len(marked))]
     ids = {id(c) for c in good}
     clips = sorted(marked + good, key=lambda c: -c["score"])
-    cands = [c for c in rest if id(c) not in ids][:int(cfg.get("max_candidates", 20))]
+    cands = ([c for c in rest if id(c) not in ids] + shorts)[:int(cfg.get("max_candidates", 20))]
     return clips, cands
 
 
@@ -1473,6 +1494,93 @@ def build_candidate(path, ref, progress=None, cancel=None):
     proj["candidates"] = [k for k in proj.get("candidates", []) if k["id"] != ref]
     save_project(proj)
     return rec
+
+
+def silence_share(s, e, words):
+    """Доля клипа в паузах без речи длиннее 1 с."""
+    ws = [w for w in words if w["e"] > s and w["s"] < e]
+    if not ws or e <= s:
+        return 1.0
+    edges = [s] + [x for w in ws for x in (w["s"], w["e"])] + [e]
+    gaps = [edges[i + 1] - edges[i] for i in range(0, len(edges) - 1, 2)]
+    return sum(g for g in gaps if g > 1.0) / (e - s)
+
+
+def tighten_clip(peak, s, e, words, parts=None, cfg=None, voice=None):
+    """Границы клипа по речи (поверх того, что предложила модель и shape_clip):
+    конец — до tail_after после пика (или до конца непрерывной фразы, не дальше tail_max);
+    начало — не раньше lead_before до первой речи (кроме громкой реакции до неё); пауза без
+    речи длиннее max_silence — обрезаем по неё со стороны без пика. Слова не режем."""
+    cfg = cfg or CONFIG
+    ws = sorted((w for w in words if w["e"] > s and w["s"] < e), key=lambda w: w["s"])
+    if not ws:
+        return s, min(e, peak + cfg["tail_after"])
+    allw = sorted(words, key=lambda w: w["s"])
+    nxt_of = {id(w): (allw[i + 1] if i + 1 < len(allw) else None) for i, w in enumerate(allw)}
+    prv_of = {id(w): (allw[i - 1] if i else None) for i, w in enumerate(allw)}
+    # пауза без речи длиннее max_silence — отрезаем ту сторону, где нет пика
+    for a, b in zip(ws, ws[1:]):
+        if b["s"] - a["e"] > cfg["max_silence"]:
+            if b["s"] <= peak:
+                s = max(s, pad_before(b, a))
+            elif a["e"] >= peak:
+                e = min(e, pad_after(a, b))
+                break
+    ws = [w for w in ws if w["s"] >= s - 0.01 and w["e"] <= e + 0.01] or ws
+    # конец: до tail_after после пика; договаривает без пауз — до конца фразы, но не дальше tail_max
+    limit = peak + cfg["tail_after"]
+    if e > limit:
+        before = [w for w in ws if w["s"] < limit]
+        if before:
+            last = before[-1]
+            k = ws.index(last)
+            while k + 1 < len(ws) and ws[k + 1]["s"] - ws[k]["e"] <= cfg["talk_gap"] \
+                    and ws[k + 1]["e"] <= peak + cfg["tail_max"]:
+                k += 1
+            e = min(e, pad_after(ws[k], nxt_of.get(id(ws[k]))))
+        else:
+            e = min(e, limit)
+    # начало: не раньше lead_before до первой речи, кроме громкой реакции до неё
+    first = next((w for w in ws if w["e"] > s), None)
+    if first is not None and first["s"] - s > cfg["lead_before"]:
+        start = first["s"] - cfg["lead_before"]
+        loud = None
+        if parts:
+            react = [i for i in range(int(math.ceil(s)), int(first["s"]))
+                     if parts.get("смех") is not None and i < len(parts["смех"])
+                     and (parts["смех"][i] > 0.3 or parts["восклицания"][i] > 0.3)]
+            loud = react[0] if react else None
+        start = min(start, loud - 0.3) if loud is not None else start
+        s = max(s, start, prv_of.get(id(first))["e"] if prv_of.get(id(first)) else 0.0)
+    # паузы покороче (soft_silence) со стороны без пика — тоже долой, если клип не станет
+    # короче min_tight: тишина в клипе зрителю не нужна
+    ws = [w for w in ws if w["e"] > s and w["s"] < e]
+    for a, b in zip(ws, ws[1:]):
+        if b["s"] - a["e"] > cfg["soft_silence"] and b["s"] <= peak:
+            ns = pad_before(b, a)
+            if e - ns >= cfg["min_tight"]:
+                s = max(s, ns)
+    for a, b in reversed(list(zip(ws, ws[1:]))):
+        if b["s"] - a["e"] > cfg["soft_silence"] and a["e"] >= peak:
+            ne = pad_after(a, b)
+            if ne - s >= cfg["min_tight"]:
+                e = min(e, ne)
+    # край попал внутрь голоса (Silero слышит речь, которую Whisper не записал словами) —
+    # конец сдвигаем за голос, начало — перед ним
+    for a, b in voice or ():
+        if a + 0.05 < e < b - 0.05 and b <= peak + cfg["tail_max"]:
+            nxt = next((w for w in allw if w["s"] >= e), None)
+            e = min(b + 0.25, nxt["s"] - 0.05) if nxt and nxt["s"] > b else b + 0.25
+        if a + 0.05 < s < b - 0.05 and a >= s - cfg["lead_before"] - 3:
+            s = max(0.0, a - PAD_BEFORE)
+    # край попал внутрь слова (у Whisper слова бывают растянуты) — слово не режем никогда
+    w = next((w for w in allw if w["s"] + 0.01 < e < w["e"] - 0.01), None)
+    if w is not None:
+        e = pad_after(w, nxt_of.get(id(w)))
+    w = next((w for w in allw if w["s"] + 0.01 < s < w["e"] - 0.01), None)
+    if w is not None:
+        s = pad_before(w, prv_of.get(id(w)))
+    return round(s, 2), round(e, 2)
 
 
 def shape_clip(peak, s, e, words, dur):
@@ -1535,7 +1643,7 @@ START_SILENT = 30.0   # клип без единого слова в первы�
 
 
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=(),
-               limit=None):
+               limit=None, voice=None):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
     marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо.
     limit — сколько моментов искать (по умолчанию CONFIG["clips"])."""
@@ -1574,6 +1682,17 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
         s, e = shape_clip(peak, s, e, words, dur)
         if e - s < min_len * 0.8:
             continue
+        s0, e0 = s, e
+        s, e = tighten_clip(peak, s, e, words, parts, voice=voice)
+        short = e - s < CONFIG["min_tight"]          # совсем коротко — только кандидатом
+        # больше половины — тишина (пик — звук игры, а не реакция): тоже только кандидатом
+        short = short or silence_share(s, e, words) > CONFIG["max_silence_share"]
+        if short and mark is not None:
+            # метку Гоша поставил сам — клип остаётся, дотягиваем до min_tight в исходных границах
+            e = min(e0, max(e, s + CONFIG["min_tight"], peak + 2))
+            s = max(s0, min(s, e - CONFIG["min_tight"]))
+            s, e = _not_inside_word(s, words, s0, e0), _not_inside_word(e, words, s0, e0)
+            short = False
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
         if mark is None and s < START_SILENT and not any(
@@ -1592,7 +1711,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
             score += CONFIG["mark_bonus"]
         clips.append({"s": round(s, 2), "e": round(e, 2), "peak": peak,
                       "score": score, "zooms": sorted(zooms), "parts": clip_parts,
-                      "title": title, "reason": reason,
+                      "title": title, "reason": reason, "short": short,
                       "marks": [mark["t"]] if mark is not None else []})
     return sorted(clips, key=lambda c: -c["score"])
 
@@ -3196,7 +3315,9 @@ def moment_at(proj, t, segments):
     до места — pre секунд, после — post, длина 15–55 с, границы по фразам."""
     dur = proj["source_info"]["dur"]
     t = max(0.0, min(float(t), dur))
-    s, e = shape_clip(t, t - CONFIG["pre"], t + CONFIG["post"], all_words(segments), dur)
+    words = all_words(segments)
+    s, e = shape_clip(t, t - CONFIG["pre"], t + CONFIG["post"], words, dur)
+    s, e = tighten_clip(t, s, e, words)
     loud_z = proj.get("loud_z") or []
     reaction = proj.get("reaction") or []
     inside = [i for i in range(int(s), min(len(reaction), int(e)))]
@@ -3887,6 +4008,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         prog("звук", 0, "достаю звук")
         extract_audio(video, wav, cancel)
         loud = loudness_per_second(wav)
+        voice = speech_regions(_read_wav(wav))      # где слышен голос — края клипов не режут его
         prog("звук", 100)
         t = mark("звук и громкость", t)
         prog("расшифровка", 0)
@@ -3931,7 +4053,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     smooth, loud_z, parts = score_timeline(loud, speaker_segments(segments, "me"), moments)
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
-    found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks,
+    found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks, voice=voice,
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
     clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))

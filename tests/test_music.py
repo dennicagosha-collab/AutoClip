@@ -141,6 +141,7 @@ def test_music_tab(tmp_path, fake_trash, monkeypatch):
         {"s": t + i * 0.6, "e": t + i * 0.6 + 0.5, "w": x} for i, x in enumerate(["ну", "вот", "смотри"])]}
         for t in range(0, 40, 4)]
     json.dump(segs, open(tmp_path / "запись.transcript.json", "w", encoding="utf-8"), ensure_ascii=False)
+    autoclip.CONFIG.update(max_silence_share=1.0)          # синтетика — фразы с паузами, это не тишина
     autoclip.CONFIG.update(llm="none", clips=1, hook=False, clips_mode="count", min_len=10.0)
     cut = autoclip.process(video)
     mdir = tmp_path / "Музыка"

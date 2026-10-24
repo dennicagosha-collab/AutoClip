@@ -79,6 +79,7 @@ def test_horizontal_30fps_record_becomes_tiktok_clip(tmp_path, fake_trash, monke
                               {"s": 20.8, "e": 21.4, "w": "смотри"}]}], f, ensure_ascii=False)
     logs = []
     monkeypatch.setattr(autoclip, "log", logs.append)
+    autoclip.CONFIG.update(max_silence_share=1.0)          # синтетика — фразы с паузами, это не тишина
     autoclip.CONFIG.update(llm="none", clips=1)
 
     out_dir = autoclip.process(str(video))

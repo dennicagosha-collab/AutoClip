@@ -85,7 +85,7 @@ def test_process_uses_llm_title_and_tags(tmp_path, monkeypatch, fake_trash):
         return '{"moments": []}'
     monkeypatch.setattr(autoclip, "pick_llm", lambda m: "ollama")
     monkeypatch.setattr(autoclip, "_ask_llm", fake_llm)
-    autoclip.CONFIG.update(clips=1, hashtags="#стрим")
+    autoclip.CONFIG.update(clips=1, hashtags="#стрим", max_silence_share=1.0)   # синтетика с паузами
     out = autoclip.process(str(v))
     c = autoclip.load_project(out)["clips"][0]
     assert c["meta"] == {"title": "Смотри сюда", "tags": ["#bg3", "#ор"]}

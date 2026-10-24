@@ -71,6 +71,7 @@ def _video(tmp_path, dur=40):
 
 
 def test_cover_made_rebuilt_and_trashed(tmp_path, fake_trash):
+    autoclip.CONFIG.update(max_silence_share=1.0)          # синтетика — фразы с паузами, это не тишина
     autoclip.CONFIG.update(llm="none", clips=1, hook=False)
     out = autoclip.process(str(_video(tmp_path)))
     proj = autoclip.load_project(out)
