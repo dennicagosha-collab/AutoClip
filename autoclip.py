@@ -51,7 +51,7 @@ CONFIG = {
     "auto_min_score": 2.5,    # порог «Авто» с языковой моделью: на 25-мин записи 11 клипов
     "auto_min_score_plain": 1.7,   # он же без модели (оценки ниже): на той же записи 9 клипов
     "auto_max": 30,           # потолок «Авто»
-    "max_candidates": 20,     # сколько моментов сверх отобранных показать кандидатами
+    "max_candidates": 30,     # сколько моментов сверх отобранных показать кандидатами
     "min_len": 15.0,          # мин. длина клипа, сек
     "max_len": 55.0,          # макс. длина клипа, сек
     "pre": 14.0,              # сколько секунд взять ДО пика
@@ -893,6 +893,82 @@ def _refine_segments(segments, audio):
     return drop_hallucinations(segments, regions)     # уже по уточнённому времени
 
 
+HOLE_MIN = 0.8        # голос (Silero) без слов дольше этого — Whisper, похоже, пропустил фразу
+HOLE_PAD = 1.5        # кусок для повторного распознавания — с запасом с каждой стороны
+
+
+def voice_holes(segments, regions, spk=None):
+    """Где Silero слышит голос, а слов нет: [(начало, конец)] — места, которые Whisper пропустил."""
+    words = sorted((w["s"], w["e"]) for sg in segments for w in sg.get("words", [])
+                   if spk is None or w.get("spk", "me") == spk)
+    import bisect
+    starts = [a for a, _ in words]
+    holes = []
+    for a, b in regions or ():
+        if b - a < HOLE_MIN:
+            continue
+        j = max(0, bisect.bisect_left(starts, a - 30))
+        near = sorted((max(a, x - 0.2), min(b, y + 0.2)) for x, y in words[j:j + 200]
+                      if x < b + 0.2 and y > a - 0.2)
+        # непокрытые словами куски голоса (голос часто тянется и на соседнюю фразу)
+        t = a
+        for x, y in near + [(b, b)]:
+            if x - t >= HOLE_MIN:
+                if holes and t - holes[-1][1] < 1.0:
+                    holes[-1] = (holes[-1][0], x)
+                else:
+                    holes.append((t, x))
+            t = max(t, y)
+    return holes
+
+
+def fill_holes(model, audio, segments, spk="me", regions=None, cancel=None):
+    """Перераспознать короткими кусками места, где голос есть, а слов нет (в длинной записи
+    Whisper иногда пропускает фразу целиком — на 24.10 так пропал вопрос «Инфернус, у тебя
+    дочь родилась?»). Новые слова проходят ту же проверку на выдумки. → (сегменты, сколько слов)."""
+    regions = speech_regions(audio) if regions is None else regions
+    holes = voice_holes(segments, regions, spk)
+    have = sorted((w["s"], w["e"]) for sg in segments for w in sg.get("words", []))
+    new = []
+    for a, b in holes:
+        check_cancel(cancel)
+        lo, hi = max(0.0, a - HOLE_PAD), b + HOLE_PAD
+        part = audio[int(lo * 16000):int(hi * 16000)]
+        if len(part) < 1600:
+            continue
+        try:
+            got, _ = model.transcribe(part, language=CONFIG["language"], word_timestamps=True,
+                                      vad_filter=True, beam_size=5, condition_on_previous_text=False)
+            got = list(got)
+        except Exception:
+            continue
+        words = []
+        for sg in got:
+            for w in sg.words or []:
+                t0, t1 = round(lo + w.start, 2), round(lo + w.end, 2)
+                mid = (t0 + t1) / 2
+                if not w.word.strip() or not (a - 0.3 <= mid <= b + 0.3):
+                    continue
+                if any(x < t1 - 0.05 and y > t0 + 0.05 for x, y in have):
+                    continue                              # тут уже есть слово — не дублируем
+                words.append({"s": t0, "e": t1, "w": w.word.strip(), "spk": spk})
+        if words:
+            new.append({"s": words[0]["s"], "e": words[-1]["e"], "spk": spk, "refilled": True,
+                        "text": " ".join(w["w"] for w in words), "words": words})
+    new = drop_hallucinations(new, regions)
+    n = sum(len(sg["words"]) for sg in new)
+    return sorted(segments + new, key=lambda sg: sg["s"]), n
+
+
+def _cache_filled(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return isinstance(data, dict) and bool(data.get("filled"))
+    except (OSError, ValueError):
+        return False
+
+
 def cache_paths(video):
     stem = os.path.splitext(os.path.abspath(video))[0]
     return stem + ".transcript.v2.json", stem + ".transcript.json"
@@ -905,9 +981,10 @@ def read_transcript(path):
     return data["segments"] if isinstance(data, dict) else data
 
 
-def _save_transcript(path, segments, how):
+def _save_transcript(path, segments, how, filled=False):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"version": ASR_VERSION, "how": how, "segments": segments}, f, ensure_ascii=False)
+        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled},
+                  f, ensure_ascii=False)
 
 
 def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
@@ -916,7 +993,7 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     из неё берутся, но время уточняется по звуку. fresh — расшифровать заново.
     Дорожки 2 и 3 (микрофон и Discord) — отдельно; у слова spk: me / team."""
     new_cache, old_cache = cache_paths(video)
-    if not fresh and os.path.exists(new_cache):
+    if not fresh and os.path.exists(new_cache) and _cache_filled(new_cache):
         log("📝 Расшифровка уже есть, беру из кэша.")
         return read_transcript(new_cache), new_cache
     tracks = audio_tracks(video)
@@ -926,6 +1003,11 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     audios = {}
     for track, spk, _ in plan:
         audios[spk] = _read_wav(asr_audio(video, track, os.path.join(tmp, f"asr_{spk}.wav"), cancel))
+    if not fresh and os.path.exists(new_cache):
+        # расшифровка есть, но пропущенные фразы ещё не искали (до 1.4.0) — дослушать один раз
+        segments = _fill_all(read_transcript(new_cache), plan, audios, cancel)
+        _save_transcript(new_cache, segments, "whisper + дослушаны пропуски", filled=True)
+        return segments, new_cache
     if not fresh and os.path.exists(old_cache) and tracks < 3:
         log("📝 Расшифровка уже есть, беру из кэша и уточняю время слов по звуку.")
         segments = _refine_segments(read_transcript(old_cache), audios["me"])
@@ -945,9 +1027,26 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
         raise AutoClipError(f"❌ Ошибка расшифровки: {e}\n"
                             "   Если ошибка про cublas/cudnn — запусти install.bat ещё раз.")
     segments.sort(key=lambda sg: sg["s"])
+    segments = _fill_all(segments, plan, audios, cancel, model)
     log(f"   готово за {(time.time() - t0) / 60:.1f} мин")
-    _save_transcript(new_cache, segments, "whisper")
+    _save_transcript(new_cache, segments, "whisper", filled=True)
     return segments, new_cache
+
+
+def _fill_all(segments, plan, audios, cancel=None, model=None):
+    """Дослушать места, где голос есть, а слов нет, — по каждой дорожке."""
+    total = 0
+    for _, spk, _ in plan:
+        regions = speech_regions(audios[spk])
+        if not voice_holes(segments, regions, spk):
+            continue
+        if model is None:
+            model = _load_whisper()
+        segments, n = fill_holes(model, audios[spk], segments, spk, regions, cancel)
+        total += n
+    if total:
+        log(f"   дослушал пропуски Whisper: +{total} слов")
+    return segments
 
 
 def speaker_segments(segments, spk="me"):

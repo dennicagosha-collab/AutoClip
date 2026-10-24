@@ -28,7 +28,8 @@ EVENT_GAP = 4            # затишье внутри события (драк�
 EVENT_NEAR = 2.0         # событие кончается не дальше этого до реакции
 CUE_BEFORE = 5.0         # реплика, на которую отвечают, — не дальше этого до начала
 MARK_BACK = 20.0         # метку ставят после момента: история — до 20 с до неё
-LEAD = 0.4               # запас перед первым словом
+LEAD = 0.4               # запас после последнего слова
+START_LEAD = 0.7         # запас перед первым словом (вдох, начало звука)
 STORY_CAP = {"short": 10.0, "normal": 15.0, "long": 20.0}
 MIN_LEN, MAX_LEN = 8.0, 55.0
 
@@ -174,7 +175,7 @@ def story_bounds(peak, words, voice, loud_z, burst, dead, dur, mark=None, length
         start, why_s = cue, why_s + ", с репликой перед ним"
     if mark is not None and mark - MARK_BACK < start:
         start, why_s = max(0.0, mark - MARK_BACK), f"метка OBS {_fmt(mark)}, история до неё"
-    start = max(0.0, peak - 40.0, start - LEAD)
+    start = max(0.0, peak - 40.0, start - START_LEAD)
     # не начинать с мёртвого куска
     if dead is not None and len(dead):
         i = int(start)
