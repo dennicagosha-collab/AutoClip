@@ -2330,6 +2330,8 @@ class ClipsPage(QWidget):
                   + autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[1]]
         if c.get("marks"):
             lines.append("📍 Метка из OBS: " + ", ".join(autoclip.fmt_time(t) for t in c["marks"]))
+        if c.get("bounds_why"):
+            lines.append("Границы — " + c["bounds_why"])
         ht = autoclip.hook_text(c)
         lines.append(ht[:1].upper() + ht[1:])
         if c.get("reason"):

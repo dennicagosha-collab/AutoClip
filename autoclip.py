@@ -1937,7 +1937,7 @@ START_SILENT = 30.0   # клип без единого слова в первы�
 
 
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=(),
-               limit=None, voice=None, dead=None):
+               limit=None, voice=None, dead=None, story=None):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
     marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо.
     limit — сколько моментов искать (по умолчанию CONFIG["clips"])."""
@@ -1982,6 +1982,10 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
         # первой/последней речи и мягким паузам из 3.1 убрана: она срезала драку, смерть, вопрос
         s, e = trim_dead(s, e, peak, dead)              # мёртвое (нет речи и тихо в игре) — долой
         s, e = guard_edges(s, e, words, voice, max_end=min(dur, s + CONFIG["max_len"] + 2))
+        bounds_why = ""
+        got = story(peak, mark["t"] if mark is not None else None) if story else None
+        if got:                                         # начало и конец истории момента (4.2)
+            s, e, bounds_why = got
         short = False
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
@@ -2001,7 +2005,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
             score += CONFIG["mark_bonus"]
         clips.append({"s": round(s, 2), "e": round(e, 2), "peak": peak,
                       "score": score, "zooms": sorted(zooms), "parts": clip_parts,
-                      "title": title, "reason": reason, "short": short,
+                      "title": title, "reason": reason, "short": short, "bounds_why": bounds_why,
                       "marks": [mark["t"]] if mark is not None else []})
     return sorted(clips, key=lambda c: -c["score"])
 
@@ -3335,6 +3339,7 @@ def make_clip_record(c, num, file):
         "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
+        **({"bounds_why": c["bounds_why"]} if c.get("bounds_why") else {}),
         **({"zoom_auto": c["zoom_auto"]} if "zoom_auto" in c else {}),
         "marks": c.get("marks", []),           # метки из OBS, по которым найден клип
         "meta": c.get("meta"),                 # название и хэштеги от языковой модели
@@ -3501,6 +3506,8 @@ def write_report(proj):
             rep.append(f"    из чего оценка: {parts}")
         rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}; "
                    + clip_zooms(c, clip_config(proj, c))[1])
+        if c.get("bounds_why"):
+            rep.append("    границы — " + c["bounds_why"])
         rep.append("    " + hook_text(c))
         if c.get("forecast") and c.get("features"):
             import forecast
@@ -4636,7 +4643,14 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
     dead = dead_seconds(loud, punch, loud_z, voice, all_words(segments))
+    import story                           # начало и конец истории момента (4.2)
+    burst, all_w = story.burst_of(loud, punch), all_words(segments)
+
+    def story_fn(peak, mark_t):
+        return story.story_bounds(peak, all_w, voice, loud_z, burst, dead, vinfo["dur"], mark_t,
+                                  CONFIG.get("clip_length", "normal"))
     found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks, voice=voice, dead=dead,
+                       story=story_fn,
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
     clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
