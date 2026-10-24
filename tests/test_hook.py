@@ -199,3 +199,51 @@ def test_hook_subtitles_end_at_cut(tmp_path):
             h, m, sec = line.split(",")[2].split(":")
             ends.append(int(h) * 3600 + int(m) * 60 + float(sec))
     assert ends and max(ends) <= hd + 0.01
+
+
+def test_manual_hook_in_editor(tmp_path, fake_trash, monkeypatch):
+    import sys
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from qtwait import pump
+    monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
+    monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a[2])))
+    video = _make(tmp_path)
+    autoclip.CONFIG.update(llm="none", clips=1, subs=False, zoom=False, hook=True)
+    cut = autoclip.process(str(video))
+    import app as A
+    qapp = QApplication.instance() or QApplication([])  # noqa: F841
+    w = A.MainWindow()
+
+    def wait():
+        for _ in range(1200):
+            if not w.clips.busy:
+                return
+            pump(50)
+    try:
+        page = w.clips
+        page.load(cut)
+        c = page.current_clip()
+        assert page.hook_at and not page.pending()                       # автоматический — не правка
+        hs, he = page.hook_at
+        page.hook_shift(0, -0.25)
+        page.hook_shift(1, 0.25)
+        assert page.hook_at == [round(hs - 0.25, 2), round(he + 0.25, 2)] and "hook_at" in page.pending()
+        page.rebuild()
+        wait()
+        c2 = autoclip.find_clip(autoclip.load_project(cut), c["id"])
+        assert [c2["hook"]["start"], c2["hook"]["end"]] == page.hook_at and c2["hook"]["on"]
+        assert c2["start"] <= c2["hook"]["start"] < c2["hook"]["end"] <= c2["end"]
+        assert not page.pending()                                        # пересборка помнит
+        for _ in range(40):
+            page.hook_shift(0, -0.25)                                    # за начало клипа не уйти
+        assert page.hook_at[0] >= c2["start"]
+        page.player.player.setPosition(int((c2["end"] - c2["start"] - 4) * 1000))
+        page.hook_here()
+        assert c2["start"] <= page.hook_at[0] < page.hook_at[1] <= c2["end"]
+    finally:
+        monkeypatch.setattr(A, "ask_choice", lambda *a: "discard")     # правки не нужны — закрыть
+        w.close()

@@ -44,3 +44,16 @@ def fake_trash(tmp_path, monkeypatch):
 
     monkeypatch.setattr(autoclip, "_send_to_trash", send)
     return bin_dir
+
+
+@pytest.fixture(autouse=True)
+def no_modal_questions(monkeypatch):
+    """Окно-вопрос, на которое тест не ответил, сразу роняет тест — а не ждёт вечно."""
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:
+        return
+
+    def fail(self, *a, **k):
+        raise AssertionError(f"неожиданный вопрос в окне: {self.text()}")
+    monkeypatch.setattr(QMessageBox, "exec", fail)

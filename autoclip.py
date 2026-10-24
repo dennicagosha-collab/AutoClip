@@ -1215,6 +1215,12 @@ def text_between(segments, s, e):
                     for w in seg["words"] if s - 0.05 <= w["s"] and w["e"] <= e + 0.05)
 
 
+def hook_window_at(segments, s, e, t):
+    """«Выбрать другой момент»: хук 1–2 с вокруг места t клипа [s, e], без разреза слов."""
+    words = [w for seg in segments if seg["e"] > s and seg["s"] < e for w in seg["words"]]
+    return _hook_window(min(max(t, s), e) + 0.5, s, e, words)
+
+
 def hook_span(rec, cfg):
     """(начало, конец) хука для рендера или None. Личная настройка клипа важнее общей
     галочки; хук вне клипа не ставится никогда (правило 5)."""
@@ -2579,7 +2585,7 @@ PROJECT_VERSION = 1
 STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
-                 "sub_x", "sub_style", "music", "bleep_add", "bleep_remove") + STYLE_KEYS
+                 "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
@@ -3147,6 +3153,10 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         elif clip.get("hook", {}).get("start") is not None and \
                 not (s <= clip["hook"]["start"] and clip["hook"]["end"] <= e):
             clip["hook"].update(auto=False, why="момент хука оказался вне клипа")
+    at = clip.get("overrides", {}).get("hook_at")
+    if at and s <= float(at[0]) < float(at[1]) <= e:          # хук выбран вручную — внутри клипа
+        clip["hook"] = dict(clip.get("hook") or {}, start=round(float(at[0]), 2),
+                            end=round(float(at[1]), 2), auto=True, why="выбран вручную")
     span = hook_span(dict(clip, start=s, end=e), cfg)
     out = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
     log(f"🔁 Пересобираю {clip['file']} ({fmt_time(s)}–{fmt_time(e)})")

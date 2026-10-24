@@ -946,6 +946,8 @@ class PlayerPanel(QWidget):
         self.player.durationChanged.connect(lambda _: self._seekable(self.player.isSeekable()))
 
     def open(self, path, autoplay=False, at_ms=0):
+        if not autoplay:
+            self._stop_at = None
         self._first_frame = not autoplay
         self._may_play = autoplay
         self._seek = int(at_ms)
@@ -954,6 +956,17 @@ class PlayerPanel(QWidget):
         self.player.setSource(QUrl.fromLocalFile(path))
         if autoplay:
             self.play()
+
+    def play_range(self, path, a_ms, b_ms):
+        """Сыграть кусок файла от a до b и встать на паузу."""
+        self._stop_at = int(b_ms)
+        if self.player.source() == QUrl.fromLocalFile(path) and \
+                self.player.mediaStatus() not in (QMediaPlayer.NoMedia, QMediaPlayer.InvalidMedia,
+                                                  QMediaPlayer.LoadingMedia):
+            self.player.setPosition(int(a_ms))
+            self.play()
+        else:
+            self.open(path, autoplay=True, at_ms=a_ms)
 
     def show_at(self, path, ms):
         """Перемотать на место (открыть файл, если открыт другой), на паузе."""
@@ -1013,6 +1026,11 @@ class PlayerPanel(QWidget):
             self.play()
 
     def _pos(self, ms):
+        stop = getattr(self, "_stop_at", None)
+        if stop is not None and ms >= stop:
+            self._stop_at = None
+            self._may_play = False
+            self.player.pause()
         if self._pending_seek is not None and abs(ms - self._pending_seek) < 1000:
             self._pending_seek = None                # встали куда надо
         if not self.slider.isSliderDown():
@@ -1619,6 +1637,34 @@ class ClipsPage(QWidget):
         row.addWidget(b)
         ed.addLayout(row)
         self.b_add, self.b_rem = [], []
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("Хук"))
+        self.h_label = hint("")
+        self.h_label.setMinimumWidth(150)
+        self.hook_btns = []
+        for text, side, d in (("−0,25", 0, -0.25), ("+0,25", 0, 0.25)):
+            b = QPushButton(f"начало {text}")
+            b.clicked.connect(lambda _, side=side, d=d: self.hook_shift(side, d))
+            row.addWidget(b)
+            self.hook_btns.append(b)
+        row.addWidget(self.h_label)
+        for text, side, d in (("−0,25", 1, -0.25), ("+0,25", 1, 0.25)):
+            b = QPushButton(f"конец {text}")
+            b.clicked.connect(lambda _, side=side, d=d: self.hook_shift(side, d))
+            row.addWidget(b)
+            self.hook_btns.append(b)
+        b = QPushButton("Другой момент")
+        b.setToolTip("Хук — с того места, где сейчас просмотр (кликни по шкале клипа)")
+        b.clicked.connect(self.hook_here)
+        row.addWidget(b)
+        b = QPushButton("Просмотр хука")
+        b.clicked.connect(self.hook_preview)
+        row.addWidget(b)
+        self.hook_btns += [b]
+        row.addStretch(1)
+        ed.addLayout(row)
+        self.hook_at = None
         ed.addWidget(separator())
 
         row = QHBoxLayout()
@@ -2139,6 +2185,51 @@ class ClipsPage(QWidget):
             self._segs_for = pp
         return self._segs
 
+    # ---------- хук: ручная подстройка ----------
+    def show_hook(self):
+        h = self.hook_at
+        self.h_label.setText(f"{autoclip.fmt_time_exact(h[0])} – {autoclip.fmt_time_exact(h[1])}"
+                             f"  ({h[1] - h[0]:.2f} с)" if h else "места для хука нет")
+        for b in self.hook_btns:
+            b.setEnabled(h is not None)
+
+    def _set_hook(self, hs, he):
+        c = self.current_clip()
+        if not c:
+            return
+        hs, he = round(max(c["start"], hs), 2), round(min(c["end"], he), 2)   # только из этого клипа
+        if he - hs < 0.5:
+            return
+        self.hook_at = [hs, he]
+        if not self.e_hook.isChecked():
+            self.e_hook.setChecked(True)               # выбрал хук — значит, он нужен
+        self.show_hook()
+        self._changed()
+
+    def hook_shift(self, side, d):
+        if not self.hook_at:
+            return
+        h = list(self.hook_at)
+        h[side] += d
+        self._set_hook(*h)
+
+    def hook_here(self):
+        c = self.current_clip()
+        if not c:
+            return
+        t = c["start"] + max(0.0, self.player.player.position() / 1000 - self.hook_len(c))
+        hs, he = autoclip.hook_window_at(self.segments() or [], c["start"], c["end"], t)
+        if hs is None:
+            self.state.setText("Тут хук не поставить: слова идут без пауз")
+            return
+        self._set_hook(hs, he)
+
+    def hook_preview(self):
+        c = self.current_clip()
+        if not (c and self.hook_at) or not os.path.isfile(self.proj["source"]):
+            return
+        self.player.play_range(self.proj["source"], self.hook_at[0] * 1000, self.hook_at[1] * 1000)
+
     # ---------- ручной писк ----------
     def hook_len(self, c):
         h = c.get("hook") or {}
@@ -2420,6 +2511,7 @@ class ClipsPage(QWidget):
                      "style": (c.get("overrides") or {}).get("sub_style") or "",
                      "music": (c.get("overrides") or {}).get("music"),
                      "bleep_add": list((c.get("overrides") or {}).get("bleep_add") or []),
+                     "hook_at": (c.get("overrides") or {}).get("hook_at"),
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
@@ -2453,6 +2545,11 @@ class ClipsPage(QWidget):
             w.blockSignals(False)
         self.music = dict(self.base["music"]) if self.base.get("music") else None
         self.b_add = [list(x) for x in self.base["bleep_add"]]
+        h = c.get("hook") or {}
+        self.hook_at = (list(self.base["hook_at"]) if self.base.get("hook_at") else
+                        ([h["start"], h["end"]] if h.get("start") is not None else None))
+        self.base["hook_at"] = list(self.hook_at) if self.hook_at else None   # показанный — не правка
+        self.show_hook()
         self.b_rem = list(self.base["bleep_remove"])
         self.refresh_bleeps()
         self.fill_tracks()
@@ -2479,6 +2576,7 @@ class ClipsPage(QWidget):
                 "style": self.e_style.currentData() or "",
                 "music": dict(self.music) if self.music else None,
                 "bleep_add": [list(x) for x in self.b_add],
+                "hook_at": list(self.hook_at) if self.hook_at else None,
                 "bleep_remove": list(self.b_rem),
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
