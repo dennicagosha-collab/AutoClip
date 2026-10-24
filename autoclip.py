@@ -1973,9 +1973,37 @@ def list_sounds():
     return names
 
 
+RANDOM_SOUND = "Случайный"     # на каждый мат — свой звук из выбранных (bleep_pool)
+
+
+def sound_pool(cfg):
+    """Звуки для «Случайного»: выбранные галочками, а если не выбрано ничего — все, кроме тишины."""
+    have = [n for n in list_sounds() if n != "тишина"]
+    pool = [n for n in (cfg.get("bleep_pool") or []) if n in have]
+    return pool or have
+
+
+def bleep_sequence(cfg, n, seed):
+    """Какой звук на каком мате: n имён, один и тот же не два раза подряд (если звуков больше
+    одного). seed фиксирован у клипа — пересборка даёт те же звуки."""
+    import random
+    if cfg.get("bleep_sound") != RANDOM_SOUND:
+        return [cfg["bleep_sound"]] * n
+    pool = sound_pool(cfg)
+    rnd = random.Random(int(seed))
+    out = []
+    for _ in range(n):
+        choices = [x for x in pool if not out or x != out[-1]] or pool
+        out.append(rnd.choice(choices))
+    return out
+
+
 def sound_path(name):
     if name == "тишина":
         return None
+    if name == RANDOM_SOUND:                       # прослушать «Случайный» — любой из выбранных
+        import random
+        return sound_path(random.choice(sound_pool(CONFIG)))
     if os.path.isfile(name):
         return name
     for cand in (os.path.join(SOUNDS_DIR, name), os.path.join(SOUNDS_DIR, name + ".wav")):
@@ -2635,17 +2663,27 @@ def check_music(mcfg):
 
 
 def bleep_gains(src, tl, bleeps, snd, cfg):
+    """snd — путь к звуку или список путей (свой на каждое место)."""
+    if isinstance(snd, list):
+        cache = {}
+        out = []
+        for i, b in enumerate(bleeps):
+            if snd[i] not in cache:
+                cache[snd[i]] = loudness(snd[i])
+            out.append(_bleep_gain(src, tl, b, cache[snd[i]], cfg))
+        return out
+    sl = loudness(snd)
+    return [_bleep_gain(src, tl, b, sl, cfg) for b in bleeps]
+
+
+def _bleep_gain(src, tl, bleep, sl, cfg):
     """Усиление звука на мат (дБ) для каждого места: под громкость речи рядом (окно ±1,5 с
     в записи, LUFS) плюс поправка bleep_rel_db. Не измерить — фиксированная bleep_volume."""
     fixed = 20 * math.log10(max(0.01, float(cfg.get("bleep_volume", 1.0))))
-    sl = loudness(snd)
-    out = []
-    for a, b, _ in bleeps:
-        t = out_to_rec(a, tl)                               # где это место в записи
-        voice = loudness(src, max(0.0, t - 1.5), (b - a) + 3.0)
-        out.append(fixed if (sl is None or voice is None)
-                   else voice + float(cfg.get("bleep_rel_db", 0.0)) - sl)
-    return out
+    a, b, _ = bleep
+    t = out_to_rec(a, tl)                                   # где это место в записи
+    voice = loudness(src, max(0.0, t - 1.5), (b - a) + 3.0)
+    return fixed if (sl is None or voice is None) else voice + float(cfg.get("bleep_rel_db", 0.0)) - sl
 
 
 def clip_words(segments, s, e):
@@ -2839,26 +2877,38 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
 
     # --- звук и бип ---
     bleeps = bleep_spans(words, total, cfg["bleep_pad"], cfg.get("censor") == "partial") if cfg["bleep"] else []
-    snd = sound_path(cfg["bleep_sound"]) if bleeps else None
-    extra_in = []
+    # звуки «Случайного» фиксированы у клипа: от его пика (не меняется при сдвиге границ)
+    seed = cfg.get("bleep_seed") if cfg.get("bleep_seed") is not None else int(clip.get("peak", s) * 1000)
+    names = bleep_sequence(cfg, len(bleeps), seed)
+    clip["bleep_seq"] = names if cfg.get("bleep_sound") == RANDOM_SOUND else None
+    paths = [sound_path(x) for x in names]
+    extra_in, n_snd = [], 0
     if bleeps:
         E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in bleeps)
         agraph = f"{ain}{fmt},volume=0:enable='{E}'[am]"
-        if snd:
-            sdur = sound_duration(snd)
-            extra_in = ["-i", os.path.abspath(snd)]
-            n = len(bleeps)
-            agraph += f";[{snd_in}:a]{fmt},asplit={n}" + "".join(f"[s{i}]" for i in range(n))
-            gains = bleep_gains(src, tl, bleeps, snd, cfg)
+        used = [i for i, x in enumerate(paths) if x]          # «тишина» — только заглушить
+        if used:
+            files = sorted({paths[i] for i in used})
+            for k, f in enumerate(files):
+                mine = [i for i in used if paths[i] == f]
+                extra_in += ["-i", os.path.abspath(f)]
+                agraph += (f";[{snd_in + k}:a]{fmt},asplit={len(mine)}" +
+                           "".join(f"[s{i}]" for i in mine))
+            n_snd = len(files)
+            sdurs = {f: sound_duration(f) for f in files}
+            gains = bleep_gains(src, tl, bleeps, paths, cfg)
             for i, (a, b, until) in enumerate(bleeps):
+                if i not in used:
+                    continue
+                sdur = sdurs[paths[i]]
                 # звук не дольше, чем до следующего слова без мата
                 L = max(0.05, min(sdur, until - a))
                 fd = min(0.06, L / 3)
                 ms = int(a * 1000)
                 agraph += (f";[s{i}]atrim=0:{L:.3f},volume={gains[i]:.2f}dB,"
                            f"afade=t=out:st={L - fd:.3f}:d={fd:.3f},adelay={ms}:all=1[d{i}]")
-            agraph += ";[am]" + "".join(f"[d{i}]" for i in range(n)) + \
-                      f"amix=inputs={n + 1}:duration=first:normalize=0[aout]"
+            agraph += ";[am]" + "".join(f"[d{i}]" for i in used) + \
+                      f"amix=inputs={len(used) + 1}:duration=first:normalize=0[aout]"
         else:
             agraph = agraph.replace("[am]", "[aout]")
     else:
@@ -2867,7 +2917,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     # --- музыка ---
     music = check_music(cfg.get("music"))
     if music:
-        mi = snd_in + (1 if extra_in else 0)
+        mi = snd_in + n_snd
         extra_in += ["-ss", f"{float(music.get('offset', 0)):.3f}", "-t", f"{total:.3f}",
                      "-i", os.path.abspath(music["file"])]
         voice = loudness(src, s, dur)
@@ -3092,13 +3142,14 @@ STATUSES = {"new": "новый", "good": "хороший", "published": "выл�
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
-                 "words_edit", "mat_words", "title", "censor", "cuts") + STYLE_KEYS
+                 "words_edit", "mat_words", "title", "censor", "cuts", "bleep_seed",
+                 "bleep_pool") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
                "sub_x", "sub_style",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
-               "bleep_sound", "bleep_volume", "bleep_rel_db", "bleep_pad", "censor", "preset", "hook",
+               "bleep_sound", "bleep_pool", "bleep_volume", "bleep_rel_db", "bleep_pad", "censor", "preset", "hook",
                "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity",
                "hashtags", "platform_tags")
 
@@ -3611,6 +3662,7 @@ def add_clip(path, c, origin, progress=None, cancel=None):
         rec["bleeps"] = render_clip(src, job, segments, proj["source_info"],
                                     os.path.join(out_dir, name), tmp, cfg, cancel)
     rec["timeline"] = job.get("timeline")
+    rec["bleep_seq"] = job.get("bleep_seq")
     if rec["bleeps"] is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     rec["rendered"] = now_iso()
@@ -3864,7 +3916,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     if progress:
         progress("рендер", 0, clip["file"])
     t0 = time.time()
-    job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span,
+    job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span, "peak": clip.get("peak", s),
            **({"zoom_auto": clip["zoom_auto"]} if "zoom_auto" in clip else {})}
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
         bl = render_clip(src, job, segments,
@@ -3873,7 +3925,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
-                quiet_start=quiet_start(out), timeline=job.get("timeline"))
+                quiet_start=quiet_start(out), timeline=job.get("timeline"), bleep_seq=job.get("bleep_seq"))
     if clip["file"] != old_file:                       # переименовали: прежний файл и обложку — в корзину
         try:
             trash(os.path.join(folder, old_file))
@@ -4578,10 +4630,12 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         cfg = clip_config(proj, rec)
         span = hook_span(rec, cfg)
         rec["hook"]["on"] = span is not None
+        job = dict(c, hook=span)
         with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-            rec["bleeps"] = render_clip(video, dict(c, hook=span), segments, vinfo,
+            rec["bleeps"] = render_clip(video, job, segments, vinfo,
                                         os.path.join(out_dir, name), tmp, cfg, cancel,
                                         on_frac=frac_of(num, name))
+        rec["bleep_seq"] = job.get("bleep_seq")
         if rec["bleeps"] is None:
             return None
         rec["rendered"] = now_iso()

@@ -34,7 +34,7 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractButton, QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame,
+    QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QDialog, QMenu, QSystemTrayIcon, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
@@ -68,7 +68,7 @@ DEFAULTS = {
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
-    "censor": "partial", "clip_length": "normal",
+    "censor": "partial", "clip_length": "normal", "bleep_pool": [],
 }
 
 TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
@@ -830,7 +830,7 @@ class SoundButton(QPushButton):
 
 
 def fill_sounds(combo, want):
-    names = autoclip.list_sounds()
+    names = autoclip.list_sounds() + [autoclip.RANDOM_SOUND]
     combo.blockSignals(True)
     combo.clear()
     combo.addItems(names)
@@ -1372,6 +1372,7 @@ class CutPage(QWidget):
         c["hashtags"] = s["hashtags"]
         c["platform_tags"] = dict(s["platform_tags"])
         c["bleep_sound"] = s["sound"]
+        c["bleep_pool"] = list(s.get("bleep_pool") or [])
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
         c["censor"] = "full" if s.get("censor") == "full" else "partial"
         c["clip_length"] = s.get("clip_length") if s.get("clip_length") in autoclip.LENGTHS else "normal"
@@ -1698,6 +1699,12 @@ class ClipsPage(QWidget):
         self.e_bleep.toggled.connect(self.e_sound.setEnabled)
         row.addWidget(self.e_sound)
         row.addWidget(SoundButton(self.e_sound))
+        self.btn_shuffle = QPushButton("Перемешать")
+        self.btn_shuffle.setToolTip("Случайный звук: другие звуки на мат в этом клипе")
+        self.btn_shuffle.clicked.connect(self.shuffle_sounds)
+        self.e_sound.currentTextChanged.connect(
+            lambda t: self.btn_shuffle.setVisible(t == autoclip.RANDOM_SOUND))
+        row.addWidget(self.btn_shuffle)
         self.e_censor = censor_combo("partial")
         self.e_censor.setToolTip("Частичная: «е*ать». TikTok может распознать полузапиканный мат и урезать охват")
         self.e_censor.currentIndexChanged.connect(self._changed)
@@ -1835,6 +1842,7 @@ class ClipsPage(QWidget):
         row.addStretch(1)
         ed.addLayout(row)
         self.cuts, self.cut_ab, self._voice = [], [None, None], {}
+        self.bleep_seed = None
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -2535,6 +2543,11 @@ class ClipsPage(QWidget):
             return
         self.player.play_range(self.proj["source"], self.hook_at[0] * 1000, self.hook_at[1] * 1000)
 
+    def shuffle_sounds(self):
+        import random
+        self.bleep_seed = random.randint(1, 10 ** 9)
+        self._changed()
+
     # ---------- вырезки ----------
     def rec_at_player(self, c):
         """Место просмотра → время в записи (в готовом клипе могут быть хук и вырезки)."""
@@ -2943,6 +2956,7 @@ class ClipsPage(QWidget):
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
                      "nick": bool(cfg.get("nick")),
                      "censor": "full" if cfg.get("censor") == "full" else "partial",
+                     "bleep_seed": (c.get("overrides") or {}).get("bleep_seed"),
                      "style": (c.get("overrides") or {}).get("sub_style") or "",
                      "music": (c.get("overrides") or {}).get("music"),
                      "bleep_add": list((c.get("overrides") or {}).get("bleep_add") or []),
@@ -2974,6 +2988,8 @@ class ClipsPage(QWidget):
         self.e_safe.setChecked(b["safe_zone"])
         self.e_nick.setChecked(b["nick"])
         self.e_censor.setCurrentIndex(max(0, self.e_censor.findData(b["censor"])))
+        self.bleep_seed = b["bleep_seed"]
+        self.btn_shuffle.setVisible(self.e_sound.currentText() == autoclip.RANDOM_SOUND)
         self.e_pos.setEnabled(b["subs"])
         self.e_safe.setEnabled(b["subs"])
         self.e_sound.setEnabled(b["bleep"])
@@ -3021,6 +3037,7 @@ class ClipsPage(QWidget):
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
                 "nick": self.e_nick.isChecked(),
                 "censor": self.e_censor.currentData(),
+                "bleep_seed": self.bleep_seed,
                 "style": self.e_style.currentData() or "",
                 "music": dict(self.music) if self.music else None,
                 "bleep_add": [list(x) for x in self.b_add],
@@ -3692,6 +3709,15 @@ class SettingsPage(QWidget):
         b.clicked.connect(self.open_sounds)
         snd.addWidget(b)
         v.addWidget(option_row("Звук на мат", snd))
+        self.pool_box = QWidget()
+        self.pool_lay = QHBoxLayout(self.pool_box)
+        self.pool_lay.setContentsMargins(0, 0, 0, 0)
+        self.pool_lay.setSpacing(10)
+        self.pool_row = option_row("Какие звуки в «Случайном»", self.pool_box,
+                                   "На каждый мат — свой звук, один и тот же не два раза подряд. "
+                                   "Ничего не выбрано — все")
+        v.addWidget(self.pool_row)
+        self.sound.currentTextChanged.connect(lambda t: self.pool_row.setVisible(t == autoclip.RANDOM_SOUND))
         brow = QHBoxLayout()
         brow.setSpacing(8)
         self.bleep_db = QSlider(Qt.Horizontal)
@@ -4332,6 +4358,25 @@ class SettingsPage(QWidget):
 
     def refresh_sounds(self):
         fill_sounds(self.sound, self.s.get("sound"))
+        while self.pool_lay.count():
+            w = self.pool_lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.pool_checks = {}
+        chosen = set(self.s.get("bleep_pool") or [])
+        for name in autoclip.list_sounds():
+            if name == "тишина":
+                continue
+            cb = QCheckBox(os.path.splitext(name)[0])
+            cb.setChecked(name in chosen)
+            cb.toggled.connect(self._pool_changed)
+            self.pool_lay.addWidget(cb)
+            self.pool_checks[name] = cb
+        self.pool_lay.addStretch(1)
+        self.pool_row.setVisible(self.sound.currentText() == autoclip.RANDOM_SOUND)
+
+    def _pool_changed(self, *_):
+        self._set("bleep_pool", [n for n, cb in self.pool_checks.items() if cb.isChecked()])
 
     # --- пресеты ---
     def refresh_presets(self, select=None):
