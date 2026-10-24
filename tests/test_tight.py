@@ -53,20 +53,6 @@ def test_leading_silence_trimmed_unless_loud():
     assert abs(s - 11.7) < 0.05
 
 
-def test_short_after_tighten_goes_to_candidates():
-    n = 200
-    smooth = np.zeros(n)
-    smooth[60] = 5.0
-    smooth[120] = 3.0
-    segs = [{"s": 58, "e": 63, "text": "", "words": talk(58.5, 62.5)},
-            {"s": 100, "e": 140, "text": "", "words": talk(100, 135)}]
-    found = autoclip.pick_clips(smooth, np.zeros(n), segs, [], 200.0, limit=5)
-    short = [c for c in found if c["short"]]
-    assert short and short[0]["e"] - short[0]["s"] < 8
-    clips, cands = autoclip.split_clips(found, dict(autoclip.CONFIG, clips_mode="count", clips=5))
-    assert all(not c["short"] for c in clips) and short[0] in cands
-
-
 def test_start_of_record_noise_dropped():
     segs = [{"s": 6.5, "e": 9.1, "text": "медсестра сила",
              "words": [{"s": 6.51, "e": 7.91, "w": "медсестра"}, {"s": 7.91, "e": 9.09, "w": "сила"}]},
@@ -92,15 +78,3 @@ def test_soft_pause_on_side_without_peak():
     words = talk(14, 17) + talk(21, 26)                             # отрезать — будет короче 8 с
     s, e = autoclip.tighten_clip(16.0, 12.5, 27.0, words)
     assert e > 21
-
-
-def test_mostly_silent_moment_goes_to_candidates():
-    words = talk(10, 12) + talk(17, 18) + talk(22, 23)            # реакции почти нет — пауза на паузе
-    assert autoclip.silence_share(9.5, 23.5, words) > 0.45
-    assert autoclip.silence_share(10, 16, talk(10, 16)) == 0
-    n = 60
-    smooth = np.zeros(n)
-    smooth[17] = 5.0
-    found = autoclip.pick_clips(smooth, np.zeros(n), [{"s": 10, "e": 23, "text": "", "words": words}],
-                                [], 60.0, limit=3)
-    assert found and all(c["short"] for c in found)

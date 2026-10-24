@@ -1,4 +1,4 @@
-"""Патч 3Б.3: «Длина клипов» — короче / обычно / длиннее."""
+"""«Длина клипов» — короче / обычно / длиннее (с 1.3.1 — окно вокруг момента, «обычно» как в 1.1)."""
 import autoclip
 
 
@@ -6,38 +6,39 @@ def _words(times):
     return [{"s": t, "e": t + 0.4, "w": "слово"} for t in times]
 
 
-def test_normal_is_1_2_1():
+def test_normal_is_1_1():
     base = {k: autoclip.CONFIG[k] for k in autoclip.LENGTHS["normal"]}
-    assert base == autoclip.LENGTHS["normal"]
+    assert base == autoclip.LENGTHS["normal"] == {"pre": 14.0, "post": 7.0, "min_len": 15.0, "max_len": 55.0}
     assert autoclip.CONFIG["clip_length"] == "normal"
 
 
 def test_apply_length_switches_back_and_forth():
     cfg = dict(autoclip.CONFIG, clip_length="long")
     autoclip.apply_length(cfg)
-    assert cfg["tail_after"] == 12.0 and cfg["lead_before"] == 3.0
+    assert cfg["pre"] == 18.0 and cfg["min_len"] == 20.0
     cfg["clip_length"] = "normal"
     autoclip.apply_length(cfg)
-    assert cfg["tail_after"] == 8.0 and cfg["min_tight"] == 8.0
+    assert cfg["pre"] == 14.0 and cfg["post"] == 7.0
     cfg["clip_length"] = "что-то"                       # неизвестное — как «обычно»
-    assert autoclip.apply_length(cfg)["tail_after"] == 8.0
+    assert autoclip.apply_length(cfg)["pre"] == 14.0
 
 
-def test_longer_gives_more_context():
-    # фразы по 1,5 с и паузы 1,6 с: «короче» и «обычно» останавливаются на паузе, «длиннее» — нет
-    words = _words([t * 0.5 for t in range(0, 120) if (t * 0.5) % 3 < 1.5])
-    peak = 20.0
+def test_longer_gives_more_context(monkeypatch):
+    # речь фразами по 1,5 с и паузами 1,6 с; пик на 60-й секунде
+    words = _words([t * 0.5 for t in range(0, 300) if (t * 0.5) % 3 < 1.5])
+    peak = 60.0
     lens = {}
     for var in ("short", "normal", "long"):
         cfg = autoclip.apply_length(dict(autoclip.CONFIG, clip_length=var))
-        s, e = autoclip.tighten_clip(peak, 0.0, 55.0, words, cfg=cfg)
+        monkeypatch.setattr(autoclip, "CONFIG", cfg)
+        s, e = autoclip.shape_clip(peak, peak - cfg["pre"], peak + cfg["post"], words, 150.0)
+        s, e = autoclip.guard_edges(s, e, words)
         assert s <= peak <= e
         for w in words:                               # слово не режем ни в одном варианте
             assert not (w["s"] + 0.01 < s < w["e"] - 0.01)
             assert not (w["s"] + 0.01 < e < w["e"] - 0.01)
-        lens[var] = (s, e)
-    assert lens["short"][1] < lens["normal"][1] < lens["long"][1]
-    assert lens["long"][0] <= lens["normal"][0] <= lens["short"][0]
+        lens[var] = e - s
+    assert lens["short"] < lens["normal"] < lens["long"]
 
 
 def test_settings_length_switch(monkeypatch):
@@ -55,8 +56,8 @@ def test_settings_length_switch(monkeypatch):
     assert st.length.currentData() == "normal"
     st.length.setCurrentIndex(st.length.findData("long"))
     win.cut.apply_config()
-    assert autoclip.CONFIG["clip_length"] == "long" and autoclip.CONFIG["tail_after"] == 12.0
+    assert autoclip.CONFIG["clip_length"] == "long" and autoclip.CONFIG["pre"] == 18.0
     st.length.setCurrentIndex(st.length.findData("normal"))
     win.cut.apply_config()
-    assert autoclip.CONFIG["tail_after"] == 8.0
+    assert autoclip.CONFIG["pre"] == 14.0
     win.close()

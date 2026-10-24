@@ -141,15 +141,12 @@ CONFIG = {
 }
 # ======================================================
 
-# «Длина клипов» одной настройкой: границы по речи (tighten_clip) для каждого варианта.
-# normal — как в 1.2.1; long — больше контекста до и после, мягкие паузы не режем; short — плотнее.
+# «Длина клипов» одной настройкой: сколько брать до и после момента и в каких пределах.
+# normal — как в 1.1; long — больше контекста; short — плотнее.
 LENGTHS = {
-    "short": {"tail_after": 5.0, "tail_max": 10.0, "talk_gap": 1.2, "lead_before": 1.0,
-              "max_silence": 4.0, "soft_silence": 2.0, "min_tight": 6.0, "max_silence_share": 0.4},
-    "normal": {"tail_after": 8.0, "tail_max": 15.0, "talk_gap": 1.5, "lead_before": 1.5,
-               "max_silence": 6.0, "soft_silence": 3.0, "min_tight": 8.0, "max_silence_share": 0.45},
-    "long": {"tail_after": 12.0, "tail_max": 22.0, "talk_gap": 1.8, "lead_before": 3.0,
-             "max_silence": 8.0, "soft_silence": 8.0, "min_tight": 12.0, "max_silence_share": 0.5},
+    "short": {"pre": 10.0, "post": 5.0, "min_len": 12.0, "max_len": 40.0},
+    "normal": {"pre": 14.0, "post": 7.0, "min_len": 15.0, "max_len": 55.0},
+    "long": {"pre": 18.0, "post": 10.0, "min_len": 20.0, "max_len": 60.0},
 }
 
 
@@ -1711,6 +1708,27 @@ def silence_share(s, e, words):
     return sum(g for g in gaps if g > 1.0) / (e - s)
 
 
+def guard_edges(s, e, words, voice=None, max_end=None):
+    """Края клипа не режут слово (у Whisper слова бывают растянуты) и голос, который Silero
+    слышит, а Whisper не записал словами: конец — за голос, начало — перед ним."""
+    allw = sorted(words, key=lambda w: w["s"])
+    nxt_of = {id(w): (allw[i + 1] if i + 1 < len(allw) else None) for i, w in enumerate(allw)}
+    prv_of = {id(w): (allw[i - 1] if i else None) for i, w in enumerate(allw)}
+    for a, b in voice or ():
+        if a + 0.05 < e < b - 0.05 and (max_end is None or b <= max_end):
+            nxt = next((w for w in allw if w["s"] >= e), None)
+            e = min(b + 0.25, nxt["s"] - 0.05) if nxt and nxt["s"] > b else b + 0.25
+        if a + 0.05 < s < b - 0.05 and a >= s - 5:
+            s = max(0.0, a - PAD_BEFORE)
+    w = next((w for w in allw if w["s"] + 0.01 < e < w["e"] - 0.01), None)
+    if w is not None:
+        e = pad_after(w, nxt_of.get(id(w)))
+    w = next((w for w in allw if w["s"] + 0.01 < s < w["e"] - 0.01), None)
+    if w is not None:
+        s = pad_before(w, prv_of.get(id(w)))
+    return round(s, 2), round(e, 2)
+
+
 def tighten_clip(peak, s, e, words, parts=None, cfg=None, voice=None):
     """Границы клипа по речи (поверх того, что предложила модель и shape_clip):
     конец — до tail_after после пика (или до конца непрерывной фразы, не дальше tail_max);
@@ -1887,17 +1905,10 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
         s, e = shape_clip(peak, s, e, words, dur)
         if e - s < min_len * 0.8:
             continue
-        s0, e0 = s, e
-        s, e = tighten_clip(peak, s, e, words, parts, voice=voice)
-        short = e - s < CONFIG["min_tight"]          # совсем коротко — только кандидатом
-        # больше половины — тишина (пик — звук игры, а не реакция): тоже только кандидатом
-        short = short or silence_share(s, e, words) > CONFIG["max_silence_share"]
-        if short and mark is not None:
-            # метку Гоша поставил сам — клип остаётся, дотягиваем до min_tight в исходных границах
-            e = min(e0, max(e, s + CONFIG["min_tight"], peak + 2))
-            s = max(s0, min(s, e - CONFIG["min_tight"]))
-            s, e = _not_inside_word(s, words, s0, e0), _not_inside_word(e, words, s0, e0)
-            short = False
+        # границы — как в 1.1 (окно вокруг пика, края в паузах между фразами); обрезка по
+        # первой/последней речи и мягким паузам из 3.1 убрана: она срезала драку, смерть, вопрос
+        s, e = guard_edges(s, e, words, voice, max_end=min(dur, s + CONFIG["max_len"] + 2))
+        short = False
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
             continue
         if mark is None and s < START_SILENT and not any(
@@ -3687,7 +3698,7 @@ def moment_at(proj, t, segments):
     t = max(0.0, min(float(t), dur))
     words = all_words(segments)
     s, e = shape_clip(t, t - CONFIG["pre"], t + CONFIG["post"], words, dur)
-    s, e = tighten_clip(t, s, e, words)
+    s, e = guard_edges(s, e, words)
     loud_z = proj.get("loud_z") or []
     reaction = proj.get("reaction") or []
     inside = [i for i in range(int(s), min(len(reaction), int(e)))]
