@@ -290,3 +290,11 @@ def test_send_clip_small_and_light_copy(tmp_path):
     assert any("облегчённую копию" in s for s in states)
     assert TOKEN not in " ".join(str(x) for x in api.sent)                    # токен не в сообщениях
 
+
+
+def test_light_plan_keeps_full_hd():
+    assert autoclip.light_plan(55) == (1080, 1920, 60, autoclip.light_plan(55)[3])     # 55 с — 1080p60
+    assert autoclip.light_plan(55)[3] >= 6500                                           # ≥6,5 Мбит/с
+    w, h, fps, k = autoclip.light_plan(100)
+    assert (w, h, fps) == (1080, 1920, 30) and k < autoclip.FULL_HD_MIN_K                # сначала 30 к/с
+    assert autoclip.light_plan(400)[:3] == (720, 1280, 30)                               # потом 720p

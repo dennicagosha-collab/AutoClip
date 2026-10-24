@@ -2989,16 +2989,38 @@ def remove_clip(path, ref):
 TG_LIMIT_MB = 50          # Telegram Bot API: файл от бота — не больше 50 МБ
 
 
+TG_TARGET_MB = 48         # облегчённая копия — с запасом до лимита
+FULL_HD_MIN_K = 5000      # ниже — сначала 30 к/с, потом меньше разрешение (не ниже 720×1280)
+
+
+def light_plan(dur, limit_mb=TG_LIMIT_MB):
+    """Как сжать клип в limit_mb: (ширина, высота, кадры/с, видео кбит/с). Сначала держим
+    1080×1920 и 60 к/с; битрейта мало — 30 к/с; совсем мало — 720×1280."""
+    target = min(TG_TARGET_MB, limit_mb * 0.96)
+    video_k = max(200, int(target * 8 * 1024 / max(dur, 1.0)) - 128)
+    if video_k >= FULL_HD_MIN_K:
+        return 1080, 1920, 60, video_k
+    if video_k >= FULL_HD_MIN_K / 2:
+        return 1080, 1920, 30, video_k              # вдвое меньше кадров — то же качество кадра
+    return 720, 1280, 30, video_k
+
+
 def light_copy(src, dst, limit_mb=TG_LIMIT_MB, on_frac=None, cancel=None):
-    """Облегчённая копия клипа, которая точно влезет в limit_mb (720×1280, битрейт по длине)."""
+    """Облегчённая копия клипа для Telegram: 1080×1920, H.264 в два прохода (preset slow)
+    под ~48 МБ, звук AAC 128 кбит/с. Не влезает — 30 к/с, потом 720×1280."""
     dur = _probe_dur(src)
-    audio_k = 128
-    video_k = max(300, int((limit_mb * 0.92 * 8 * 1024) / max(dur, 1.0)) - audio_k)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src, "-vf", "scale=720:-2", "-c:v", "libx264",
-           "-preset", "veryfast", "-b:v", f"{video_k}k", "-maxrate", f"{video_k}k",
-           "-bufsize", f"{video_k * 2}k", "-c:a", "aac", "-b:a", f"{audio_k}k",
-           "-movflags", "+faststart", dst]
-    p = run(cmd, cancel=cancel, on_time=(lambda t: on_frac(min(1.0, t / dur))) if on_frac else None)
+    w, h, fps, video_k = light_plan(dur, limit_mb)
+    work = os.path.dirname(os.path.abspath(dst))
+    log_base = os.path.join(work, "x264pass")
+    vf = f"scale={w}:{h}:flags=lanczos,fps={fps}"
+    common = ["-vf", vf, "-c:v", "libx264", "-preset", "slow", "-b:v", f"{video_k}k",
+              "-maxrate", f"{int(video_k * 1.3)}k", "-bufsize", f"{video_k * 2}k", "-passlogfile", log_base]
+    p1 = run(["ffmpeg", "-y", "-v", "error", "-i", src] + common + ["-pass", "1", "-an", "-f", "null", os.devnull],
+             cancel=cancel, on_time=(lambda t: on_frac(min(1.0, t / dur) / 2)) if on_frac else None)
+    p = p1 if p1.returncode != 0 else run(
+        ["ffmpeg", "-y", "-v", "error", "-i", src] + common +
+        ["-pass", "2", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst],
+        cancel=cancel, on_time=(lambda t: on_frac(0.5 + min(1.0, t / dur) / 2)) if on_frac else None)
     if p.returncode != 0 or not os.path.isfile(dst):
         raise AutoClipError("❌ Не получилось сделать облегчённую копию:\n" + p.stderr[-400:])
     if os.path.getsize(dst) > limit_mb * 1024 * 1024:
