@@ -1418,7 +1418,7 @@ class ClipList(QListWidget):
 
 
 FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}),
-           ("Кандидаты", {"candidate"}))
+           ("Кандидаты", {"candidate"}), ("Удалённые", {"deleted"}))
 CAND = "cand:"       # так в списке помечены кандидаты (моменты без видео)
 SHIFT = 2.0          # шаг сдвига начала и конца, сек
 COVER_W, COVER_H = 34, 60   # обложка в списке клипов
@@ -1548,8 +1548,22 @@ class ClipsPage(QWidget):
         self.btn_build.setObjectName("primary")
         self.btn_build.setToolTip("Сделать из кандидата обычный клип")
         self.btn_build.clicked.connect(self.build_candidate)
-        self.btn_build.hide()
-        rl.addWidget(self.btn_build, 0, Qt.AlignLeft)
+        self.cand_bar = QWidget()
+        cb = QHBoxLayout(self.cand_bar)
+        cb.setContentsMargins(0, 0, 0, 0)
+        cb.setSpacing(6)
+        cb.addWidget(self.btn_build)
+        self.btn_cand_play = QPushButton("Просмотр")
+        self.btn_cand_play.setToolTip("Запись в границах кандидата: от начала до конца, без сборки")
+        self.btn_cand_play.clicked.connect(self.play_candidate)
+        cb.addWidget(self.btn_cand_play)
+        self.btn_cand_del = QPushButton("Удалить кандидата")
+        self.btn_cand_del.setObjectName("ghost")
+        self.btn_cand_del.clicked.connect(self.delete_candidate)
+        cb.addWidget(self.btn_cand_del)
+        cb.addWidget(hint("Кандидаты сами не пропадают — собрать или удалить можно в любой момент"), 1)
+        self.cand_bar.hide()
+        rl.addWidget(self.cand_bar)
 
         # --- редактор клипа ---
         self.editor, outer = card()
@@ -2014,15 +2028,18 @@ class ClipsPage(QWidget):
             if c["id"] == select_id:
                 row = i
         # кандидаты — серыми, внизу списка («Все») или отдельно («Кандидаты»)
-        if want is None or "candidate" in want:
+        if want is None or "candidate" in want or "deleted" in want:
+            show_deleted = want is not None and "deleted" in want
             gray = QColor(MUTED)
             blank = QPixmap(COVER_W, COVER_H)          # пустое место вместо обложки — строки ровные
             blank.fill(Qt.transparent)
             for k in sorted(self.proj.get("candidates") or [], key=lambda k: -k["score"]):
+                if bool(k.get("deleted")) != show_deleted:
+                    continue
                 it = QListWidgetItem(
                     QIcon(blank), f"☆ {k['score']:.1f}   {k['title']}\n"
                     f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}"
-                    f" · {k['end'] - k['start']:.0f} с · кандидат")
+                    f" · {k['end'] - k['start']:.0f} с · " + ("удалён" if show_deleted else "кандидат"))
                 it.setForeground(gray)
                 it.setToolTip("Кандидат: момент без видео. «Собрать» — сделать из него клип")
                 it.setData(Qt.UserRole, CAND + k["id"])
@@ -2122,7 +2139,7 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         self.editor.setEnabled(bool(c) and not self.busy)
         k = self.current_candidate()
-        self.btn_build.setVisible(bool(k))
+        self.cand_bar.setVisible(bool(k))
         if k:
             self.base = {}
             src = self.proj["source"]
@@ -2131,7 +2148,10 @@ class ClipsPage(QWidget):
             else:
                 self.player.clear()
             from html import escape
-            self.btn_build.setEnabled(not self.busy and os.path.isfile(src))
+            self.btn_build.setEnabled(not self.busy and os.path.isfile(src) and not k.get("deleted"))
+            self.btn_build.setVisible(not k.get("deleted"))
+            self.btn_cand_play.setEnabled(os.path.isfile(src))
+            self.btn_cand_del.setText("Вернуть" if k.get("deleted") else "Удалить кандидата")
             self.info.setText(
                 f"<b>{escape(k['title'])}</b> <span style='color:{MUTED}'>· кандидат, без видео</span><br>"
                 f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}, оценка {k['score']:.1f}"
@@ -2461,6 +2481,26 @@ class ClipsPage(QWidget):
             except Exception:
                 bus.added.emit(None, "❌ " + traceback.format_exc()[-800:])
         threading.Thread(target=work, daemon=True).start()
+
+    def play_candidate(self):
+        k = self.current_candidate()
+        if k and os.path.isfile(self.proj["source"]):
+            self.player.play_range(self.proj["source"], k["start"] * 1000, k["end"] * 1000)
+
+    def delete_candidate(self):
+        k = self.current_candidate()
+        if not k:
+            return
+        row = self.list.currentRow()
+        try:
+            autoclip.set_candidate_deleted(self.proj["_path"], k["id"], not k.get("deleted"))
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self.reload()
+        if self.list.count():
+            self.list.setCurrentRow(min(row, self.list.count() - 1))
+        self.win.retrain()                              # удалённый кандидат — слабое «не нравится»
 
     def build_candidate(self):
         k = self.current_candidate()

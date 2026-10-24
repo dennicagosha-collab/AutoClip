@@ -1381,6 +1381,19 @@ def candidate_record(c, num, segments):
             "created": now_iso()}
 
 
+def set_candidate_deleted(path, ref, deleted=True):
+    """«Удалить кандидата» (и «Вернуть»): кандидат не пропадает, а уходит в «Удалённые»."""
+    proj = load_project(path)
+    k = next((k for k in proj.get("candidates") or [] if k["id"] == ref), None)
+    if not k:
+        raise AutoClipError(f"❌ Нет кандидата «{ref}».")
+    k["deleted"] = bool(deleted)
+    if deleted:
+        k["deleted_date"] = now_iso()
+    save_project(proj)
+    return k
+
+
 def build_candidate(path, ref, progress=None, cancel=None):
     """«Собрать»: кандидат становится обычным клипом."""
     proj = load_project(path)

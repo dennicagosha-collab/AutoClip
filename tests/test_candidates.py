@@ -144,7 +144,7 @@ def test_candidates_in_clip_list(win, cut):
     page.build_candidate()
     assert wait_for(lambda: not page.busy)
     c = page.current_clip()
-    assert c and c["origin"] == "candidate" and page.btn_build.isHidden()
+    assert c and c["origin"] == "candidate" and page.cand_bar.isHidden()
     assert page.filter == 0
 
 
@@ -159,3 +159,45 @@ def test_old_project_without_candidates(win, cut):
     assert w.clips.list.count() == len(data["clips"])
     w.clips.set_filter(4)
     assert w.clips.list.count() == 0
+
+
+def test_delete_restore_candidate_and_learning(win, cut):
+    A, w = win
+    import forecast
+    page = w.clips
+    page.load(cut)
+    page.set_filter(4)                                               # «Кандидаты»
+    n = page.list.count()
+    k = page.current_candidate()
+    page.delete_candidate()
+    assert page.list.count() == n - 1
+    page.set_filter(5)                                               # «Удалённые»
+    assert page.list.count() == 1 and page.current_candidate()["id"] == k["id"]
+    assert page.btn_cand_del.text() == "Вернуть" and page.btn_build.isHidden()
+    got = [s for s in forecast.collect() if s["id"] == k["id"]]
+    assert got and got[0]["like"] == 0 and got[0]["weight"] == forecast.WEAK   # слабое «не нравится»
+    page.delete_candidate()                                          # «Вернуть»
+    assert page.list.count() == 0
+    page.set_filter(4)
+    assert page.list.count() == n
+    assert not [s for s in forecast.collect() if s["id"] == k["id"]]
+    rec = autoclip.build_candidate(cut, k["id"])                     # «Собрать» — слабое «нравится»
+    got = [s for s in forecast.collect() if s["id"] == rec["id"]]
+    assert got and got[0]["like"] == 1 and got[0]["weight"] == forecast.WEAK
+
+
+def test_candidate_preview_plays_its_range(win, cut):
+    A, w = win
+    from qtwait import pump
+    page = w.clips
+    page.load(cut)
+    page.set_filter(4)
+    k = page.current_candidate()
+    page.play_candidate()
+    assert page.player._stop_at == int(k["end"] * 1000)              # стоп на конце кандидата
+    for _ in range(200):
+        if abs(page.player.player.position() - k["start"] * 1000) < 1500 and \
+                page.player.player.position() > 0:
+            break
+        pump(50)
+    assert abs(page.player.player.position() - k["start"] * 1000) < 1500

@@ -193,6 +193,11 @@ def _write_json(path, data):
 
 # ---------------- обучение ----------------
 
+# кандидат: «Собрать» / «Удалить» — сигнал вкуса слабее, чем «Хороший» / «В корзину»:
+# собирают и чтобы просто посмотреть, удаляют и просто лишнее
+WEAK = 0.5
+
+
 def collect():
     """Примеры для обучения из всех нарезок: признаки, оценка Гоши, просмотры по площадкам.
     Признаки старых клипов досчитываются из расшифровки (файлы проектов не меняются)."""
@@ -205,6 +210,11 @@ def collect():
         segs = None
         for c in proj["clips"]:
             like = {"good": 1, "published": 1, "rejected": 0}.get(c["status"])
+            weight = 1.0
+            if like is None and c.get("origin") == "candidate" and c["status"] == "new":
+                like, weight = 1, WEAK                   # собрал кандидата — понравился, но слабее
+            if c.get("removed"):
+                continue                                 # «Удалить (без оценки)» — не учим
             views = {p: v["views"] for p, v in (c.get("published") or {}).items()
                      if isinstance(v, dict) and isinstance(v.get("views"), (int, float))}
             if like is None and not views:
@@ -217,8 +227,19 @@ def collect():
                     except A.AutoClipError:
                         segs = []
                 f = clip_features(c, segs)
-            samples.append({"features": f, "like": like, "views": views,
+            samples.append({"features": f, "like": like, "views": views, "weight": weight,
                             "project": proj["_path"], "id": c["id"]})
+        for k in proj.get("candidates") or []:
+            if not k.get("deleted"):
+                continue                                 # удалил кандидата — не понравился, слабее
+            if segs is None:
+                try:
+                    segs = A.load_segments(proj)
+                except A.AutoClipError:
+                    segs = []
+            f = clip_features(dict(k, hook={"on": False}, quiet_start=False), segs)
+            samples.append({"features": f, "like": 0, "views": {}, "weight": WEAK,
+                            "project": proj["_path"], "id": k["id"]})
     return samples
 
 
@@ -243,7 +264,8 @@ def train(save=True, samples=None):
     rated = [s for s in samples if s["like"] is not None]
     if len(rated) >= MIN_SAMPLES and len({s["like"] for s in rated}) == 2:
         mean, std, X = _standardize([vector(s["features"]) for s in rated])
-        m = LogisticRegression(C=1.0, max_iter=1000).fit(X, [s["like"] for s in rated])
+        m = LogisticRegression(C=1.0, max_iter=1000).fit(
+            X, [s["like"] for s in rated], sample_weight=[s.get("weight", 1.0) for s in rated])
         info["like"] = {"coef": [round(float(c), 4) for c in m.coef_[0]],
                         "intercept": round(float(m.intercept_[0]), 4), "mean": mean, "std": std}
 
