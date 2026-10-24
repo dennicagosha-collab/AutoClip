@@ -68,7 +68,19 @@ DEFAULTS = {
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
+    "censor": "partial",
 }
+
+CENSOR = {"Частичная (е*ать)": "partial", "Полная (б****)": "full"}
+
+
+def censor_combo(value):
+    cb = QComboBox()
+    cb.setMinimumWidth(170)
+    for name, key in CENSOR.items():
+        cb.addItem(name, key)
+    cb.setCurrentIndex(max(0, cb.findData(value)))
+    return cb
 
 BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
 FG, MUTED, ACCENT = "#eceef2", "#8b8f9a", "#ff4f6d"
@@ -1346,6 +1358,7 @@ class CutPage(QWidget):
         c["platform_tags"] = dict(s["platform_tags"])
         c["bleep_sound"] = s["sound"]
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
+        c["censor"] = "full" if s.get("censor") == "full" else "partial"
         c["subs_team"] = bool(s.get("subs_team", False))
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -1660,6 +1673,10 @@ class ClipsPage(QWidget):
         self.e_bleep.toggled.connect(self.e_sound.setEnabled)
         row.addWidget(self.e_sound)
         row.addWidget(SoundButton(self.e_sound))
+        self.e_censor = censor_combo("partial")
+        self.e_censor.setToolTip("Частичная: «е*ать». TikTok может распознать полузапиканный мат и урезать охват")
+        self.e_censor.currentIndexChanged.connect(self._changed)
+        row.addWidget(self.e_censor)
         row.addSpacing(12)
         row.addWidget(QLabel("Стиль"))
         self.e_style = QComboBox()
@@ -2738,6 +2755,7 @@ class ClipsPage(QWidget):
                      "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
                      "nick": bool(cfg.get("nick")),
+                     "censor": "full" if cfg.get("censor") == "full" else "partial",
                      "style": (c.get("overrides") or {}).get("sub_style") or "",
                      "music": (c.get("overrides") or {}).get("music"),
                      "bleep_add": list((c.get("overrides") or {}).get("bleep_add") or []),
@@ -2748,7 +2766,7 @@ class ClipsPage(QWidget):
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
-                   self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style)
+                   self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style, self.e_censor)
         for w in widgets:
             w.blockSignals(True)
         fill_sounds(self.e_sound, cfg["bleep_sound"])
@@ -2767,6 +2785,7 @@ class ClipsPage(QWidget):
         self.e_pos.setCurrentText(autoclip.sub_position_name(b["sub_y"]))
         self.e_safe.setChecked(b["safe_zone"])
         self.e_nick.setChecked(b["nick"])
+        self.e_censor.setCurrentIndex(max(0, self.e_censor.findData(b["censor"])))
         self.e_pos.setEnabled(b["subs"])
         self.e_safe.setEnabled(b["subs"])
         self.e_sound.setEnabled(b["bleep"])
@@ -2810,6 +2829,7 @@ class ClipsPage(QWidget):
                 "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
                 "nick": self.e_nick.isChecked(),
+                "censor": self.e_censor.currentData(),
                 "style": self.e_style.currentData() or "",
                 "music": dict(self.music) if self.music else None,
                 "bleep_add": [list(x) for x in self.b_add],
@@ -3448,6 +3468,11 @@ class SettingsPage(QWidget):
         v.addWidget(separator())
         self.cb_bleep = self._toggle("bleep")
         v.addWidget(option_row("Мат звуком", self.cb_bleep))
+        self.censor = censor_combo(self.s.get("censor", "partial"))
+        self.censor.currentIndexChanged.connect(lambda _: self._set("censor", self.censor.currentData()))
+        v.addWidget(option_row("Цензура", self.censor,
+                               "Частичная: «е*ать», звук закрывает только эти буквы. "
+                               "TikTok может распознать полузапиканный мат и урезать охват"))
         snd = QHBoxLayout()
         snd.setSpacing(6)
         self.sound = QComboBox()

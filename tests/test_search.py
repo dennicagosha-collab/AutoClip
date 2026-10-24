@@ -153,4 +153,4 @@ def test_search_hides_mat_in_results():
     h = autoclip.search_transcript(segs, "смеш")[0]
     assert "блядь" not in h["shown"] and h["shown"][slice(*h["hl_shown"])] == "смешно"
     h = autoclip.search_transcript(segs, "бляд")[0]
-    assert h["shown"][slice(*h["hl_shown"])] == autoclip._censor("блядь")
+    assert h["shown"][slice(*h["hl_shown"])] == autoclip.censor_word("блядь")

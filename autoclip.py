@@ -116,6 +116,7 @@ CONFIG = {
     # звук поверх мата: перелистывание / буп / свист / тишина / бип —
     # или имя своего файла из папки «звуки» (mp3, wav, ogg...)
     "bleep_sound": "перелистывание",
+    "censor": "partial",      # мат: partial — скрыть часть слова (е*ать), full — целиком (б****)
     "bleep_volume": 1.0,      # 1.0 = как есть, 0.5 = тише, 1.5 = громче (если речь не измерить)
     "bleep_rel_db": 0.0,      # громкость звука на мат относительно речи рядом, дБ (0 — на уровне голоса)
     "bleep_pad": 0.06,        # запас вокруг слова, сек
@@ -875,7 +876,7 @@ def speaker_segments(segments, spk="me"):
 # ---------------- 3. мат ----------------
 
 _PFX = (r"(?:за|на|по|от|отъ|оть|у|вы|при|до|объ|вз|въ|разъ|изъ|съ|сь|подъ|пере|про|"
-        r"недо|долбо|ни)?")
+        r"недо|долбо|долба|ни)?")
 _HARD = [
     re.compile(r"ху[йеяи]"),                     # хуй, хуе, хуя, хуи + производные
     re.compile(r"^" + _PFX + r"хую"),            # «хую», «нахую» (но не «тихую», «плохую»)
@@ -1463,7 +1464,7 @@ def candidate_record(c, num, segments):
             "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
             "title": c["title"], "reason": c.get("reason", ""), "zooms": c["zooms"],
             "marks": c.get("marks", []),
-            "text": " ".join(_censor(w) for w in text_between(segments, c["s"], c["e"]).split())[:160],
+            "text": " ".join(censor_word(w) for w in text_between(segments, c["s"], c["e"]).split())[:160],
             "created": now_iso()}
 
 
@@ -1625,7 +1626,7 @@ def moment_title(title, segments, s, e, peak):
                  for w in seg["words"] if s <= w["s"] < e][:6]
         title = " ".join(first) or f"момент {fmt_time(peak)}"
     # без мата в названии файла и отчёте
-    return " ".join(_censor(w) for w in title.split())
+    return " ".join(censor_word(w) for w in title.split())
 
 
 def _stems(text):
@@ -1809,11 +1810,61 @@ def _censor(w):
     return (letters[:1] or "*") + "*" * max(2, len(letters) - 1)
 
 
+# частичная цензура: какие буквы корня скрыть (группа x), остальное слово угадывается
+_MASKS = [
+    re.compile(r"^дол(?P<x>б[ао])е"),                 # долбоёб → дол**ёб
+    re.compile(r"ху(?P<x>[йеяи])"),                   # хуйня → ху*ня, нахуй → наху*
+    re.compile(r"^" + _PFX + r"ху(?P<x>ю)"),          # нахую → наху*
+    re.compile(r"пи(?P<x>з)д"),                       # пиздец → пи*дец
+    re.compile(r"^" + _PFX + r"е(?P<x>б)"),           # ебать → е*ать, заебал → зае*ал
+    re.compile(r"^(?:вы|рас|раз)?(?P<x>б)ля"),        # блять → *лять, выблядок → вы*лядок
+    re.compile(r"^с(?P<x>у)[кч]"),                    # сука → с*ка, сучка → с*чка
+    re.compile(r"^(?:на|по)?х(?P<x>е)р"),             # хер → х*р
+    re.compile(r"^м(?P<x>у)д"),                       # мудак → м*дак
+    re.compile(r"^п(?P<x>и)д"),                       # пидор → п*дор
+    re.compile(r"зал(?P<x>у)п"),                      # залупа → зал*па
+    re.compile(r"^г(?P<x>[ао])ндон"),                 # гондон → г*ндон
+    re.compile(r"шл(?P<x>ю)х"),                       # шлюха → шл*ха
+    re.compile(r"^м(?P<x>а)нд"),                      # манда → м*нда
+]
+
+
+def mask_span(word):
+    """Какие буквы мата скрыть при частичной цензуре: (начало, конец, всего букв) по буквам
+    слова, или None — если это не мат или корень не нашёлся."""
+    if not is_profane(word):
+        return None
+    letters = re.sub(r"[^\w*]", "", word)
+    low = letters.lower().replace("ё", "е")
+    for rx in _MASKS:
+        m = rx.search(low)
+        if m:
+            return m.start("x"), m.end("x"), len(letters)
+    return None
+
+
+def censor_word(w, mode=None):
+    """Мат в тексте: частично («е*ать», «*лять») или полностью («б****»). Остальное — как есть."""
+    mode = mode or CONFIG.get("censor", "partial")
+    if not is_profane(w) or "*" in w:
+        return w
+    span = mask_span(w) if mode == "partial" else None
+    if span is None:
+        return _censor(w)
+    a, b, _ = span
+    letters = [ch for ch in w if re.match(r"[\w*]", ch)]
+    idx = [i for i, ch in enumerate(w) if re.match(r"[\w*]", ch)]
+    out = list(w)
+    for k in range(a, b):
+        out[idx[k]] = "*"
+    return "".join(out) if letters else w
+
+
 def _display_word(w, cfg=None):
     cfg = cfg or CONFIG
     w = w.strip()
     w = re.sub(r"^[\"«(]+|[\"»),.;:]+$", "", w)
-    w = _censor(w)
+    w = censor_word(w, cfg.get("censor", "partial"))
     if cfg["sub_uppercase"]:
         w = w.upper()
     return _ass_escape(w)
@@ -2454,7 +2505,11 @@ def mark_manual_bleeps(words, cfg, s, e, hook, hd):
     return sorted(out, key=lambda w: w["s"])
 
 
-def bleep_spans(words, total, pad):
+PARTIAL_MIN = 0.25          # слово короче — закрываем целиком (граница внутри слова ненадёжна)
+PARTIAL_PAD = 0.04          # запас вокруг скрытой части
+
+
+def bleep_spans(words, total, pad, partial=False):
     """Где закрыть мат: [(начало, конец, до_куда_можно_звук)] во времени клипа.
     Запас pad вокруг слова не залезает на соседние слова без мата, а звук поверх мата
     должен закончиться до начала следующего такого слова."""
@@ -2468,6 +2523,13 @@ def bleep_spans(words, total, pad):
         a = max(0.0, wd["s"] - pad, min(prev_e, wd["s"]))
         b = min(total, wd["e"] + pad, max(nxt, wd["e"]))
         until = min(total, max(nxt, b))
+        span = mask_span(wd["w"]) if partial and wd["w"] else None
+        d = wd["e"] - wd["s"]
+        if span and d >= PARTIAL_MIN:
+            x, y, n = span                       # закрыть только скрытые буквы, остальное слышно
+            a = max(0.0, wd["s"] + d * x / n - PARTIAL_PAD)
+            b = min(total, wd["s"] + d * y / n + PARTIAL_PAD)
+            until = b
         if spans and a <= spans[-1][1]:
             spans[-1][1:] = [b, until]
         else:
@@ -2552,7 +2614,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     graph += vin + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
-    bleeps = bleep_spans(words, total, cfg["bleep_pad"]) if cfg["bleep"] else []
+    bleeps = bleep_spans(words, total, cfg["bleep_pad"], cfg.get("censor") == "partial") if cfg["bleep"] else []
     snd = sound_path(cfg["bleep_sound"]) if bleeps else None
     extra_in = []
     if bleeps:
@@ -2806,13 +2868,13 @@ STATUSES = {"new": "новый", "good": "хороший", "published": "выл�
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
-                 "words_edit", "mat_words", "title") + STYLE_KEYS
+                 "words_edit", "mat_words", "title", "censor") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
                "sub_x", "sub_style",
                "sub_uppercase", "zoom", "zoom_amount", "zoom_focus_y", "bleep", "bleep_soft",
-               "bleep_sound", "bleep_volume", "bleep_rel_db", "bleep_pad", "preset", "hook",
+               "bleep_sound", "bleep_volume", "bleep_rel_db", "bleep_pad", "censor", "preset", "hook",
                "nick", "nick_text", "nick_corner", "nick_size", "nick_opacity",
                "hashtags", "platform_tags")
 
@@ -2898,6 +2960,8 @@ def clip_config(proj, clip):
     """Настройки рендера клипа: общие → сохранённые в проекте → личные клипа."""
     cfg = dict(CONFIG)
     cfg.update(proj.get("settings", {}))
+    if proj.get("settings") and "censor" not in proj["settings"]:
+        cfg["censor"] = "full"                      # нарезки до 1.3.0 — пересборка как была
     cfg.update({k: v for k, v in clip.get("overrides", {}).items() if k in OVERRIDE_KEYS})
     return cfg
 
@@ -3148,7 +3212,9 @@ def compose_tags(platform, cfg=None, content=()):
 def clip_title(clip):
     """Название клипа для описания: от модели, если есть, иначе своё (без мата)."""
     meta = clip.get("meta") or {}
-    return (meta.get("title") or clip.get("title") or "").strip()
+    mode = (clip.get("overrides") or {}).get("censor")
+    title = (meta.get("title") or clip.get("title") or "").strip()
+    return " ".join(censor_word(w, mode) for w in title.split())
 
 
 def auto_description(clip, platform, cfg=None):
@@ -3221,7 +3287,7 @@ def llm_clip_meta(clip_text, mode):
     except Exception as e:
         warn_once(f"   ⚠️  модель не ответила про название ({e})")
         return None
-    title = " ".join(_censor(w) for w in str(data.get("title", "")).replace('"', "").split())[:60]
+    title = " ".join(censor_word(w) for w in str(data.get("title", "")).replace('"', "").split())[:60]
     tags = [t for t in parse_tags(" ".join(map(str, data.get("tags", []) or [])))
             if useful_tag(t)][:3]
     if not title and not tags:
@@ -3267,7 +3333,7 @@ def search_transcript(segments, query, limit=300):
             starts.append(len(text))
             text += str(w["w"]).strip()
             a = len(shown)
-            shown += _censor(str(w["w"]).strip())
+            shown += censor_word(str(w["w"]).strip())
             sh.append((a, len(shown)))
         low = norm_text(text)
         pos = low.find(q)
@@ -3889,6 +3955,7 @@ def recording_info(path):
 # ---------------- main ----------------
 
 def safe_name(s):
+    s = s.replace("*", "＊")              # звёздочку Windows в имени не пускает — маска мата «е＊ать»
     s = re.sub(r"[\\/:*?\"<>|\n\r\t]+", "", s).strip()
     s = re.sub(r"\s+", "_", s)
     return s[:50] or "clip"
