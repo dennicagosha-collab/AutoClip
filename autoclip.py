@@ -615,6 +615,77 @@ def loudness_per_second(wav):
     return np.array(out, dtype=np.float32)
 
 
+def punch_per_second(wav):
+    """Самый громкий 0,1-секундный кусок каждой секунды (dB) — всплески: выстрел, удар."""
+    import numpy as np
+    out = []
+    with wave.open(wav, "rb") as wf:
+        sr = wf.getframerate()
+        k = max(1, sr // 10)
+        while True:
+            frames = wf.readframes(sr)
+            if not frames:
+                break
+            x = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+            n = max(1, len(x) // k)
+            x = x[:n * k].reshape(n, -1) if len(x) >= k else x.reshape(1, -1)
+            out.append(float(20 * np.log10(np.sqrt((x * x).mean(axis=1)).max() + 1e-6)))
+    return np.array(out, dtype=np.float32)
+
+
+DEAD_Z = 0.0          # громкость не выше фона…
+DEAD_BURST = 3.0      # …и всплески не громче фона больше чем на 3 дБ
+DEAD_CUT = 6.0        # мёртвый кусок длиннее — вырезается из клипа
+DEAD_TAIL = 3.0       # после пика мёртвое время длиннее — хвост дальше не тянем
+
+
+def dead_seconds(loud, punch, loud_z, voice, words):
+    """Мёртвые секунды: нет голоса (Silero) и слов, тихо в игре и нет всплесков. Всё остальное —
+    контекст: драка, смерть, стрельба, разговор."""
+    import numpy as np
+    from numpy.lib.stride_tricks import sliding_window_view
+    n = len(loud)
+    base = np.median(sliding_window_view(np.pad(loud, (60, 60), mode="edge"), 121), axis=1)[:n]
+    m = min(n, len(punch))
+    dead = np.zeros(n, bool)
+    dead[:m] = (np.asarray(loud_z[:m]) <= DEAD_Z) & (np.asarray(punch[:m]) - base[:m] <= DEAD_BURST)
+    for a, b in voice or ():
+        dead[max(0, int(a)):min(n, int(math.ceil(b)))] = False
+    for w in words:
+        dead[max(0, int(w["s"])):min(n, int(math.ceil(w["e"])))] = False
+    return dead
+
+
+def dead_runs(dead, s, e):
+    """Мёртвые куски внутри [s, e]: [(начало, конец)] по целым секундам."""
+    out, i, hi = [], max(0, int(math.ceil(s))), min(len(dead), int(e))
+    while i < hi:
+        if dead[i]:
+            j = i
+            while j < hi and dead[j]:
+                j += 1
+            out.append((float(i), float(j)))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def trim_dead(s, e, peak, dead, min_len=10.0):
+    """Убрать из клипа мёртвые куски ≥ DEAD_CUT с (со стороны без пика) и не тянуть хвост
+    после пика в мёртвое время ≥ DEAD_TAIL с. Клип не короче min_len."""
+    if dead is None or not len(dead):
+        return s, e
+    for a, b in dead_runs(dead, s, e):
+        if b <= peak and b - a >= DEAD_CUT and e - (b - 1.0) >= min_len:
+            s = max(s, b - 1.0)                       # начало — за 1 с до конца мёртвого куска
+    for a, b in dead_runs(dead, peak + 1.0, e):
+        if b - a >= DEAD_TAIL and (a + 0.5) - s >= min_len:
+            e = min(e, a + 0.5)
+            break
+    return s, e
+
+
 # ---------------- 2. расшифровка ----------------
 
 def _windows_cuda_dlls():
@@ -1866,7 +1937,7 @@ START_SILENT = 30.0   # клип без единого слова в первы�
 
 
 def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), marks=(),
-               limit=None, voice=None):
+               limit=None, voice=None, dead=None):
     """taken — интервалы (начало, конец) уже существующих клипов: рядом с ними не берём.
     marks — метки из OBS: их моменты идут первыми, сверх обычного числа клипов, если надо.
     limit — сколько моментов искать (по умолчанию CONFIG["clips"])."""
@@ -1897,7 +1968,9 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
 
         m = next((m for m in moments if m["s"] - 3 <= peak <= m["e"] + 3), None)
         if m:
-            s, e = m["s"], m["e"]
+            # подсказка модели, но до пика — не меньше pre, после — не меньше post: контекст
+            # (драка, вопрос) модель часто не включает; лишнее мёртвое потом вырежет trim_dead
+            s, e = min(m["s"], peak - CONFIG["pre"]), max(m["e"], peak + CONFIG["post"])
             title, reason = m["title"], m["reason"]
         else:
             s, e = peak - CONFIG["pre"], peak + CONFIG["post"]
@@ -1907,6 +1980,7 @@ def pick_clips(smooth, loud_z, segments, moments, dur, parts=None, taken=(), mar
             continue
         # границы — как в 1.1 (окно вокруг пика, края в паузах между фразами); обрезка по
         # первой/последней речи и мягким паузам из 3.1 убрана: она срезала драку, смерть, вопрос
+        s, e = trim_dead(s, e, peak, dead)              # мёртвое (нет речи и тихо в игре) — долой
         s, e = guard_edges(s, e, words, voice, max_end=min(dur, s + CONFIG["max_len"] + 2))
         short = False
         if any(not (e <= c["s"] or s >= c["e"]) for c in clips + busy):
@@ -4515,6 +4589,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         prog("звук", 0, "достаю звук")
         extract_audio(video, wav, cancel)
         loud = loudness_per_second(wav)
+        punch = punch_per_second(wav)
         voice = speech_regions(_read_wav(wav))      # где слышен голос — края клипов не режут его
         prog("звук", 100)
         t = mark("звук и громкость", t)
@@ -4560,7 +4635,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     smooth, loud_z, parts = score_timeline(loud, speaker_segments(segments, "me"), moments)
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
-    found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks, voice=voice,
+    dead = dead_seconds(loud, punch, loud_z, voice, all_words(segments))
+    found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks, voice=voice, dead=dead,
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
     clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
