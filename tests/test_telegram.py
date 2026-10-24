@@ -246,3 +246,18 @@ def test_window_uses_telegram(tmp_path, monkeypatch):
         assert wait(lambda: any("Нарезка готова" in (t or "") for t in api.texts()))
     finally:
         w.close()
+
+
+def test_update_buttons(tmp_path):
+    api = FakeTelegram()
+    bot = connected_bot(api)
+    bot.notify_update({"version": "1.2.0", "notes": "- новое"}, "1.1.0")
+    text = api.texts()[-1]
+    assert "1.2.0" in text and "1.1.0" in text and "- новое" in text
+    btn = [b["callback_data"] for b in api.sent[-1][1]["reply_markup"]["inline_keyboard"][0]]
+    api.press(ME, btn[1])                                            # «Позже» — кнопки ещё живы
+    assert bot.poll(0) == [] and api.answers[-1] == "Ок, позже"
+    api.press(ME, btn[0])
+    assert bot.poll(0) == [("update", "1.2.0")]
+    api.press(ME, btn[2])                                            # уже ответил — неактуально
+    assert bot.poll(0) == [] and api.answers[-1] == tg.STALE

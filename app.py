@@ -13,6 +13,9 @@ import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+
+import recover  # noqa: E402
+recover.recover()                  # обновление прервали посередине — вернуть рабочую версию
 os.environ["PATH"] = HERE + os.pathsep + os.environ.get("PATH", "")
 
 import autoclip  # noqa: E402
@@ -205,6 +208,7 @@ class Bus(QObject):
     thumb = Signal(int, str, object)
     rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
     added = Signal(object, object)         # новый клип (id) или None, текст ошибки или None
+    rebuild_progress = Signal(float)       # пересборка клипа, проценты
     weekly_progress = Signal(float, str)
     weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
     trained = Signal(object)               # итог обучения прогноза
@@ -560,6 +564,22 @@ class WaveView(QWidget):
         if self._drag:
             self._drag = None
             self.moved.emit(round(self.offset, 2))
+
+
+# сколько времени обычно занимает этап нарезки (доли): так полоса идёт ровнее, чем «поровну»
+STAGE_WEIGHTS = {"звук": 0.05, "расшифровка": 0.35, "модель": 0.2, "поиск": 0.05, "рендер": 0.35}
+
+
+def stage_fraction(stage, pct):
+    """Общая доля нарезки по этапу и проценту внутри этапа."""
+    stages = list(autoclip.STAGES)
+    w = [STAGE_WEIGHTS.get(st, 1 / len(stages)) for st in stages]
+    total = sum(w)
+    i = stages.index(stage)
+    return min(1.0, (sum(w[:i]) + w[i] * max(0.0, min(100.0, pct)) / 100) / total)
+
+
+UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
 def plural(n, one, few, many):
@@ -1207,9 +1227,12 @@ class CutPage(QWidget):
         lay.addLayout(steps)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
-        self.bar.setFixedHeight(6)
-        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(22)
+        self.bar.setTextVisible(True)
+        self.bar.setFormat("")
+        self.bar.setAlignment(Qt.AlignCenter)
         lay.addWidget(self.bar)
+        self.eta = None
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -1339,6 +1362,7 @@ class CutPage(QWidget):
             if not self.files:
                 return
         self.apply_config()
+        self.eta = autoclip.Eta()
         self.win.start_cut(list(self.files))
         self.btn.setText("■   Остановить")
         self._busy_style(True)
@@ -1364,7 +1388,10 @@ class CutPage(QWidget):
         if stage not in stages:
             return
         i = stages.index(stage)
-        self.bar.setValue(int((i + pct / 100) / len(stages) * 1000))
+        frac = stage_fraction(stage, pct)
+        self.bar.setValue(int(frac * 1000))
+        left = self.eta.update(frac) if self.eta else None
+        self.bar.setFormat(f"{frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
         for j, (lb, st) in enumerate(zip(self.step_labels, stages)):
             if j < i or (j == i and pct >= 100):
                 self._step_state(lb, "✓ " + st, "done")
@@ -1372,6 +1399,8 @@ class CutPage(QWidget):
                 self._step_state(lb, f"{st}  {pct:.0f}%", "active")
 
     def finished(self, out):
+        self.eta = None
+        self.bar.setFormat("готово" if out else "")
         self.btn.setText("✂   Нарезать")
         self.btn.setEnabled(True)
         self._busy_style(False)
@@ -1935,6 +1964,7 @@ class ClipsPage(QWidget):
         self.empty.hide()
         self.win.bus.rebuilt.connect(self._rebuilt)
         self.win.bus.added.connect(self._added)
+        self.win.bus.rebuild_progress.connect(self._rebuild_progress)
         self.refresh_recent()
 
     # ---------- нарезки ----------
@@ -2909,16 +2939,24 @@ class ClipsPage(QWidget):
         self.player.release_file()               # иначе Windows не даст заменить файл
         cid, pp = c["id"], self.proj["_path"]
         bus = self.win.bus
+        self._reta = autoclip.Eta()
 
         def work():
             try:
-                autoclip.rebuild_clip(pp, cid, start, end, overrides)
+                autoclip.rebuild_clip(pp, cid, start, end, overrides,
+                                      progress=lambda st, pct, msg: bus.rebuild_progress.emit(float(pct)))
                 bus.rebuilt.emit(cid, None)
             except autoclip.AutoClipError as e:
                 bus.rebuilt.emit(cid, str(e))
             except Exception:
                 bus.rebuilt.emit(cid, "❌ " + traceback.format_exc()[-800:])
         threading.Thread(target=work, daemon=True).start()
+
+    def _rebuild_progress(self, pct):
+        if not self.busy:
+            return
+        left = self._reta.update(pct / 100) if getattr(self, "_reta", None) else None
+        self.state.setText(f"Пересобираю… {pct:.0f}%" + (f" · {autoclip.fmt_left(left)}" if left is not None else ""))
 
     def _rebuilt(self, cid, err):
         self.busy = False
@@ -3238,6 +3276,7 @@ class WeeklyPage(QWidget):
         self.state.setText("Собираю…")
         fmt = self.s["weekly_format"]
         music = self.s.get("weekly_music", "")
+        self.eta = autoclip.Eta()
         autoclip.WEEKLY_DIR = self.s["weekly_dir"]
         bus = self.win.bus
 
@@ -3255,7 +3294,11 @@ class WeeklyPage(QWidget):
 
     def _progress(self, pct, msg):
         self.bar.setValue(int(pct * 10))
-        self.state.setText(f"Собираю… {pct:.0f}%  {msg}")
+        if getattr(self, "eta", None) is None:
+            self.eta = autoclip.Eta()
+        left = self.eta.update(pct / 100)
+        self.state.setText(f"Собираю… {pct:.0f}%" + (f" · {autoclip.fmt_left(left)}" if left is not None else "")
+                           + f"  {msg}")
 
     def _done(self, out, err):
         self.busy = False
@@ -4237,6 +4280,12 @@ class UpdateDialog(QDialog):
             lay.addWidget(notes)
         self.state = QLabel("")
         lay.addWidget(self.state)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setFixedHeight(20)
+        self.bar.setAlignment(Qt.AlignCenter)
+        self.bar.hide()
+        lay.addWidget(self.bar)
         row = QHBoxLayout()
         self.skip = QPushButton("Пропустить эту версию")
         self.skip.setObjectName("ghost")
@@ -4435,6 +4484,12 @@ class MainWindow(QMainWindow):
         self._update_dialog = None
         if self.settings.get("check_updates", True) and update.REPO:
             QTimer.singleShot(3000, self.check_updates)
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(UPDATE_EVERY_MS)            # и потом раз в 6 часов, пока запущена
+        self.update_timer.timeout.connect(
+            lambda: self.check_updates() if self.settings.get("check_updates", True) and update.REPO else None)
+        self.update_timer.start()
+        self._pending_update = None
 
     # --- прогноз ---
     def retrain(self):
@@ -4539,6 +4594,10 @@ class MainWindow(QMainWindow):
                     self.bus.update_found.emit({"error": str(e)}, True)
         threading.Thread(target=work, daemon=True).start()
 
+    def working(self):
+        """Идёт нарезка, пересборка, сборка клипа или подборки — обновлять нельзя."""
+        return bool(self.busy or self.clips.busy or getattr(self.weekly, "busy", False))
+
     def update_found(self, rel, manual):
         st = self.settings_page.update_state
         if rel and rel.get("error"):
@@ -4548,8 +4607,20 @@ class MainWindow(QMainWindow):
             st.setText(f"Стоит последняя версия — {update.VERSION}.")
             return
         st.setText(f"Есть версия {rel['version']}.")
+        if not manual and self.settings.get("tg_update_told") != rel["version"]:
+            self.settings["tg_update_told"] = rel["version"]
+            save_settings(self.settings)
+            self.telegram.do(lambda bot, rel=rel: bot.notify_update(rel, update.VERSION))
         if self._update_dialog:
             return
+        if not manual and (not self.isVisible() or self.working()):
+            # окна нет (в трее, идёт игра) или идёт работа — спросим, когда откроют / закончится
+            self._pending_update = rel
+            if self.tray and not self.isVisible():
+                self.tray.showMessage("AutoClip", f"Вышла версия {rel['version']}. Откройте окно, чтобы обновить.",
+                                      QSystemTrayIcon.Information, 10000)
+            return
+        self._pending_update = None
         dlg = UpdateDialog(self, rel)
         self._update_dialog = dlg
 
@@ -4561,13 +4632,31 @@ class MainWindow(QMainWindow):
         dlg.finished.connect(done)
         dlg.show()
 
+    def ask_pending_update(self):
+        rel = self._pending_update
+        if rel and self.isVisible() and not self.working() and not self._update_dialog:
+            self.update_found(rel, False)
+
     def install_update(self, dlg):
-        if self.busy:
-            dlg.state.setText("Идёт нарезка — обновлю, когда она закончится. Нажми «Не сейчас».")
+        if self.working():
+            dlg.state.setText("Идёт работа — обновлю, когда она закончится. Нажми «Не сейчас», "
+                              "программа спросит снова.")
             dlg.later.setEnabled(True)
+            self._pending_update = dlg.rel
             return
-        self.bus.update_progress.connect(
-            lambda p: dlg.state.setText(f"Скачиваю… {p:.0%}"))
+        eta = autoclip.Eta()
+        dlg.bar.show()
+
+        def show(p):
+            left = eta.update(p)
+            dlg.bar.setValue(int(p * 1000))
+            dlg.bar.setFormat(f"{p:.0%}" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
+            dlg.state.setText("Скачиваю…" if p < 1 else "Ставлю…")
+        try:
+            self.bus.update_progress.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.bus.update_progress.connect(show)
 
         def work():
             try:
@@ -4674,6 +4763,20 @@ class MainWindow(QMainWindow):
             autoclip.set_recording_state(arg, "cut" if kind == "cut" else "declined")
             if kind == "cut":
                 self.cut_recording(arg)
+        elif kind == "update":
+            rel = self._pending_update or {}
+            if arg and rel.get("version") == arg:
+                if self.working():
+                    self.telegram.do(lambda bot: bot.send("Сейчас идёт работа — обновлю, когда закончится, "
+                                                          "и спрошу ещё раз."))
+                    return
+                self.update_found(rel, True)               # показать окно и сразу ставить
+                if self._update_dialog:
+                    self._update_dialog._done("update")
+        elif kind == "skip_update":
+            self.settings["skip_version"] = arg
+            save_settings(self.settings)
+            self._pending_update = None
         elif kind == "views":
             self.retrain()
             c = self.clips.current_clip() if self.clips.proj else None
@@ -4694,6 +4797,7 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         QTimer.singleShot(200, self.ask_pending)
+        QTimer.singleShot(400, self.ask_pending_update)
 
     def changeEvent(self, e):
         from PySide6.QtCore import QEvent
@@ -4751,6 +4855,7 @@ class MainWindow(QMainWindow):
     def finished(self, out):
         self.busy = False
         self.cut.finished(out)
+        QTimer.singleShot(1500, self.ask_pending_update)     # отложенное обновление — после работы
         if out:
             self.telegram.do(lambda bot: bot.notify_cut(out))
             self.clips.load(out)

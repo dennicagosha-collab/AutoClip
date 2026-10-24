@@ -237,6 +237,17 @@ class Bot:
                   f"меток: {marks}. Нарезать?",
                   [("Нарезать", f"cut:{key}"), ("Не надо", f"no:{key}")])
 
+    def notify_update(self, rel, current):
+        """Вышла новая версия — «Обновить» / «Позже» / «Пропустить версию»."""
+        v = rel["version"]
+        self.st.setdefault("pending", {})[f"u{v}"] = {"kind": "update", "version": v}
+        self.save()
+        notes = (rel.get("notes") or "").strip()
+        self.send(f"Вышла новая версия AutoClip {v} (сейчас {current})."
+                  + (f"\n\n{notes[:800]}" if notes else "")
+                  + "\n\nОбновлю, только когда скажешь, и не во время нарезки.",
+                  [("Обновить", f"upd:{v}"), ("Позже", f"later_upd:{v}"), ("Пропустить версию", f"skip_upd:{v}")])
+
     def drop_recording(self, path):
         """На запись ответили в программе — кнопки в Telegram больше не нужны."""
         pend = self.st.get("pending", {})
@@ -308,7 +319,14 @@ class Bot:
         out, reply = [], STALE
         pend = self.st.setdefault("pending", {})
         ask = self.st.get("asking") or {}
-        if kind in ("cut", "no") and key in pend:
+        if kind in ("upd", "later_upd", "skip_upd") and f"u{key}" in pend:
+            if kind != "later_upd":
+                pend.pop(f"u{key}")
+            out.append({"upd": ("update", key), "skip_upd": ("skip_update", key)}.get(kind, ("later", key)))
+            reply = {"upd": "Ставлю обновление", "later_upd": "Ок, позже",
+                     "skip_upd": "Эту версию пропускаю"}[kind]
+            out = [a for a in out if a[0] != "later"]
+        elif kind in ("cut", "no") and key in pend:
             item = pend.pop(key)
             out.append((kind, item["path"]))
             reply = "Нарезаю" if kind == "cut" else "Ок, не режу"

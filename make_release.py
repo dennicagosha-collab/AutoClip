@@ -39,6 +39,7 @@ def main():
     os.makedirs(os.path.join(HERE, "dist"), exist_ok=True)
     zip_path = os.path.join("dist", f"AutoClip-{tag}.zip")
     run("git", "archive", "--format=zip", "--prefix=AutoClip/", "-o", zip_path, "HEAD")
+    notes += f"\n\nSHA-256: {update.sha256(os.path.join(HERE, zip_path))}"   # программа сверит архив
     run("git", "tag", "-a", tag, "-m", f"AutoClip {update.VERSION}")
     branch = run("git", "rev-parse", "--abbrev-ref", "HEAD", capture=True)
     run("git", "push", "origin", branch, tag)

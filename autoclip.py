@@ -181,7 +181,10 @@ def _flags():
     return _NO_WINDOW | (_proc_priority if os.name == "nt" else 0)
 
 
-def run(cmd, cwd=None, quiet=True, cancel=None, binary=False):
+def run(cmd, cwd=None, quiet=True, cancel=None, binary=False, on_time=None):
+    """on_time(секунд готово) — ход работы ffmpeg (через -progress), для полосы прогресса."""
+    if on_time is not None:
+        return _run_progress(cmd, cwd, quiet, cancel, on_time)
     text = {} if binary else {"encoding": "utf-8", "errors": "replace"}
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
@@ -199,6 +202,68 @@ def run(cmd, cwd=None, quiet=True, cancel=None, binary=False):
     if p.returncode != 0 and not quiet and not binary:
         log(p.stderr[-3000:])
     return p
+
+
+def _run_progress(cmd, cwd, quiet, cancel, on_time):
+    import threading
+    cmd = [cmd[0], "-progress", "pipe:1", "-nostats"] + list(cmd[1:])
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+                            creationflags=_flags())
+    err = []
+    t = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    t.start()
+    for line in proc.stdout:
+        if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+            try:
+                on_time(int(line.split("=", 1)[1]) / 1e6)
+            except (ValueError, Exception):
+                pass
+        if _is_cancelled(cancel):
+            proc.kill()
+            proc.wait()
+            raise Cancelled()
+    proc.wait()
+    t.join(5)
+    p = subprocess.CompletedProcess(cmd, proc.returncode, "", "".join(err))
+    if p.returncode != 0 and not quiet:
+        log(p.stderr[-3000:])
+    return p
+
+
+class Eta:
+    """Сколько осталось — по уже прошедшему времени, сглаженно, без скачков."""
+
+    def __init__(self, now=None):
+        self.t0 = now if now is not None else time.time()
+        self.left = None
+
+    def update(self, frac, now=None):
+        """frac — доля сделанного 0..1. Возвращает секунды до конца или None (рано судить)."""
+        now = now if now is not None else time.time()
+        spent = now - self.t0
+        if frac <= 0.02 or spent < 2:
+            return None
+        raw = spent * (1 - frac) / frac
+        if self.left is None:
+            self.left = raw
+        else:
+            # плавно: новая оценка весит 15%, а прошедшее время честно вычитается
+            self.left = 0.85 * max(0.0, self.left - (now - self._last)) + 0.15 * raw
+        self._last = now
+        return max(0.0, self.left)
+
+    _last = 0.0
+
+
+def fmt_left(sec):
+    """«осталось около 2 мин» / «меньше минуты»."""
+    if sec is None:
+        return ""
+    if sec < 45:
+        return "осталось меньше минуты"
+    m = int(round(sec / 60))
+    return f"осталось около {m} мин" if m < 90 else f"осталось около {m / 60:.1f} ч".replace(".", ",")
 
 
 # ---------------- режимы сборки ----------------
@@ -2291,7 +2356,8 @@ def bleep_spans(words, total, pad):
     return [tuple(x) for x in spans]
 
 
-def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None):
+def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None,
+                on_frac=None):
     """clip: {'s', 'e', 'zooms', 'hook': (начало, конец) или None} во времени записи.
     Хук — кусок этого же клипа, ставится в самое начало, затем клип с начала.
     Возвращает число запиканных мест или None. Клип собирается во временной папке
@@ -2417,8 +2483,9 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     encs = _encoders(preset)
     names = [_ENCODER] if _ENCODER else list(encs)
     last_err = ""
+    track = (lambda t: on_frac(min(1.0, t / total))) if on_frac else None
     for name in names:
-        p = run(base + encs[name] + tail, cwd=tmpdir, cancel=cancel)
+        p = run(base + encs[name] + tail, cwd=tmpdir, cancel=cancel, on_time=track)
         if p.returncode == 0:
             _ENCODER = name
             replace_file(tmp_out, out_path)
@@ -3205,7 +3272,8 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
         bl = render_clip(src, {"s": s, "e": e, "zooms": clip["zooms"], "hook": span}, segments,
-                         proj["source_info"], out, tmp, cfg, cancel)
+                         proj["source_info"], out, tmp, cfg, cancel,
+                         on_frac=(lambda f: progress("рендер", f * 95, clip["file"])) if progress else None)
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
@@ -3363,8 +3431,11 @@ def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cance
                                   "-b:a", "320k", "-ar", "48000", part]
             names = [_ENCODER] if _ENCODER else list(encs)
             err = ""
+            part_frac = ((lambda t, i=i, dur=dur: progress("подборка", (i - 1 + min(1, t / dur)) / len(paths) * 90,
+                                                           os.path.basename(src)))
+                         if progress else None)
             for name in names:
-                p = run(base + encs[name] + tail, cancel=cancel)
+                p = run(base + encs[name] + tail, cancel=cancel, on_time=part_frac)
                 if p.returncode == 0:
                     _ENCODER = name
                     break
@@ -3887,6 +3958,14 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     import threading
     lock = threading.Lock()
     done = [0]
+    fracs = {}
+
+    def frac_of(num, name):
+        def f(x):
+            with lock:
+                fracs[num] = x
+                prog("рендер", sum(fracs.values()) / len(clips) * 100, name)
+        return f
 
     def build(num, c):
         """Один клип: рендер, тихое начало, обложка, прогноз. Своя временная папка —
@@ -3900,7 +3979,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         rec["hook"]["on"] = span is not None
         with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
             rec["bleeps"] = render_clip(video, dict(c, hook=span), segments, vinfo,
-                                        os.path.join(out_dir, name), tmp, cfg, cancel)
+                                        os.path.join(out_dir, name), tmp, cfg, cancel,
+                                        on_frac=frac_of(num, name))
         if rec["bleeps"] is None:
             return None
         rec["rendered"] = now_iso()
@@ -3913,7 +3993,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
             proj["clips"].sort(key=lambda r: r["num"])
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
             done[0] += 1
-            prog("рендер", done[0] / len(clips) * 100, name)
+            fracs[num] = 1.0
+            prog("рендер", sum(fracs.values()) / len(clips) * 100, name)
         return rec
 
     prog("рендер", 0)

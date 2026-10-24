@@ -43,7 +43,7 @@ def test_latest_release(monkeypatch):
     r = update.latest("gosha/AutoClip")
     assert asked == ["https://api.github.com/repos/gosha/AutoClip/releases/latest"]
     assert r == {"version": "1.2.0", "notes": "Что нового: всё", "url": "https://example/a.zip",
-                 "size": 123}
+                 "size": 123, "sha256": None}
     monkeypatch.setattr(update, "VERSION", "1.0.0")
     assert update.check("gosha/AutoClip")["version"] == "1.2.0"
     assert update.check("gosha/AutoClip", skip="1.2.0") is None          # «Пропустить эту версию»
@@ -196,6 +196,7 @@ def test_update_dialog_and_settings(win):
     assert "последняя версия" in w.settings_page.update_state.text()
     w.update_found({"error": "❌ нет сети"}, True)
     assert w.settings_page.update_state.text() == "❌ нет сети"
+    w.show()                                                  # окно на экране — спрашиваем сразу
     w.update_found({"version": "9.0.0", "notes": "Что нового", "url": "u", "size": 1}, False)
     dlg = w._update_dialog
     assert isinstance(dlg, A.UpdateDialog)
@@ -269,3 +270,85 @@ def test_news_shown_once_after_update(win, monkeypatch):
     w.news_after_update()                      # второй раз не показываем
     assert w._news is None
     assert A.load_settings()["seen_version"] == "1.1.0"
+
+
+
+# ---------- 3.12: сумма архива и обрыв посередине ----------
+
+def test_sha_from_release_notes(monkeypatch):
+    rel = {"tag_name": "v1.2.0", "body": "Что нового\n\nSHA-256: " + "ab" * 32, "assets": []}
+    monkeypatch.setattr(update, "_get", lambda url, t: FakeResp(json.dumps(rel).encode()))
+    r = update.latest("gosha/AutoClip")
+    assert r["sha256"] == "ab" * 32 and r["notes"] == "Что нового"          # сумма — не в «что нового»
+
+
+def test_bad_sha_changes_nothing(tmp_path):
+    app = tmp_path / "AutoClip"
+    app.mkdir()
+    write(app, OLD)
+    z = make_zip(tmp_path / "new.zip", {"app.py": "новое", "autoclip.py": "я", "update.py": "u"})
+    with pytest.raises(autoclip.AutoClipError, match="SHA-256"):
+        update.install(z, str(app), expect_sha="00" * 32)
+    assert read(app / "app.py") == "старое окно"
+    update.install(z, str(app), expect_sha=update.sha256(z))
+    assert read(app / "app.py") == "новое"
+    assert not (app / update.JOURNAL_NAME).exists()
+
+
+def test_power_cut_in_the_middle_rolls_back(tmp_path, monkeypatch, fake_trash):
+    app = tmp_path / "AutoClip"
+    app.mkdir()
+    write(app, OLD)
+    user = tmp_path / "AppData"
+    user.mkdir()
+    (user / "telegram.json").write_text('{"token": "x"}', encoding="utf-8")
+    z = make_zip(tmp_path / "new.zip", {"app.py": "новое окно", "autoclip.py": "новое ядро",
+                                        "update.py": "u2", "новый.py": "добавлен"})
+    real = os.replace
+    done = []
+
+    def cut_power(a, b):                                    # «выключили свет» на второй замене
+        if str(b).endswith(".py") and not str(a).endswith(".old") and "прежняя" not in str(b):
+            done.append(b)
+            if len(done) == 2:
+                raise SystemExit("свет выключили")
+        return real(a, b)
+    monkeypatch.setattr(update.os, "replace", cut_power)
+    with pytest.raises(SystemExit):
+        update.install(z, str(app))
+    monkeypatch.setattr(update.os, "replace", real)
+    assert (app / update.JOURNAL_NAME).exists()            # замена не закончена
+    assert update.recover(str(app))                        # следующий запуск — откат
+    for name, text in OLD.items():
+        assert read(app / name) == text                    # рабочая старая версия целиком
+    assert not (app / "новый.py").exists() and not (app / update.JOURNAL_NAME).exists()
+    assert read(user / "telegram.json") == '{"token": "x"}'   # данные пользователя на месте
+    assert not update.recover(str(app))                     # второй раз делать нечего
+
+
+def test_update_waits_for_work_and_window(win, monkeypatch):
+    A, w = win
+    rel = {"version": "9.0.0", "notes": "", "url": "u", "size": 1, "sha256": "a" * 64}
+    w.busy = True                                               # идёт нарезка
+    w.show()
+    w.update_found(rel, False)
+    assert w._update_dialog is None and w._pending_update == rel  # не во время работы
+    w.busy = False
+    w.ask_pending_update()                                      # работа кончилась — спросили
+    assert w._update_dialog is not None
+    w._update_dialog.accept()
+    w._update_dialog = None
+    w.hide()
+    w.update_found(rel, False)                                  # окно в трее — только уведомление
+    assert w._update_dialog is None and w._pending_update == rel
+    assert w.update_timer.interval() == 6 * 3600 * 1000
+
+
+def test_eta_smooth():
+    eta = autoclip.Eta(now=0)
+    assert eta.update(0.01, now=1) is None                      # рано судить
+    a = eta.update(0.25, now=10)                                # 10 с на четверть — ~30 с ещё
+    assert 25 < a < 35
+    b = eta.update(0.30, now=11)                                # рывок вперёд — оценка без скачка
+    assert abs(b - (a - 1)) < 5
+    assert autoclip.fmt_left(30) == "осталось меньше минуты" and autoclip.fmt_left(150) == "осталось около 2 мин"

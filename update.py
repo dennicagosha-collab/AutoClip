@@ -106,10 +106,21 @@ def latest(repo=None, timeout=6):
         raise AutoClipError("❌ Не получилось связаться с GitHub. Проверь интернет.")
     asset = next((a for a in data.get("assets", []) if a.get("name", "").lower().endswith(".zip")),
                  None)
-    return {"version": str(data.get("tag_name", "")).lstrip("v"),
-            "notes": (data.get("body") or "").strip(),
+    body = (data.get("body") or "").strip()
+    m = re.search(r"SHA-256:\s*([0-9a-fA-F]{64})", body)
+    notes = re.sub(r"\n*SHA-256:\s*[0-9a-fA-F]{64}\s*", "", body).strip()
+    return {"version": str(data.get("tag_name", "")).lstrip("v"), "notes": notes,
             "url": asset["browser_download_url"] if asset else data.get("zipball_url"),
-            "size": asset.get("size") if asset else None}
+            "size": asset.get("size") if asset else None,
+            "sha256": m.group(1).lower() if m else None}
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def check(repo=None, skip=None, timeout=6):
@@ -184,12 +195,22 @@ def is_git_checkout(app_dir=APP_DIR):
     return os.path.isdir(os.path.join(app_dir, ".git"))
 
 
-def install(zip_path, app_dir=APP_DIR):
+import recover as _recover  # noqa: E402  (отдельно: app.py зовёт его раньше всего)
+
+JOURNAL_NAME = _recover.JOURNAL_NAME
+recover = _recover.recover
+
+
+def install(zip_path, app_dir=APP_DIR, expect_sha=None):
     """Поставить скачанный архив. Прежние файлы программы уезжают в «прежняя версия»,
     чужие файлы в папке (записи, клипы, ярлыки) не трогаются.
     Возвращает {"changed": N, "removed": N, "need_install": bool}."""
     backup = os.path.join(app_dir, BACKUP_NAME)
     manifest = os.path.join(app_dir, MANIFEST_NAME)
+    journal = os.path.join(app_dir, JOURNAL_NAME)
+    if expect_sha is not None and sha256(zip_path) != expect_sha.lower():
+        raise AutoClipError("❌ Архив обновления скачался с ошибкой (сумма SHA-256 не совпала). "
+                            "Ничего не менял — попробуй позже.")
     with tempfile.TemporaryDirectory(prefix="autoclip_update_") as tmp:
         src = _unpack(zip_path, tmp)
         new = _program_files(src)
@@ -211,10 +232,18 @@ def install(zip_path, app_dir=APP_DIR):
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copy2(cur, dst)
                     moved.append(f)
+            # сначала новые файлы рядом (.new), потом журнал, потом быстрые замены на месте:
+            # выключили свет посередине — при запуске recover() вернёт прежнюю версию
             for f in changed:
                 dst = os.path.join(app_dir, f)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(os.path.join(src, f), dst)
+                shutil.copy2(os.path.join(src, f), dst + ".new")
+            added = [f for f in changed if f not in moved]
+            with open(journal, "w", encoding="utf-8") as fh:
+                json.dump({"changed": changed, "removed": removed, "added": added}, fh, ensure_ascii=False)
+            for f in changed:
+                dst = os.path.join(app_dir, f)
+                os.replace(dst + ".new", dst)
             for f in removed:
                 os.remove(os.path.join(app_dir, f))   # копия лежит в «прежняя версия»
         except OSError as e:
@@ -229,9 +258,17 @@ def install(zip_path, app_dir=APP_DIR):
                         os.remove(os.path.join(app_dir, f))
                     except OSError:
                         pass
+            for f in changed:
+                try:
+                    os.remove(os.path.join(app_dir, f) + ".new")
+                except OSError:
+                    pass
+            if os.path.exists(journal):
+                os.remove(journal)
             raise AutoClipError(f"❌ Обновление не встало, вернул прежнюю версию: {e}")
         with open(manifest, "w", encoding="utf-8") as fh:
             json.dump(new, fh, ensure_ascii=False, indent=1)
+        os.remove(journal)                             # всё на месте — обновление закончено
     return {"changed": len(changed), "removed": len(removed),
             "need_install": "install.bat" in changed}
 
@@ -268,7 +305,9 @@ def apply(rel, progress=None, cancel=None, app_dir=APP_DIR):
         return update_git(rel["version"], app_dir)
     with tempfile.TemporaryDirectory(prefix="autoclip_dl_") as tmp:
         z = download(rel["url"], os.path.join(tmp, "AutoClip.zip"), progress, cancel)
-        return install(z, app_dir)
+        if not rel.get("sha256"):
+            raise AutoClipError("❌ У релиза нет контрольной суммы SHA-256 — ставить не буду.")
+        return install(z, app_dir, expect_sha=rel["sha256"])
 
 
 def restart(need_install=False, app_dir=APP_DIR):
