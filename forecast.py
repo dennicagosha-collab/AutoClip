@@ -31,13 +31,16 @@ def clip_features(clip, segments):
     """Числа, по которым видно, чем клип хорош или плох. segments — расшифровка записи."""
     parts = clip.get("score_parts") or {}
     s, e = clip["start"], clip["end"]
-    dur = max(0.1, e - s)
-    words = sorted((w for seg in segments for w in seg["words"] if s <= w["s"] < e),
-                   key=lambda w: w["s"])
+    cuts = A.clip_cuts(clip)
+    pieces = A.keep_pieces(s, e, cuts) or [(s, e)]
+    dur = max(0.1, sum(b - a for a, b in pieces))          # без вырезанного
+    words = sorted((w for seg in segments for w in seg["words"]
+                    if any(a <= w["s"] < b for a, b in pieces)), key=lambda w: w["s"])
     gap, gap_at, prev = 0.0, 0.0, s
     for w in words + [{"s": e, "e": e}]:
-        if w["s"] - prev > gap:
-            gap, gap_at = w["s"] - prev, prev - s
+        g = w["s"] - prev - sum(max(0.0, min(y, w["s"]) - max(x, prev)) for x, y in cuts)
+        if g > gap:
+            gap, gap_at = g, prev - s
         prev = max(prev, w["e"])
     h = clip.get("hook") or {}
     hook_len = (h["end"] - h["start"]) if h.get("on") and h.get("start") is not None else 0.0

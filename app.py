@@ -1761,6 +1761,59 @@ class ClipsPage(QWidget):
         row.addStretch(1)
         ed.addLayout(row)
 
+        # --- вырезки: кусок, паузы, разбить ---
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel("Вырезать")
+        lbl.setObjectName("fieldLabel")
+        row.addWidget(lbl)
+        self.btn_cut_from = QPushButton("Отсюда")
+        self.btn_cut_from.setToolTip("Начало куска — место просмотра (кликни по шкале клипа)")
+        self.btn_cut_from.clicked.connect(lambda: self.cut_mark(0))
+        self.btn_cut_to = QPushButton("Досюда")
+        self.btn_cut_to.setToolTip("Конец куска — место просмотра")
+        self.btn_cut_to.clicked.connect(lambda: self.cut_mark(1))
+        self.btn_cut = QPushButton("Вырезать")
+        self.btn_cut.setToolTip("Убрать кусок из клипа — склейка без щелчка")
+        self.btn_cut.clicked.connect(self.cut_piece)
+        self.cut_info = hint("")
+        self.cut_info.setMinimumWidth(170)
+        for w in (self.btn_cut_from, self.btn_cut_to, self.btn_cut, self.cut_info):
+            row.addWidget(w)
+        row.addStretch(1)
+        ed.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        from PySide6.QtWidgets import QDoubleSpinBox
+        self.btn_pauses = QPushButton("Сжать паузы")
+        self.btn_pauses.setToolTip("Вырезать паузы без речи длиннее заданной, по 0,3 с тишины остаётся")
+        self.btn_pauses.clicked.connect(self.squeeze_pauses)
+        row.addWidget(self.btn_pauses)
+        row.addWidget(QLabel("длиннее"))
+        self.pause_len = QDoubleSpinBox()
+        self.pause_len.setRange(0.8, 6.0)
+        self.pause_len.setSingleStep(0.5)
+        self.pause_len.setDecimals(1)
+        self.pause_len.setSuffix(" с")
+        self.pause_len.setValue(autoclip.PAUSE_MIN)
+        self.pause_len.setFixedWidth(80)
+        self.pause_len.valueChanged.connect(self.pause_preview)
+        row.addWidget(self.pause_len)
+        self.pause_info = hint("")
+        row.addWidget(self.pause_info)
+        row.addSpacing(10)
+        self.btn_cuts_reset = QPushButton("Сбросить вырезки")
+        self.btn_cuts_reset.setObjectName("ghost")
+        self.btn_cuts_reset.clicked.connect(self.cuts_reset)
+        row.addWidget(self.btn_cuts_reset)
+        self.btn_split = QPushButton("Разбить здесь")
+        self.btn_split.setToolTip("Два клипа: до места просмотра и после (граница — в паузе между словами)")
+        self.btn_split.clicked.connect(self.split_here)
+        row.addWidget(self.btn_split)
+        row.addStretch(1)
+        ed.addLayout(row)
+        self.cuts, self.cut_ab, self._voice = [], [None, None], {}
+
         row = QHBoxLayout()
         row.setSpacing(8)
         self.btn_rebuild = QPushButton("Пересобрать")
@@ -2447,7 +2500,7 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         if not c:
             return
-        t = c["start"] + max(0.0, self.player.player.position() / 1000 - self.hook_len(c))
+        t = self.rec_at_player(c)
         hs, he = autoclip.hook_window_at(self.segments() or [], c["start"], c["end"], t)
         if hs is None:
             self.state.setText("Тут хук не поставить: слова идут без пауз")
@@ -2459,6 +2512,118 @@ class ClipsPage(QWidget):
         if not (c and self.hook_at) or not os.path.isfile(self.proj["source"]):
             return
         self.player.play_range(self.proj["source"], self.hook_at[0] * 1000, self.hook_at[1] * 1000)
+
+    # ---------- вырезки ----------
+    def rec_at_player(self, c):
+        """Место просмотра → время в записи (в готовом клипе могут быть хук и вырезки)."""
+        t = self.player.player.position() / 1000
+        tl = autoclip.rendered_timeline(c)
+        if tl and tl[0][3] == 0 and t < tl[0][1] - tl[0][0]:
+            t = tl[0][1] - tl[0][0]                    # внутри хука — считаем с начала клипа
+        return min(c["end"], max(c["start"], autoclip.out_to_rec(t, tl)))
+
+    def show_cuts(self):
+        a, b = self.cut_ab
+        f = autoclip.fmt_time_exact
+        if a is not None or b is not None:
+            self.cut_info.setText(f"кусок {f(a) if a is not None else '…'} – {f(b) if b is not None else '…'}")
+        elif self.cuts:
+            n = len(self.cuts)
+            self.cut_info.setText(f"вырезано кусков: {n}")
+        else:
+            self.cut_info.setText("отметь начало и конец куска")
+        self.btn_cut.setEnabled(a is not None and b is not None and b - a >= 0.1)
+        self.btn_cuts_reset.setEnabled(bool(self.cuts))
+
+    def cut_mark(self, side):
+        c = self.current_clip()
+        if not c:
+            return
+        self.cut_ab[side] = round(self.rec_at_player(c), 2)
+        a, b = self.cut_ab
+        if a is not None and b is not None and b < a:
+            self.cut_ab = [b, a]
+        self.show_cuts()
+
+    def cut_piece(self):
+        a, b = self.cut_ab
+        if a is None or b is None:
+            return
+        self.cuts = autoclip.merge_cuts(self.cuts + [[a, b]])
+        self.cut_ab = [None, None]
+        self.show_cuts()
+        self._changed()
+
+    def cuts_reset(self):
+        self.cuts, self.cut_ab = [], [None, None]
+        self.show_cuts()
+        self.pause_info.setText("")
+        self._changed()
+
+    def _pause_cuts(self):
+        c = self.current_clip()
+        now = self.edited()
+        if not c or now["start"] is None or now["end"] is None:
+            return None
+        key = (c["id"], now["start"], now["end"])
+        if key not in self._voice:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self._voice[key] = (autoclip.clip_voice(self.proj["source"], now["start"], now["end"])
+                                    if os.path.isfile(self.proj["source"]) else [])
+            finally:
+                QApplication.restoreOverrideCursor()
+        return autoclip.suggest_pause_cuts(self.proj["_path"], c["id"], self.pause_len.value(),
+                                           autoclip.PAUSE_KEEP, now["start"], now["end"], self.cuts,
+                                           self._voice[key], self.segments() or [])
+
+    def pause_preview(self, *_):
+        r = self._pause_cuts()
+        if r is None:
+            return
+        self.pause_info.setText(f"будет короче на {r[1]:.1f} с" if r[1] > 0.05 else "таких пауз нет")
+
+    def squeeze_pauses(self):
+        r = self._pause_cuts()
+        if r is None:
+            return
+        cuts, less = r
+        if less <= 0.05:
+            self.pause_info.setText("таких пауз нет")
+            return
+        self.cuts = cuts
+        self.pause_info.setText(f"станет короче на {less:.1f} с — нажми «Пересобрать»")
+        self.show_cuts()
+        self._changed()
+
+    def split_here(self):
+        c = self.current_clip()
+        if not c or self.busy:
+            return
+        if self.pending():
+            QMessageBox.information(self, "AutoClip", "Сначала пересобери клип или отмени правки.")
+            return
+        t = self.rec_at_player(c)
+        words = autoclip.all_words(self.segments() or [])
+        at = autoclip.split_point(t, c["start"], c["end"], words)
+        if at is None or at - c["start"] < 3 or c["end"] - at < 3:
+            self.state.setText("Тут не разбить: обе части — не короче 3 с, граница — в паузе")
+            return
+        self.busy = True
+        self.editor.setEnabled(False)
+        self.state.setText("Разбиваю на два клипа…")
+        self.player.release_file()
+        cid, pp, bus = c["id"], self.proj["_path"], self.win.bus
+
+        def work():
+            try:
+                autoclip.split_clip(pp, cid, at)
+                bus.rebuilt.emit(cid, None)
+            except autoclip.AutoClipError as e:
+                bus.rebuilt.emit(cid, str(e))
+            except Exception:
+                bus.rebuilt.emit(cid, "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- ручной писк ----------
     def hook_len(self, c):
@@ -2477,7 +2642,7 @@ class ClipsPage(QWidget):
             if not autoclip.is_profane(w["w"]):
                 continue
             off = any(abs(t - x) < 0.06 for x in self.b_rem)
-            label = (f"{autoclip.fmt_time_exact(t)}  «{autoclip._censor(w['w'])}»  — "
+            label = (f"{autoclip.fmt_time_exact(t)}  «{autoclip.censor_word(w['w'])}»  — "
                      + ("писк снят" if off else "по фильтру"))
             self.e_bleeps.addItem(label, ("rem", round(t, 2)))
         for i, (a, b) in enumerate(self.b_add):
@@ -2491,8 +2656,7 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         if not c:
             return
-        t = self.player.player.position() / 1000 - self.hook_len(c)   # в готовом клипе есть хук
-        rec = min(c["end"], max(c["start"], c["start"] + t))
+        rec = self.rec_at_player(c)
         self.b_add.append([round(max(c["start"], rec - 0.1), 2), round(min(c["end"], rec + 0.4), 2)])
         self.refresh_bleeps()
         self._changed()
@@ -2767,6 +2931,7 @@ class ClipsPage(QWidget):
                      "mat_words": list((c.get("overrides") or {}).get("mat_words") or []),
                      "title": (c.get("overrides") or {}).get("title") or c["title"],
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
+                     "cuts": [list(x) for x in (c.get("overrides") or {}).get("cuts") or []],
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
                    self.e_start, self.e_end, self.e_sound, self.e_nick, self.e_style, self.e_censor)
@@ -2806,6 +2971,9 @@ class ClipsPage(QWidget):
         self.base["hook_at"] = list(self.hook_at) if self.hook_at else None   # показанный — не правка
         self.show_hook()
         self.b_rem = list(self.base["bleep_remove"])
+        self.cuts = [list(x) for x in self.base["cuts"]]
+        self.cut_ab = [None, None]
+        self.show_cuts()
         self.w_edit = dict(self.base["words_edit"])
         self.m_words = list(self.base["mat_words"])
         self.t_title.setText(self.base["title"])
@@ -2841,6 +3009,7 @@ class ClipsPage(QWidget):
                 "mat_words": list(self.m_words),
                 "title": self.t_title.text().strip() or (self.base or {}).get("title", ""),
                 "bleep_remove": list(self.b_rem),
+                "cuts": [list(x) for x in self.cuts],
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
     def pending(self):
@@ -2857,7 +3026,9 @@ class ClipsPage(QWidget):
             edit.setStyleSheet("border: 1px solid #ff4f6d;" if val is None else "")
         if not bad:
             ln = now["end"] - now["start"]
-            self.e_len.setText(f"длина {ln:.1f} с" if ln > 0 else "конец раньше начала")
+            left = sum(b - a for a, b in autoclip.keep_pieces(now["start"], now["end"], now["cuts"]))
+            self.e_len.setText((f"длина {left:.1f} с" + (f" (вырезано {ln - left:.1f} с)" if ln - left > 0.05 else ""))
+                               if ln > 0 else "конец раньше начала")
         if self.busy:
             return
         p = self.pending()

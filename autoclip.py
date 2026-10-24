@@ -1326,6 +1326,77 @@ def hook_window_at(segments, s, e, t):
     return _hook_window(min(max(t, s), e) + 0.5, s, e, words)
 
 
+MIN_PIECE = 0.2        # кусок клипа короче этого между вырезками не оставляем
+
+
+def keep_pieces(s, e, cuts):
+    """Что остаётся от клипа [s, e] после вырезок cuts ([начало, конец] во времени записи):
+    [(начало, конец)] во времени записи, по порядку."""
+    out, t = [], float(s)
+    for a, b in sorted((float(a), float(b)) for a, b in cuts or ()):
+        a, b = max(a, s), min(b, e)
+        if b <= a:
+            continue
+        if a - t >= MIN_PIECE:
+            out.append((t, a))
+        t = max(t, b)
+    if e - t >= MIN_PIECE:
+        out.append((t, float(e)))
+    return [(round(a, 3), round(b, 3)) for a, b in out]
+
+
+def clip_timeline(s, e, cuts=None, hook=None):
+    """Куски готового клипа: [(начало в записи, конец в записи, начало в клипе, часть)].
+    Часть 0 — хук, дальше 1, 2, … — куски клипа между вырезками."""
+    tl, o = [], 0.0
+    if hook:
+        tl.append((float(hook[0]), float(hook[1]), 0.0, 0))
+        o = float(hook[1]) - float(hook[0])
+    for i, (a, b) in enumerate(keep_pieces(s, e, cuts), 1):
+        tl.append((a, b, round(o, 3), i))
+        o += b - a
+    return tl
+
+
+def timeline_len(tl):
+    return sum(b - a for a, b, _, _ in tl)
+
+
+def rec_to_out(t, tl, hook=False):
+    """Место t записи → время в готовом клипе (None — вырезано). hook=True — искать в хуке."""
+    for a, b, o, part in tl:
+        if (part == 0) == hook and a - 1e-6 <= t <= b + 1e-6:
+            return o + (t - a)
+    return None
+
+
+def out_to_rec(t, tl):
+    """Время t в готовом клипе → место в записи."""
+    for a, b, o, _ in tl:
+        if t < o + (b - a) + 1e-6:
+            return a + max(0.0, t - o)
+    a, b, o, _ = tl[-1]
+    return b
+
+
+def rendered_timeline(clip):
+    """Куски готового файла клипа (как он собран сейчас) — для перевода времени просмотра в запись."""
+    if clip.get("timeline"):
+        return [tuple(x) for x in clip["timeline"]]
+    h = clip.get("hook") or {}
+    hook = (h["start"], h["end"]) if h.get("on") and h.get("start") is not None else None
+    return clip_timeline(clip["start"], clip["end"], None, hook)
+
+
+def clip_cuts(rec, cfg=None):
+    return [list(map(float, x)) for x in ((cfg or {}).get("cuts") or
+                                          (rec.get("overrides") or {}).get("cuts") or [])]
+
+
+def in_cuts(a, b, cuts):
+    return any(x < b and y > a for x, y in cuts)
+
+
 def hook_span(rec, cfg):
     """(начало, конец) хука для рендера или None. Личная настройка клипа важнее общей
     галочки; хук вне клипа не ставится никогда (правило 5)."""
@@ -1334,7 +1405,8 @@ def hook_span(rec, cfg):
     if want is None:
         want = bool(cfg.get("hook")) and bool(h.get("auto"))
     hs, he = h.get("start"), h.get("end")
-    if want and hs is not None and rec["start"] <= hs < he <= rec["end"]:
+    if want and hs is not None and rec["start"] <= hs < he <= rec["end"] and \
+            not in_cuts(hs, he, clip_cuts(rec, cfg)):         # хук — только из оставшихся кусков
         return hs, he
     return None
 
@@ -2449,14 +2521,14 @@ def check_music(mcfg):
     return dict(MUSIC_DEFAULT, **mcfg)
 
 
-def bleep_gains(src, s, hook, hd, bleeps, snd, cfg):
+def bleep_gains(src, tl, bleeps, snd, cfg):
     """Усиление звука на мат (дБ) для каждого места: под громкость речи рядом (окно ±1,5 с
     в записи, LUFS) плюс поправка bleep_rel_db. Не измерить — фиксированная bleep_volume."""
     fixed = 20 * math.log10(max(0.01, float(cfg.get("bleep_volume", 1.0))))
     sl = loudness(snd)
     out = []
     for a, b, _ in bleeps:
-        t = hook[0] + a if hook and a < hd else s + a - hd    # где это место в записи
+        t = out_to_rec(a, tl)                               # где это место в записи
         voice = loudness(src, max(0.0, t - 1.5), (b - a) + 3.0)
         out.append(fixed if (sl is None or voice is None)
                    else voice + float(cfg.get("bleep_rel_db", 0.0)) - sl)
@@ -2503,20 +2575,18 @@ def apply_word_edits(words, cfg):
     return out
 
 
-def mark_manual_bleeps(words, cfg, s, e, hook, hd):
+def mark_manual_bleeps(words, cfg, s, e=None, hook=None, hd=0.0):
     """Ручные правки писка у клипа (время — в записи, чтобы пережить сдвиг границ):
     bleep_remove — начала слов, где писк снять; bleep_add — [начало, конец] куска, где запикать
     (слова, которого нет в расшифровке)."""
     remove = [float(t) for t in cfg.get("bleep_remove") or []]
     out = [dict(w, nomat=True) if any(abs(w.get("src", -99) - t) < 0.06 for t in remove) else w
            for w in words]
+    tl = s if isinstance(s, list) else clip_timeline(s, e, None, hook)    # s — готовые куски
     for a, b in cfg.get("bleep_add") or []:
         a, b = float(a), float(b)
-        parts = []
-        if hook and a < hook[1] and b > hook[0]:
-            parts.append((max(a, hook[0]) - hook[0], min(b, hook[1]) - hook[0], 0))
-        if a < e and b > s:
-            parts.append((max(a, s) - s + hd, min(b, e) - s + hd, 1))
+        parts = [(max(a, ra) - ra + o, min(b, rb) - ra + o, part)
+                 for ra, rb, o, part in tl if a < rb and b > ra]
         for x, y, part in parts:
             if y - x > 0.02:
                 out.append({"s": round(x, 3), "e": round(y, 3), "w": "", "mat": True, "part": part,
@@ -2571,37 +2641,58 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     hook = clip.get("hook")
     if hook and not (s <= hook[0] < hook[1] <= e):
         raise AutoClipError("❌ Хук вне клипа — так нельзя.")
+    cuts = clip_cuts(clip, cfg)
+    if hook and in_cuts(hook[0], hook[1], cuts):
+        raise AutoClipError("❌ Хук из вырезанного куска — так нельзя.")
+    tl = clip_timeline(s, e, cuts, hook)
+    if not any(part for _, _, _, part in tl):
+        raise AutoClipError("❌ Вырезано всё — от клипа ничего не осталось.")
     hd = (hook[1] - hook[0]) if hook else 0.0      # длина хука = сдвиг клипа в готовом видео
-    total = hd + dur
+    total = timeline_len(tl)
+    clip["timeline"] = [list(x) for x in tl]
 
     # слова и зумы во времени готового видео
     words = []
-    if hook:
-        # субтитры хука исчезают ровно на склейке
-        words += [dict(w, part=0, until=hd, src=hook[0] + w["s"])
-                  for w in clip_words(segments, hook[0], hook[1])]
-    words += [dict(w, s=w["s"] + hd, e=w["e"] + hd, part=1, src=s + w["s"])
-              for w in clip_words(segments, s, e)]
-    words = mark_manual_bleeps(words, cfg, s, e, hook, hd)
+    for ra, rb, o, part in tl:
+        last = part == tl[-1][3]
+        for w in clip_words(segments, ra, rb):
+            if len(tl) > 1 and not (0 <= (w["s"] + w["e"]) / 2 < rb - ra):
+                continue                            # слово на стыке — в том куске, где его середина
+            w = dict(w, s=round(w["s"] + o, 3), e=round(min(w["e"], rb - ra + 0.05) + o, 3),
+                     part=part, src=ra + w["s"])
+            if not last:
+                w["until"] = round(o + rb - ra, 3)  # субтитры куска исчезают ровно на склейке
+            words.append(w)
+    words = mark_manual_bleeps(words, cfg, tl)
     words = apply_word_edits(words, cfg)
-    zooms = [z - s + hd for z in clip["zooms"] if s + 1.0 <= z <= e - 2.0]
+    zooms = []
+    for z in clip["zooms"]:
+        t = rec_to_out(z, tl)
+        if t is not None and hd + 1.0 <= t <= total - 2.0:
+            zooms.append(t)
     if hook:
         zooms = [0.12] + zooms                      # хук — сразу крупно
 
-    # --- склейка хука и клипа ---
+    # --- склейка хука и кусков клипа ---
     pre = ",".join(frame_filters(vinfo, preset))
     fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
     src = os.path.abspath(video)
-    if hook:
-        inputs = ["-ss", f"{hook[0]:.3f}", "-t", f"{hd:.3f}", "-i", src,
-                  "-ss", f"{s:.3f}", "-t", f"{dur:.3f}", "-i", src]
+    if len(tl) > 1:
+        inputs, graph, cat = [], "", ""
         fade = 0.03                                 # без щелчка на склейке
-        graph = (f"[0:v]{pre},setpts=PTS-STARTPTS[hv];[1:v]{pre},setpts=PTS-STARTPTS[cv];"
-                 f"[0:a]{fmt},afade=t=out:st={max(0.0, hd - fade):.3f}:d={fade},"
-                 f"asetpts=PTS-STARTPTS[ha];"
-                 f"[1:a]{fmt},afade=t=in:d={fade},asetpts=PTS-STARTPTS[ca];"
-                 f"[hv][ha][cv][ca]concat=n=2:v=1:a=1[vc][ac];")
-        vin, ain, snd_in = "[vc]", "[ac]", 2
+        for i, (ra, rb, o, part) in enumerate(tl):
+            ln = rb - ra
+            inputs += ["-ss", f"{ra:.3f}", "-t", f"{ln:.3f}", "-i", src]
+            af = [fmt]
+            if i < len(tl) - 1:
+                af.append(f"afade=t=out:st={max(0.0, ln - fade):.3f}:d={fade}")
+            if i:
+                af.append(f"afade=t=in:d={fade}")
+            graph += (f"[{i}:v]{pre},setpts=PTS-STARTPTS[v{i}];"
+                      f"[{i}:a]{','.join(af)},asetpts=PTS-STARTPTS[a{i}];")
+            cat += f"[v{i}][a{i}]"
+        graph += f"{cat}concat=n={len(tl)}:v=1:a=1[vc][ac];"
+        vin, ain, snd_in = "[vc]", "[ac]", len(tl)
         vf = []
     else:
         inputs = ["-ss", f"{s:.3f}", "-t", f"{dur:.3f}", "-i", src]
@@ -2644,7 +2735,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             extra_in = ["-i", os.path.abspath(snd)]
             n = len(bleeps)
             agraph += f";[{snd_in}:a]{fmt},asplit={n}" + "".join(f"[s{i}]" for i in range(n))
-            gains = bleep_gains(src, s, hook, hd, bleeps, snd, cfg)
+            gains = bleep_gains(src, tl, bleeps, snd, cfg)
             for i, (a, b, until) in enumerate(bleeps):
                 # звук не дольше, чем до следующего слова без мата
                 L = max(0.05, min(sdur, until - a))
@@ -2887,7 +2978,7 @@ STATUSES = {"new": "новый", "good": "хороший", "published": "выл�
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
-                 "words_edit", "mat_words", "title", "censor") + STYLE_KEYS
+                 "words_edit", "mat_words", "title", "censor", "cuts") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
@@ -3391,15 +3482,18 @@ def add_clip(path, c, origin, progress=None, cancel=None):
     name = f"{num:02d}_{safe_name(c['title'])}.mp4"
     rec = make_clip_record(c, num, name)
     rec["origin"] = origin
+    rec["overrides"].update({k: v for k, v in (c.get("overrides") or {}).items() if k in OVERRIDE_KEYS})
     cfg = clip_config(proj, rec)
     span = hook_span(rec, cfg)
     rec["hook"]["on"] = span is not None
     log(f"➕ Новый клип {name} ({fmt_time(c['s'])}–{fmt_time(c['e'])})")
     if progress:
         progress("рендер", 0, name)
+    job = dict(c, hook=span)
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        rec["bleeps"] = render_clip(src, dict(c, hook=span), segments, proj["source_info"],
+        rec["bleeps"] = render_clip(src, job, segments, proj["source_info"],
                                     os.path.join(out_dir, name), tmp, cfg, cancel)
+    rec["timeline"] = job.get("timeline")
     if rec["bleeps"] is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     rec["rendered"] = now_iso()
@@ -3481,6 +3575,112 @@ def load_segments(proj):
     return drop_hallucinations(read_transcript(path))
 
 
+PAUSE_MIN = 1.5        # «Сжать паузы»: паузы без речи длиннее этого…
+PAUSE_KEEP = 0.3       # …вырезаются, тишины с каждой стороны остаётся столько
+
+
+def pause_cuts(s, e, words, min_pause=PAUSE_MIN, keep=PAUSE_KEEP, voice=None, cuts=None):
+    """Вырезки для «Сжать паузы»: паузы между словами внутри клипа длиннее min_pause,
+    по keep тишины с каждой стороны. Голос без слов (смех, крик по voice) паузой не считается."""
+    ws = sorted((w for w in words if w["e"] > s and w["s"] < e), key=lambda w: w["s"])
+    marks = [(w["s"], w["e"]) for w in ws] + [(a, b) for a, b in voice or () if b > s and a < e]
+    marks.sort()
+    out = []
+    end = None
+    for a, b in marks:
+        if end is not None and a - end > min_pause:
+            x, y = end + keep, a - keep
+            if y - x > 0.05 and not in_cuts(x, y, cuts or []):
+                out.append([round(x, 2), round(y, 2)])
+        end = b if end is None else max(end, b)
+    return out
+
+
+def merge_cuts(cuts):
+    out = []
+    for a, b in sorted([float(a), float(b)] for a, b in cuts):
+        if out and a <= out[-1][1] + 0.01:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([round(a, 2), round(b, 2)])
+    return out
+
+
+def clip_voice(src, s, e):
+    """Где в куске записи слышен голос (Silero): [(начало, конец)] во времени записи."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="autoclip_v_") as tmp:
+            w = os.path.join(tmp, "v.wav")
+            p = run(["ffmpeg", "-y", "-v", "error", "-ss", f"{s:.2f}", "-t", f"{e - s:.2f}", "-i", src,
+                     "-map", "0:a:0", "-af", ASR_FILTER, "-ac", "1", "-ar", "16000", w])
+            if p.returncode != 0:
+                return []
+            return [(a + s, b + s) for a, b in speech_regions(_read_wav(w))]
+    except Exception:
+        return []
+
+
+def suggest_pause_cuts(path, ref, min_pause=PAUSE_MIN, keep=PAUSE_KEEP, start=None, end=None,
+                       cuts=None, voice=None, segments=None):
+    """«Сжать паузы» для клипа: (вырезки, на сколько секунд станет короче). Прежние вырезки
+    (cuts, по умолчанию — у клипа) остаются, новые добавляются к ним."""
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    s = clip["start"] if start is None else float(start)
+    e = clip["end"] if end is None else float(end)
+    old = clip_cuts(clip) if cuts is None else [list(map(float, x)) for x in cuts]
+    words = all_words(segments if segments is not None else load_segments(proj))
+    if voice is None:
+        voice = clip_voice(proj["source"], s, e) if os.path.isfile(proj["source"]) else []
+    new = pause_cuts(s, e, words, min_pause, keep, voice, old)
+    before = sum(b - a for a, b in keep_pieces(s, e, old))
+    after = sum(b - a for a, b in keep_pieces(s, e, merge_cuts(old + new)))
+    return merge_cuts(old + new), round(before - after, 1)
+
+
+def split_point(t, s, e, words):
+    """Где разбить клип у места t: в паузе между словами (слово не режем), по возможности
+    поближе к t. None — подходящей паузы нет."""
+    ws = sorted((w for w in words if w["e"] > s and w["s"] < e), key=lambda w: w["s"])
+    gaps = [(max(s, a["e"]), min(e, b["s"])) for a, b in zip(ws, ws[1:]) if b["s"] - a["e"] >= 0.08]
+    if not ws:
+        return round(t, 2)
+    best = None
+    for a, b in gaps:
+        if b - a < 0.05:
+            continue
+        x = min(max(t, a + min(0.15, (b - a) / 2)), b - min(0.15, (b - a) / 2))
+        if best is None or abs(x - t) < abs(best - t):
+            best = x
+    return None if best is None else round(best, 2)
+
+
+def split_clip(path, ref, t, progress=None, cancel=None):
+    """«Разбить здесь»: клип делится на два у места t записи (граница — в паузе). Первый —
+    этот же клип до границы, второй — новый клип со своими настройками (копия этих).
+    Возвращает (первый, второй)."""
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    words = all_words(load_segments(proj))
+    at = split_point(float(t), clip["start"], clip["end"], words)
+    if at is None or at - clip["start"] < 3 or clip["end"] - at < 3:
+        raise AutoClipError("❌ Здесь не разбить: каждая часть должна быть не короче 3 секунд "
+                            "и граница — в паузе между словами.")
+    cuts = clip_cuts(clip)
+    ov = {k: v for k, v in (clip.get("overrides") or {}).items() if k not in ("title", "hook_at", "cuts")}
+    second_cuts = [c for c in cuts if c[1] > at]
+    if second_cuts:
+        ov["cuts"] = [[max(a, at), b] for a, b in second_cuts]
+    c2 = {"s": at, "e": clip["end"], "peak": min(max(clip["peak"], at), clip["end"]),
+          "score": clip["score"], "parts": clip.get("score_parts", {}),
+          "title": clip["title"], "reason": "вторая часть клипа " + str(clip["num"]),
+          "zooms": [z for z in clip.get("zooms", []) if z > at], "overrides": ov}
+    first_ov = {"cuts": [[a, min(b, at)] for a, b in cuts if a < at] or None} if cuts else None
+    first = rebuild_clip(path, ref, None, at, first_ov, progress, cancel)
+    second = add_clip(path, c2, "split", progress, cancel)
+    return first, second
+
+
 def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None, cancel=None):
     """Пересобирает один клип по записи в project.json, без повторной расшифровки.
     start/end — новое начало/конец в секундах записи; overrides — личные настройки клипа
@@ -3509,16 +3709,29 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
 
     segments = load_segments(proj)
     cfg = clip_config(proj, clip)
-    if (s, e) != (clip["start"], clip["end"]) or clip.get("hook", {}).get("start") is None:
-        # границы сдвинулись — момент для хука ищем заново внутри новых границ
+    cuts = clip_cuts(clip, cfg)
+    if timeline_len(clip_timeline(s, e, cuts)) < 3:
+        raise AutoClipError("❌ После вырезок клип короче 3 секунд.")
+    h0 = clip.get("hook") or {}
+    if (s, e) != (clip["start"], clip["end"]) or h0.get("start") is None or \
+            "cuts" in (overrides or {}) or in_cuts(h0["start"], h0["end"], cuts):
+        # границы или вырезки поменялись — момент для хука ищем заново в оставшихся кусках
         if proj.get("reaction"):
-            clip["hook"] = decide_hook(s, e, proj["reaction"], segments,
+            react = list(proj["reaction"])
+            for a, b in cuts:                          # вырезанное хуком не станет (правило 5)
+                for i in range(max(0, int(a)), min(len(react), int(math.ceil(b)))):
+                    react[i] = 0.0
+            clip["hook"] = decide_hook(s, e, react, segments,
                                        threshold=proj.get("hook_threshold"), cfg=cfg)
+            if clip["hook"].get("start") is not None and \
+                    in_cuts(clip["hook"]["start"], clip["hook"]["end"], cuts):
+                clip["hook"].update(auto=False, why="момент хука вырезан")
         elif clip.get("hook", {}).get("start") is not None and \
                 not (s <= clip["hook"]["start"] and clip["hook"]["end"] <= e):
             clip["hook"].update(auto=False, why="момент хука оказался вне клипа")
     at = clip.get("overrides", {}).get("hook_at")
-    if at and s <= float(at[0]) < float(at[1]) <= e:          # хук выбран вручную — внутри клипа
+    if at and s <= float(at[0]) < float(at[1]) <= e and \
+            not in_cuts(float(at[0]), float(at[1]), cuts):     # хук выбран вручную — внутри клипа
         clip["hook"] = dict(clip.get("hook") or {}, start=round(float(at[0]), 2),
                             end=round(float(at[1]), 2), auto=True, why="выбран вручную")
     span = hook_span(dict(clip, start=s, end=e), cfg)
@@ -3532,14 +3745,15 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     if progress:
         progress("рендер", 0, clip["file"])
     t0 = time.time()
+    job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span}
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        bl = render_clip(src, {"s": s, "e": e, "zooms": clip["zooms"], "hook": span}, segments,
+        bl = render_clip(src, job, segments,
                          proj["source_info"], out, tmp, cfg, cancel,
                          on_frac=(lambda f: progress("рендер", f * 95, clip["file"])) if progress else None)
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
-                quiet_start=quiet_start(out))
+                quiet_start=quiet_start(out), timeline=job.get("timeline"))
     if clip["file"] != old_file:                       # переименовали: прежний файл и обложку — в корзину
         try:
             trash(os.path.join(folder, old_file))
