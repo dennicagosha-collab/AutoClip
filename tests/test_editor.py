@@ -10,7 +10,7 @@ import autoclip
 from qtwait import pump
 
 
-def _video(tmp_path, dur=60, quiet_until=0):
+def _video(tmp_path, dur=100, quiet_until=0):
     v = tmp_path / "запись.mp4"
     # громкие всплески на 10–12, 30–32, 50–52 с; до quiet_until — полная тишина
     audio = (f"aevalsrc='0.03*sin(2*PI*300*t)*(1+25*between(mod(t,20),10,12))"

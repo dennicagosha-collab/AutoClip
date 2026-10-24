@@ -20,6 +20,7 @@ import autoclip as A
 
 TALK_GAP_BACK = 2.0      # речь перед пиком — одна реакция, пока паузы не длиннее
 TALK_GAP_FWD = 3.5       # после пика — договаривает, пока паузы не длиннее
+REACT_MAX = 12.0         # речь-реакция до пика — не длиннее (дальше — уже другой разговор)
 VOICE_BEFORE = 4.0       # голос без слов перед реакцией не дальше — тоже реакция (потерянная фраза)
 EVENT_Z, EVENT_BURST = 0.5, 6.0   # громкая секунда игры: громче фона и со всплеском
 EVENT_MIN = 3            # событие — от 3 громких секунд (с пропусками до EVENT_GAP)
@@ -70,6 +71,11 @@ def reaction_start(peak, talk):
     for a, b, _ in sorted(before, key=lambda x: -x[1]):
         if b >= start - TALK_GAP_BACK and a < start:
             start = a
+    if start < peak - REACT_MAX:
+        # говорит без пауз дольше REACT_MAX — реакция с первой фразы не раньше этого
+        starts = [a for k, (a, b, _) in enumerate(talk)
+                  if a >= peak - REACT_MAX and (k == 0 or a - max(x[1] for x in talk[:k]) >= A.PAUSE)]
+        start = min(starts) if starts else peak - REACT_MAX
     return start, None
 
 

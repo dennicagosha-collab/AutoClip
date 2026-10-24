@@ -3336,6 +3336,7 @@ def make_clip_record(c, num, file):
     return {
         "id": f"c{num:02d}", "num": num, "file": file,
         "start": c["s"], "end": c["e"], "peak": c["peak"],
+        "auto_start": c.get("auto_start", c["s"]), "auto_end": c.get("auto_end", c["e"]),   # границы программы
         "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
@@ -4016,6 +4017,12 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
                          on_frac=(lambda f: progress("рендер", f * 95, clip["file"])) if progress else None)
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
+    if (round(s, 2), round(e, 2)) != (round(clip["start"], 2), round(clip["end"], 2)) or             "cuts" in (overrides or {}):
+        try:                                           # Гоша поправил границы — учиться (4.3)
+            import boundaries
+            boundaries.record_edit(proj, clip, s, e, cuts, segments)
+        except Exception as ex:
+            log(f"   ⚠️  правку границ не запомнил: {ex}")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
                 quiet_start=quiet_start(out), timeline=job.get("timeline"), bleep_seq=job.get("bleep_seq"))
     if clip["file"] != old_file:                       # переименовали: прежний файл и обложку — в корзину
@@ -4646,9 +4653,18 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     import story                           # начало и конец истории момента (4.2)
     burst, all_w = story.burst_of(loud, punch), all_words(segments)
 
+    import boundaries
+    shift = boundaries.default_shift()          # поправка по правкам Гоши (после ≥10 правок)
+    if shift[0] is not None or shift[1] is not None:
+        log(f"   поправка границ по твоим правкам: начало {shift[0] or 0:+.1f} с, конец {shift[1] or 0:+.1f} с")
+
     def story_fn(peak, mark_t):
-        return story.story_bounds(peak, all_w, voice, loud_z, burst, dead, vinfo["dur"], mark_t,
-                                  CONFIG.get("clip_length", "normal"))
+        got = story.story_bounds(peak, all_w, voice, loud_z, burst, dead, vinfo["dur"], mark_t,
+                                 CONFIG.get("clip_length", "normal"))
+        if got and (shift[0] is not None or shift[1] is not None):
+            s2, e2, note = boundaries.apply_shift(got[0], got[1], peak, all_w, voice, shift)
+            got = (s2, e2, got[2] + (f"; {note}" if note else ""))
+        return got
     found = pick_clips(smooth, loud_z, segments, moments, vinfo["dur"], parts, marks=marks, voice=voice, dead=dead,
                        story=story_fn,
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))

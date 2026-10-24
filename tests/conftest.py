@@ -40,6 +40,8 @@ def clean_config(monkeypatch, tmp_path):
     import backup                                      # копия — из временной папки, не из %APPDATA%
     (tmp_path / "данные").mkdir(exist_ok=True)
     monkeypatch.setattr(backup, "data_dir", lambda: str(tmp_path / "данные"))
+    import boundaries                                  # правки границ — во временную папку
+    monkeypatch.setattr(boundaries, "PATH", str(tmp_path / "границы.json"))
 
 
 @pytest.fixture
