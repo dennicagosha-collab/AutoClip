@@ -79,3 +79,12 @@ def stop_telegram_threads():
         link.stop.set()
     if app is not None:
         app.TelegramLink.alive.clear()
+
+
+def pytest_addoption(parser):
+    parser.addoption("--golden", action="store_true", default=False,
+                     help="проверка границ на эталонной записи (медленно)")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "golden: проверка границ на эталонной записи")

@@ -4679,7 +4679,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     t = mark("поиск моментов", t)
 
     if analyze_only:
-        process.last = {"clips": clips, "candidates": cands, "segments": segments}
+        process.last = {"clips": clips, "candidates": cands, "segments": segments, "dead": dead}
         for i, c in enumerate(clips, 1):
             log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
                 f"оценка {c['score']:.1f} — {c['title']}")
