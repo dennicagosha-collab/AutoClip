@@ -137,8 +137,27 @@ CONFIG = {
 
     # --- экспорт ---
     "preset": "TikTok 1080p60",   # имя пресета из load_presets()
+    "clip_length": "normal",      # длина клипов: short / normal / long (LENGTHS)
 }
 # ======================================================
+
+# «Длина клипов» одной настройкой: границы по речи (tighten_clip) для каждого варианта.
+# normal — как в 1.2.1; long — больше контекста до и после, мягкие паузы не режем; short — плотнее.
+LENGTHS = {
+    "short": {"tail_after": 5.0, "tail_max": 10.0, "talk_gap": 1.2, "lead_before": 1.0,
+              "max_silence": 4.0, "soft_silence": 2.0, "min_tight": 6.0, "max_silence_share": 0.4},
+    "normal": {"tail_after": 8.0, "tail_max": 15.0, "talk_gap": 1.5, "lead_before": 1.5,
+               "max_silence": 6.0, "soft_silence": 3.0, "min_tight": 8.0, "max_silence_share": 0.45},
+    "long": {"tail_after": 12.0, "tail_max": 22.0, "talk_gap": 1.8, "lead_before": 3.0,
+             "max_silence": 8.0, "soft_silence": 8.0, "min_tight": 12.0, "max_silence_share": 0.5},
+}
+
+
+def apply_length(cfg=None):
+    """Подставляет в настройки значения границ для выбранной «Длины клипов»."""
+    cfg = CONFIG if cfg is None else cfg
+    cfg.update(LENGTHS.get(cfg.get("clip_length"), LENGTHS["normal"]))
+    return cfg
 
 
 # ---------------- утилиты ----------------
@@ -4065,6 +4084,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     need_ffmpeg()
     prepare_sounds()
     _warned.clear()
+    if CONFIG.get("clip_length", "normal") != "normal":
+        apply_length()                      # «обычно» — значения CONFIG как есть
     try:
         import numpy  # noqa: F401
     except ImportError:

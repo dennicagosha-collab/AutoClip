@@ -68,9 +68,10 @@ DEFAULTS = {
     "geometry": "", "player_geometry": "",
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
-    "censor": "partial",
+    "censor": "partial", "clip_length": "normal",
 }
 
+LENGTH_NAMES = {"Короче": "short", "Обычно": "normal", "Длиннее": "long"}
 CENSOR = {"Частичная (е*ать)": "partial", "Полная (б****)": "full"}
 
 
@@ -1359,6 +1360,8 @@ class CutPage(QWidget):
         c["bleep_sound"] = s["sound"]
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
         c["censor"] = "full" if s.get("censor") == "full" else "partial"
+        c["clip_length"] = s.get("clip_length") if s.get("clip_length") in autoclip.LENGTHS else "normal"
+        autoclip.apply_length(c)
         c["subs_team"] = bool(s.get("subs_team", False))
         c["zoom_focus_y"] = WEBCAM.get(s["cam"], 0.3)
         c["preset"] = s["preset"]
@@ -3442,6 +3445,15 @@ class SettingsPage(QWidget):
         # --- новые клипы ---
         box, v = card("Новые клипы", "Так будут нарезаться новые клипы. "
                                      "У отдельного клипа всё можно поменять в «Клипах».")
+        self.length = QComboBox()
+        self.length.setMinimumWidth(190)
+        for name, key in LENGTH_NAMES.items():
+            self.length.addItem(name, key)
+        self.length.setCurrentIndex(max(0, self.length.findData(self.s.get("clip_length", "normal"))))
+        self.length.currentIndexChanged.connect(lambda _: self._set("clip_length", self.length.currentData()))
+        v.addWidget(option_row("Длина клипов", self.length,
+                               "Длиннее — больше того, что было до и после момента. Короче — только самое яркое"))
+        v.addWidget(separator())
         self.cb_subs = self._toggle("subs")
         v.addWidget(option_row("Субтитры", self.cb_subs))
         self.cb_subs_team = self._toggle("subs_team")
