@@ -4001,6 +4001,15 @@ class SettingsPage(QWidget):
         lay.addWidget(box)
 
         # --- OBS ---
+        box, v = card("Запуск", "AutoClip стартует вместе с Windows сразу в трей: окно не "
+                                "открывается, работают слежка за OBS, Telegram и проверка обновлений.")
+        import autostart
+        self.cb_autostart = Toggle(autostart.is_enabled())
+        self.cb_autostart.toggled.connect(self.set_autostart)
+        v.addWidget(option_row("Запускать вместе с Windows", self.cb_autostart,
+                               "Окно — по значку AutoClip в трее"))
+        lay.addWidget(box)
+
         box, v = card("OBS", "Новая запись в этой папке — AutoClip предложит её нарезать. "
                              "Пока слежка включена, крестик сворачивает программу в трей.")
         obs = QHBoxLayout()
@@ -4440,6 +4449,27 @@ class SettingsPage(QWidget):
                         f"<span style='color:{'#7dd99a' if w > 0 else '#ff7a90'}'>{n} "
                         f"{'+' if w > 0 else '−'}{abs(w):.2f}</span>" for n, w in pairs))
         self.model_state.setText("<br>".join(lines))
+
+    def set_autostart(self, on):
+        import autostart
+        try:
+            if not on:
+                autostart.disable()
+                return
+            autostart.enable()
+            extra = autostart.startup_shortcuts()
+            if extra:
+                names = ", ".join(os.path.basename(x) for x in extra)
+                ans = ask_choice(self, f"В автозагрузке Windows уже есть ярлык AutoClip ({names}). "
+                                       "С ним программа будет стартовать дважды. Убрать ярлык в корзину?",
+                                 [("remove", "Убрать"), ("keep", "Оставить")])
+                if ans == "remove":
+                    autostart.remove_shortcuts(extra)
+        except (OSError, autoclip.AutoClipError) as e:
+            QMessageBox.warning(self, "AutoClip", f"Не получилось поменять автозапуск: {e}")
+            self.cb_autostart.blockSignals(True)
+            self.cb_autostart.setChecked(autostart.is_enabled())
+            self.cb_autostart.blockSignals(False)
 
     def find_obs(self):
         d = autoclip.find_obs_record_dir()
@@ -5053,7 +5083,7 @@ class MainWindow(QMainWindow):
         """Включить или выключить слежку по настройкам."""
         on = bool(self.settings.get("watch")) and os.path.isdir(self.settings.get("obs_dir", ""))
         if self.tray:
-            self.tray.setVisible(bool(self.settings.get("watch")))
+            self.tray.setVisible(bool(self.settings.get("watch")) or getattr(self, "in_tray", False))
             self.tray_watch.blockSignals(True)
             self.tray_watch.setChecked(bool(self.settings.get("watch")))
             self.tray_watch.blockSignals(False)
@@ -5261,7 +5291,7 @@ class MainWindow(QMainWindow):
         w.deleteLater()
 
     def closeEvent(self, e):
-        if self.settings.get("watch") and self.tray and not self._quitting:
+        if (self.settings.get("watch") or getattr(self, "in_tray", False)) and self.tray and not self._quitting:
             # со слежкой — в трей, чтобы новые записи ловились и с закрытым окном
             e.ignore()
             self.hide()
@@ -5370,8 +5400,25 @@ class InstanceServer:
         self.server.close()
 
 
+def start_window(win, argv):
+    """Обычный запуск — окно; с --tray (вместе с Windows) — только значок в трее: слежка за OBS,
+    Telegram и проверка обновлений работают, окно открывается по значку."""
+    import autostart
+    if autostart.TRAY_FLAG in argv and win.tray:
+        win.in_tray = True
+        win.watch_changed()
+        return False
+    win.show()
+    return True
+
+
 def main():
     autoclip.migrate_user_data()
+    try:
+        import autostart
+        autostart.refresh()                     # автозапуск включён — команда на эту папку программы
+    except Exception:
+        pass
     if os.name == "nt":
         # своя иконка на панели задач, а не значок Python
         import ctypes
@@ -5398,7 +5445,7 @@ def main():
     win.standalone = True
     instance = InstanceServer(lambda m: win.show_window() if "show" in m else None)
     app.aboutToQuit.connect(instance.close)
-    win.show()
+    start_window(win, sys.argv)
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
     if videos:
         win.cut.set_files(videos)

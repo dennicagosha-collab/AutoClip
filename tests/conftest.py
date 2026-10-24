@@ -31,6 +31,12 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(autoclip, "STYLES_PATH", str(tmp_path / "стили.json"))
     import telegram_bot
     monkeypatch.setattr(telegram_bot, "STATE_PATH", str(tmp_path / "telegram.json"))   # не настоящий бот
+    import autostart                                   # и не трогают настоящий реестр Windows
+    reg = {}
+    monkeypatch.setattr(autostart, "_reg_get", reg.get)
+    monkeypatch.setattr(autostart, "_reg_set", reg.__setitem__)
+    monkeypatch.setattr(autostart, "_reg_del", lambda n: reg.pop(n, None))
+    monkeypatch.setattr(autostart, "startup_dir", lambda: str(tmp_path / "автозагрузка"))
 
 
 @pytest.fixture
