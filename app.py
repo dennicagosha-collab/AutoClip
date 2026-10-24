@@ -4425,13 +4425,15 @@ class SettingsPage(QWidget):
             return
         need = forecast.MIN_SAMPLES
         lines = [f"Оценок «Хороший» / «В корзину»: <b>{info['n_like']}</b> из {need}, "
-                 f"клипов с просмотрами: <b>{info['n_views']}</b> из {need}."]
-        if not (info.get("like") or info.get("views")):
+                 f"клипов с просмотрами: <b>{info['n_views']}</b> из {need}, "
+                 f"с досмотрами: <b>{info.get('n_retention', 0)}</b> из {forecast.MIN_RETENTION}."]
+        if not (info.get("like") or info.get("views") or info.get("retention")):
             lines.append(f"<span style='color:{MUTED}'>Данных пока мало — прогноз считается "
                          "по правилам.</span>")
         else:
             lines.append(f"Модель учтена в прогнозе на {int(forecast.model_share(info) * 100)}%.")
-            for key, title in (("views", "Что набирает просмотры"), ("like", "Что тебе нравится")):
+            for key, title in (("views", "Что набирает просмотры"), ("retention", "Что досматривают"),
+                               ("like", "Что тебе нравится")):
                 pairs = forecast.explain(info).get(key)
                 if pairs:
                     lines.append(f"{title}: " + ", ".join(

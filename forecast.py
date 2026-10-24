@@ -21,6 +21,7 @@ FEATURES = (
     ("density", "слов в секунду"),
 )
 MIN_SAMPLES = 30                       # столько примеров нужно, чтобы учиться
+MIN_RETENTION = 20                     # досмотры Гоша вводит не всегда — им хватит и меньше
 HISTORY_PATH = os.path.join(A.user_dir(), "история.json")
 MODEL_PATH = os.path.join(A.user_dir(), "модель.json")
 
@@ -220,6 +221,8 @@ def collect():
                 continue                                 # «Удалить (без оценки)» — не учим
             views = {p: v["views"] for p, v in (c.get("published") or {}).items()
                      if isinstance(v, dict) and isinstance(v.get("views"), (int, float))}
+            retention = {p: float(v["retention"]) for p, v in (c.get("published") or {}).items()
+                         if isinstance(v, dict) and isinstance(v.get("retention"), (int, float))}
             if like is None and not views:
                 continue
             f = c.get("features")
@@ -230,8 +233,8 @@ def collect():
                     except A.AutoClipError:
                         segs = []
                 f = clip_features(c, segs)
-            samples.append({"features": f, "like": like, "views": views, "weight": weight,
-                            "project": proj["_path"], "id": c["id"]})
+            samples.append({"features": f, "like": like, "views": views, "retention": retention,
+                            "weight": weight, "project": proj["_path"], "id": c["id"]})
         for k in proj.get("candidates") or []:
             if not k.get("deleted"):
                 continue                                 # удалил кандидата — не понравился, слабее
@@ -254,6 +257,27 @@ def _standardize(rows):
     return mean, std, [[(r[i] - mean[i]) / std[i] for i in range(len(r))] for r in rows]
 
 
+def _per_platform(samples, key, fn):
+    """Нормировка внутри площадки: TikTok и YouTube в разных масштабах. Возвращает
+    (строки признаков, цель — среднее z по площадкам клипа, {площадка: [среднее, разброс]})."""
+    by_plat = {}
+    for s in samples:
+        for p, v in (s.get(key) or {}).items():
+            by_plat.setdefault(p, []).append(fn(v))
+    stats = {}
+    for p, vals in by_plat.items():
+        mean_p = sum(vals) / len(vals)
+        std_p = math.sqrt(sum((x - mean_p) ** 2 for x in vals) / len(vals)) if len(vals) >= 3 else 0.0
+        stats[p] = (mean_p, std_p or 1.0)
+    rows, y = [], []
+    for s in samples:
+        if s.get(key):
+            zs = [(fn(v) - stats[p][0]) / stats[p][1] for p, v in s[key].items()]
+            rows.append(vector(s["features"]))
+            y.append(sum(zs) / len(zs))
+    return rows, y, stats
+
+
 def train(save=True, samples=None):
     """Учит две простые модели: «нравится ли Гоше» (логистическая регрессия по «Хороший» /
     «В корзину») и «сколько наберёт» (линейная регрессия по log просмотров, нормированных
@@ -262,7 +286,9 @@ def train(save=True, samples=None):
     samples = collect() if samples is None else samples
     info = {"date": A.now_iso(), "features": [k for k, _ in FEATURES],
             "n_like": sum(s["like"] is not None for s in samples),
-            "n_views": sum(bool(s["views"]) for s in samples), "like": None, "views": None}
+            "n_views": sum(bool(s["views"]) for s in samples),
+            "n_retention": sum(bool(s.get("retention")) for s in samples),
+            "like": None, "views": None, "retention": None}
 
     rated = [s for s in samples if s["like"] is not None]
     if len(rated) >= MIN_SAMPLES and len({s["like"] for s in rated}) == 2:
@@ -272,26 +298,15 @@ def train(save=True, samples=None):
         info["like"] = {"coef": [round(float(c), 4) for c in m.coef_[0]],
                         "intercept": round(float(m.intercept_[0]), 4), "mean": mean, "std": std}
 
-    # просмотры: log10 и нормировка внутри площадки (TikTok и YouTube в разных масштабах)
-    by_plat = {}
-    for s in samples:
-        for p, v in s["views"].items():
-            by_plat.setdefault(p, []).append(math.log10(v + 1))
-    stats = {}
-    for p, vals in by_plat.items():
-        mean_p = sum(vals) / len(vals)
-        std_p = math.sqrt(sum((x - mean_p) ** 2 for x in vals) / len(vals)) if len(vals) >= 3 else 0.0
-        stats[p] = (mean_p, std_p or 1.0)
-    rows, y = [], []
-    for s in samples:
-        if s["views"]:
-            zs = [(math.log10(v + 1) - stats[p][0]) / stats[p][1] for p, v in s["views"].items()]
-            rows.append(vector(s["features"]))
-            y.append(sum(zs) / len(zs))
-    if len(rows) >= MIN_SAMPLES:
-        mean, std, X = _standardize(rows)
-        m = Ridge(alpha=1.0).fit(X, y)
-        info["views"] = {"coef": [round(float(c), 4) for c in m.coef_],
+    # просмотры (log10) и досмотры (%) — нормировка внутри площадки; досмотры — второй сигнал,
+    # когда Гоша их указал, со своим порогом
+    for key, fn, need in (("views", lambda v: math.log10(v + 1), MIN_SAMPLES),
+                          ("retention", float, MIN_RETENTION)):
+        rows, y, stats = _per_platform(samples, key, fn)
+        if len(rows) >= need:
+            mean, std, X = _standardize(rows)
+            m = Ridge(alpha=1.0).fit(X, y)
+            info[key] = {"coef": [round(float(c), 4) for c in m.coef_],
                          "intercept": round(float(m.intercept_), 4), "mean": mean, "std": std,
                          "platforms": {p: [round(a, 4), round(b, 4)] for p, (a, b) in stats.items()}}
     if save:
@@ -319,10 +334,11 @@ def _apply(part, f):
 
 def model_share(model):
     """Сколько веса у модели в итоговой оценке: растёт с числом примеров, но не больше 70%."""
-    if not model or not (model.get("like") or model.get("views")):
+    if not model or not (model.get("like") or model.get("views") or model.get("retention")):
         return 0.0
     n = (model.get("n_like", 0) if model.get("like") else 0) + \
-        2 * (model.get("n_views", 0) if model.get("views") else 0)
+        2 * (model.get("n_views", 0) if model.get("views") else 0) + \
+        (model.get("n_retention", 0) if model.get("retention") else 0)
     return round(min(0.7, n / 200), 2)
 
 
@@ -333,6 +349,8 @@ def predict(f, score, model=None):
     parts = []
     if model and model.get("views"):
         parts.append((0.6, _sigmoid(_apply(model["views"], f))))
+    if model and model.get("retention"):
+        parts.append((0.3, _sigmoid(_apply(model["retention"], f))))
     if model and model.get("like"):
         parts.append((0.4, _sigmoid(_apply(model["like"], f))))
     learned = sum(w * v for w, v in parts) / sum(w for w, _ in parts) if parts else None
@@ -342,7 +360,8 @@ def predict(f, score, model=None):
         n_like = (model or {}).get("n_like", 0)
         n_views = (model or {}).get("n_views", 0)
         note = (f"пока по правилам — данных мало (оценок {n_like} из {MIN_SAMPLES}, "
-                f"клипов с просмотрами {n_views} из {MIN_SAMPLES})")
+                f"клипов с просмотрами {n_views} из {MIN_SAMPLES}, "
+                f"с досмотрами {(model or {}).get('n_retention', 0)} из {MIN_RETENTION})")
     else:
         note = f"правила + модель ({int(share * 100)}% от модели)"
     return {"value": round(10 * value, 1), "heur": round(heur, 3),
@@ -353,7 +372,7 @@ def explain(model, top=5):
     """Что помогает и что мешает, по весам модели: {"like": [(название, вес)], "views": […]}."""
     names = dict(FEATURES)
     out = {}
-    for key in ("like", "views"):
+    for key in ("like", "views", "retention"):
         part = (model or {}).get(key)
         if part:
             pairs = sorted(zip(model["features"], part["coef"]), key=lambda x: -abs(x[1]))
