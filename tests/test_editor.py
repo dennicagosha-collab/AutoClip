@@ -133,7 +133,7 @@ def test_editor_shift_and_rebuild(win, cut, monkeypatch):
 
     # +2 с к началу и выключить зум у этого клипа
     page.shift(page.e_start, 2.0)
-    page.e_zoom.setChecked(False)
+    page.e_zoom.setCurrentIndex(page.e_zoom.findData("off"))
     assert set(page.pending()) == {"start", "zoom"}
     assert "Пересобрать" in page.state.text()
     page.rebuild()
@@ -141,7 +141,7 @@ def test_editor_shift_and_rebuild(win, cut, monkeypatch):
     assert page.state.text().startswith("Готово"), page.state.text()
     new = autoclip.find_clip(autoclip.load_project(cut), c["id"])
     assert new["start"] == pytest.approx(round(c["start"], 1) + 2.0, abs=0.06)
-    assert new["overrides"]["zoom"] is False
+    assert new["overrides"]["zoom"] == "off"
     assert abs(_dur(os.path.join(cut, new["file"])) - (new["end"] - new["start"])) < 0.2
     assert not page.pending()                                # после пересборки правок нет
     assert page.current_clip()["id"] == c["id"]              # выбран тот же клип

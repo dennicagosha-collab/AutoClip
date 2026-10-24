@@ -55,7 +55,7 @@ DEFAULTS = {
     "sub_style": "Обычный", "sub_x": None, "sub_y_free": 0.6,
     "sub_font": "Arial Black", "sub_mode": "words", "sub_size": 82, "sub_color": "#FFFFFF",
     "sub_hl_color": "#FFE600", "sub_outline_color": "#000000", "sub_outline": 7,
-    "subs": True, "zoom": True, "hook": True, "bleep": True,
+    "subs": True, "zoom": "auto", "hook": "auto", "bleep": True,
     "sound": "перелистывание", "marks": True, "nick": False, "cam": "Вебка сверху",
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
@@ -70,6 +70,20 @@ DEFAULTS = {
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
     "censor": "partial", "clip_length": "normal",
 }
+
+TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
+
+
+def tri_combo(value, tip=""):
+    cb = QComboBox()
+    cb.setMinimumWidth(96)
+    for name, key in TRI_NAMES.items():
+        cb.addItem(name, key)
+    cb.setCurrentIndex(max(0, cb.findData(autoclip.tri(value) or "auto")))
+    if tip:
+        cb.setToolTip(tip)
+    return cb
+
 
 LENGTH_NAMES = {"Короче": "short", "Обычно": "normal", "Длиннее": "long"}
 CENSOR = {"Частичная (е*ать)": "partial", "Полная (б****)": "full"}
@@ -1344,9 +1358,9 @@ class CutPage(QWidget):
                                                 DEFAULTS["auto_min_score_plain"]))
         c["auto_max"] = int(s.get("auto_max", DEFAULTS["auto_max"]))
         c["subs"] = bool(s["subs"])
-        c["zoom"] = bool(s["zoom"])
+        c["zoom"] = autoclip.tri(s["zoom"]) or "auto"
         c["bleep"] = bool(s["bleep"])
-        c["hook"] = bool(s["hook"])
+        c["hook"] = autoclip.tri(s["hook"]) or "auto"
         c["marks"] = bool(s["marks"])
         c.update(sub_settings(s))
         c["safe_zone"] = bool(s["safe_zone"])
@@ -1640,13 +1654,21 @@ class ClipsPage(QWidget):
         self.ed_stack.addWidget(page)
         row = QHBoxLayout()
         row.setSpacing(18)
-        self.e_hook = Toggle(tip="1–2 с яркой реакции из этого клипа в начале")
-        self.e_zoom = Toggle()
+        self.e_hook = tri_combo("auto", "1–2 с яркой реакции из этого клипа в начале. "
+                                        "Авто — когда есть яркий момент")
+        self.e_zoom = tri_combo("auto", "Авто — только на смехе и крике, не больше 3. Вкл — на всех громких местах")
+        self.e_hook.currentIndexChanged.connect(self._changed)
+        self.e_zoom.currentIndexChanged.connect(self._changed)
+        for text, w in (("Хук", self.e_hook), ("Зум", self.e_zoom)):
+            pair = QHBoxLayout()
+            pair.setSpacing(6)
+            pair.addWidget(QLabel(text))
+            pair.addWidget(w)
+            row.addLayout(pair)
         self.e_subs = Toggle()
         self.e_safe = Toggle(tip="Не заходить субтитрами под кнопки соцсетей")
         self.e_nick = Toggle(tip="Ник в углу — текст и угол в «Настройках»")
-        for text, w in (("Хук", self.e_hook), ("Зум", self.e_zoom), ("Субтитры", self.e_subs),
-                        ("Сейф-зона", self.e_safe), ("Ник", self.e_nick)):
+        for text, w in (("Субтитры", self.e_subs), ("Сейф-зона", self.e_safe), ("Ник", self.e_nick)):
             pair = QHBoxLayout()
             pair.setSpacing(8)
             pair.addWidget(w)
@@ -2294,8 +2316,8 @@ class ClipsPage(QWidget):
                 for ok, t in notes))
         lines += [f"<span style='color:{MUTED}'>Оценка моментов {c['score']:.1f}"
                   + (f" — {parts}" if parts else "") + "</span>",
-                  f"Зумов: {len(c['zooms'])}, запикано: "
-                  f"{c['bleeps'] if c['bleeps'] is not None else '-'}"]
+                  f"Запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}; "
+                  + autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[1]]
         if c.get("marks"):
             lines.append("📍 Метка из OBS: " + ", ".join(autoclip.fmt_time(t) for t in c["marks"]))
         ht = autoclip.hook_text(c)
@@ -2484,8 +2506,8 @@ class ClipsPage(QWidget):
         if he - hs < 0.5:
             return
         self.hook_at = [hs, he]
-        if not self.e_hook.isChecked():
-            self.e_hook.setChecked(True)               # выбрал хук — значит, он нужен
+        if self.e_hook.currentData() != "on":
+            self.e_hook.setCurrentIndex(self.e_hook.findData("on"))   # выбрал хук — значит, он нужен
         self.show_hook()
         self._changed()
 
@@ -2709,9 +2731,7 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         if not c:
             return 0.0
-        hook = c.get("hook") or {}
-        hd = (hook["end"] - hook["start"]) if hook.get("on") and hook.get("start") is not None else 0
-        return c["end"] - c["start"] + hd
+        return autoclip.timeline_len(autoclip.rendered_timeline(c))   # с хуком и без вырезок
 
     def set_track(self, path):
         if path is None:
@@ -2917,7 +2937,7 @@ class ClipsPage(QWidget):
 
     def fill_editor(self, c):
         cfg = autoclip.clip_config(self.proj, c)
-        self.base = {"hook": bool((c.get("hook") or {}).get("on")), "zoom": bool(cfg["zoom"]),
+        self.base = {"hook": cfg["hook"], "zoom": cfg["zoom"],
                      "bleep": bool(cfg["bleep"]), "subs": bool(cfg["subs"]),
                      "sub_y": autoclip.SUB_POSITIONS[autoclip.sub_position_name(cfg["sub_y"])],
                      "safe_zone": bool(cfg.get("safe_zone")), "bleep_sound": cfg["bleep_sound"],
@@ -2946,8 +2966,8 @@ class ClipsPage(QWidget):
             self.e_style.addItem(self.base["style"], self.base["style"])   # стиль потом удалили
         self.e_style.setCurrentIndex(max(0, self.e_style.findData(self.base["style"])))
         b = self.base
-        self.e_hook.setChecked(b["hook"])
-        self.e_zoom.setChecked(b["zoom"])
+        self.e_hook.setCurrentIndex(max(0, self.e_hook.findData(b["hook"])))
+        self.e_zoom.setCurrentIndex(max(0, self.e_zoom.findData(b["zoom"])))
         self.e_bleep.setChecked(b["bleep"])
         self.e_subs.setChecked(b["subs"])
         self.e_pos.setCurrentText(autoclip.sub_position_name(b["sub_y"]))
@@ -2957,7 +2977,7 @@ class ClipsPage(QWidget):
         self.e_pos.setEnabled(b["subs"])
         self.e_safe.setEnabled(b["subs"])
         self.e_sound.setEnabled(b["bleep"])
-        for w in (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_safe, self.e_nick):
+        for w in (self.e_bleep, self.e_subs, self.e_safe, self.e_nick):
             w.update()
         self.e_start.setText(autoclip.fmt_time_exact(b["start"]))
         self.e_end.setText(autoclip.fmt_time_exact(b["end"]))
@@ -2995,7 +3015,7 @@ class ClipsPage(QWidget):
 
     def edited(self):
         """Текущие значения редактора (время — None, если введено с ошибкой)."""
-        return {"hook": self.e_hook.isChecked(), "zoom": self.e_zoom.isChecked(),
+        return {"hook": self.e_hook.currentData(), "zoom": self.e_zoom.currentData(),
                 "bleep": self.e_bleep.isChecked(), "subs": self.e_subs.isChecked(),
                 "sub_y": autoclip.SUB_POSITIONS[self.e_pos.currentText()],
                 "safe_zone": self.e_safe.isChecked(), "bleep_sound": self.e_sound.currentText(),
@@ -3641,11 +3661,15 @@ class SettingsPage(QWidget):
         self.preview = SubsPreview()            # маленькая схема — в карточке «Ник в углу»
         v.addWidget(hint("Шрифт, цвета и место субтитров — в карточке «Субтитры» ниже."))
         v.addWidget(separator())
-        self.cb_zoom = self._toggle("zoom")
-        v.addWidget(option_row("Зум на эмоциях", self.cb_zoom))
-        self.cb_hook = self._toggle("hook")
+        self.cb_zoom = tri_combo(self.s.get("zoom"))
+        self.cb_zoom.currentIndexChanged.connect(lambda _: self._set("zoom", self.cb_zoom.currentData()))
+        v.addWidget(option_row("Зум", self.cb_zoom,
+                               "Авто — только на смехе и крике, не больше 3 на клип. Вкл — на всех громких местах"))
+        self.cb_hook = tri_combo(self.s.get("hook"))
+        self.cb_hook.currentIndexChanged.connect(lambda _: self._set("hook", self.cb_hook.currentData()))
         v.addWidget(option_row("Хук в начале", self.cb_hook,
-                               "1–2 секунды яркой реакции из этого же клипа в самом начале"))
+                               "1–2 секунды яркой реакции из этого же клипа в самом начале. "
+                               "Авто — когда есть яркий момент, Вкл — всегда, когда есть место"))
         self.cam = self._combo(WEBCAM, "cam")
         v.addWidget(option_row("Раскладка записи", self.cam, "Куда приближать зум"))
         v.addWidget(separator())

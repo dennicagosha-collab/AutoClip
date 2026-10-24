@@ -105,7 +105,7 @@ CONFIG = {
     "sub_uppercase": True,
 
     # --- зум ---
-    "zoom": True,
+    "zoom": "auto",           # зум: auto — только на яркой реакции, on — на громких местах, off
     "zoom_amount": 0.18,      # +18% при зуме
     "zoom_focus_y": 0.35,     # куда зумить по вертикали: 0 = верх (вебка), 0.5 = центр, 1 = низ
     "max_zooms": 3,           # макс. зумов на клип
@@ -131,7 +131,7 @@ CONFIG = {
     "mark_bonus": 3.0,        # прибавка к оценке клипа с меткой
 
     # --- хук: 1–2 с яркой реакции из этого же клипа в самом начале ---
-    "hook": True,
+    "hook": "auto",               # хук: auto — когда есть яркий момент, on — всегда, если есть место, off
     "hook_min_reaction": 1.0,     # реакция для хука — не слабее этого
     "hook_percentile": 97,        # и сильнее, чем 97% секунд этой записи
 
@@ -1226,6 +1226,14 @@ def _hook_window(i, s, e, words):
             best = (hs, min(ends, key=lambda x: abs(x - hs - 1.6)))
             break
     if best is None and ws:
+        # реакция без слов (смех, крик): пауза между словами вокруг секунды i, хук — в ней
+        edges = [s] + [x for w in ws for x in (w["s"], w["e"])] + [e]
+        gaps = [(edges[k] + (0.05 if k else 0.0), edges[k + 1] - (0.05 if k + 2 < len(edges) else 0.0))
+                for k in range(0, len(edges) - 1, 2)]
+        for ga, gb in gaps:
+            if ga <= i <= gb and gb - ga >= HOOK_MIN:
+                hs = max(ga, min(i - 0.5, gb - 1.6))
+                return round(hs, 2), round(min(gb, hs + 1.6), 2)
         return None, None                             # без разреза слова хук не поставить
     if best is None:                                  # слов нет — просто 1,6 с вокруг пика
         hs = max(s, i - 0.5)
@@ -1247,6 +1255,70 @@ def _what_reaction(i, parts):
     return " и ".join(what) or "яркая реакция"
 
 
+TRI = ("auto", "on", "off")
+
+
+def tri(v, old_true="auto"):
+    """Хук и зум: «auto» / «on» / «off». Старое True — old_true (в общих настройках это было
+    «как решит программа», у клипа — «включить»), False — «off», None — None (как у нарезки)."""
+    if v is None:
+        return None
+    if v is True:
+        return old_true
+    if v is False:
+        return "off"
+    return v if v in TRI else "auto"
+
+
+def auto_zooms(s, e, reaction, parts=None, threshold=None, limit=3):
+    """Зум в «Авто»: только на яркой реакции голосом (смех, крик, громкий голос — не звук игры),
+    не больше limit на клип, не ближе 5 с друг к другу. [{t, why}] во времени записи."""
+    import numpy as np
+    reaction = np.asarray(reaction, dtype=float)
+    if not len(reaction):
+        return []
+    thr = hook_threshold(reaction) if threshold is None else threshold
+    lo, hi = int(math.ceil(s + 1.0)), min(len(reaction), int(math.floor(e - 2.0)) + 1)
+    cand = []
+    for i in range(lo, hi):
+        if reaction[i] < 0.8 * thr:
+            continue
+        if parts:
+            voice = (parts["смех"][i] > 0.3 or parts["восклицания"][i] > 0.3 or
+                     (parts["громкость"][i] > 1.5 and parts["речь"][i] > 0.05))
+            if not voice:
+                continue                         # громко, но не голос — звук игры, без зума
+        cand.append(i)
+    out = []
+    for i in sorted(cand, key=lambda i: -reaction[i]):
+        if len(out) >= limit:
+            break
+        if all(abs(i - z["t"]) >= 5 for z in out):
+            out.append({"t": float(i), "why": _what_reaction(i, parts)})
+    return sorted(out, key=lambda z: z["t"])
+
+
+def clip_zooms(rec, cfg, s=None, e=None):
+    """Точки зума для рендера и почему: (точки, текст). Личная настройка клипа важнее общей."""
+    s = rec.get("start", rec.get("s")) if s is None else s
+    e = rec.get("end", rec.get("e")) if e is None else e
+    mode = tri((rec.get("overrides") or {}).get("zoom"), "on") or tri(cfg.get("zoom"))
+    if mode == "off":
+        return [], "без зума — выключен"
+    if mode == "on" or "zoom_auto" not in rec:              # нарезки до 1.3.0 — как раньше
+        pts = [z for z in rec.get("zooms", []) if s <= z <= e]
+        return pts, ("зум: " + ", ".join(_mmss(z - s) for z in pts)) if pts else "без зума — нет громких мест"
+    pts = [z for z in rec["zoom_auto"] if s <= z["t"] <= e]
+    if not pts:
+        return [], "без зума — нет яркой реакции"
+    return [z["t"] for z in pts], "зум: " + ", ".join(f"{z['why']} на {_mmss(z['t'] - s)}" for z in pts)
+
+
+def _mmss(t):
+    t = int(max(0.0, t))
+    return f"{t // 60}:{t % 60:02d}"
+
+
 def hook_threshold(reaction, cfg=None):
     """Порог яркой реакции для этой записи: у тихих и громких записей он разный."""
     import numpy as np
@@ -1255,7 +1327,36 @@ def hook_threshold(reaction, cfg=None):
                float(np.percentile(np.asarray(reaction, dtype=float), cfg["hook_percentile"])))
 
 
-def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None):
+def _voice_hook_window(i, s, e, voice):
+    """Хук по паузам в голосе (Silero): Whisper часто ставит слова встык, а настоящая пауза
+    между ними есть. Края — в середине тишины, слово не режется. (начало, конец) или (None, None)."""
+    regs = sorted((a, b) for a, b in voice if b > s and a < e)
+    if not regs:
+        return None, None
+    cuts = []
+    for (a1, b1), (a2, b2) in zip(regs, regs[1:]):
+        if a2 - b1 >= 0.12:
+            cuts.append(round((b1 + a2) / 2, 2))
+    if regs[0][0] - s >= 0.12:
+        cuts.insert(0, round(max(s, regs[0][0] - 0.1), 2))
+    if e - regs[-1][1] >= 0.12:
+        cuts.append(round(min(e, regs[-1][1] + 0.1), 2))
+    best = None
+    for hs in cuts:
+        for he in cuts:
+            ln = he - hs
+            if not (HOOK_MIN * 0.8 <= ln <= HOOK_MAX) or not (s <= hs and he <= e):
+                continue
+            cover = hs - 0.3 <= i <= he                        # яркая секунда внутри хука
+            key = (not cover, abs((hs + he) / 2 - (i + 0.5)), abs(ln - 1.6))
+            if best is None or key < best[0]:
+                best = (key, hs, he)
+    if best is None or best[0][1] > 3.0:
+        return None, None
+    return best[1], best[2]
+
+
+def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None, voice=None):
     """Решение про хук для клипа [s, e]. Хук всегда берётся из этого же клипа.
     Возвращает {"on", "auto", "start", "end", "why"}: auto — совет ставить хук,
     start/end — лучший момент (есть, даже если совет «не ставить»), on заполняет рендер."""
@@ -1272,9 +1373,22 @@ def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None):
     peak = float(reaction[i])
     start_level = float(reaction[a:min(b, a + 2)].max())
     words = [w for seg in segments if seg["e"] > s and seg["s"] < e for w in seg["words"]]
-    rec["start"], rec["end"] = _hook_window(i, s, e, words)
     if threshold is None:
         threshold = hook_threshold(reaction, cfg)
+    rec["start"], rec["end"] = _hook_window(i, s, e, words)
+    if rec["start"] is None:
+        # у самого яркого места слова идут сплошняком — пробуем другие яркие секунды клипа
+        # (короткая фраза целиком или реакция без слов), слово по-прежнему не режем
+        for j in sorted(range(lo, hi), key=lambda j: -reaction[j]):
+            if j == i or reaction[j] < max(threshold, 0.7 * peak):
+                continue
+            hs, he = _hook_window(j, s, e, words)
+            if hs is not None:
+                i, rec["start"], rec["end"] = j, hs, he
+                peak = float(reaction[j])
+                break
+    if rec["start"] is None and voice:
+        rec["start"], rec["end"] = _voice_hook_window(i, s, e, voice)   # настоящие паузы в голосе
     if rec["start"] is None:
         rec["why"] = "нет места для хука без разреза слова"
     elif peak < threshold:
@@ -1401,9 +1515,8 @@ def hook_span(rec, cfg):
     """(начало, конец) хука для рендера или None. Личная настройка клипа важнее общей
     галочки; хук вне клипа не ставится никогда (правило 5)."""
     h = rec.get("hook") or {}
-    want = rec.get("overrides", {}).get("hook")
-    if want is None:
-        want = bool(cfg.get("hook")) and bool(h.get("auto"))
+    mode = tri(rec.get("overrides", {}).get("hook"), "on") or tri(cfg.get("hook"))
+    want = mode == "on" or (mode == "auto" and bool(h.get("auto")))
     hs, he = h.get("start"), h.get("end")
     if want and hs is not None and rec["start"] <= hs < he <= rec["end"] and \
             not in_cuts(hs, he, clip_cuts(rec, cfg)):         # хук — только из оставшихся кусков
@@ -2666,7 +2779,8 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     words = mark_manual_bleeps(words, cfg, tl)
     words = apply_word_edits(words, cfg)
     zooms = []
-    for z in clip["zooms"]:
+    pts, _ = clip_zooms(dict(clip, start=s, end=e, overrides={}), cfg)
+    for z in pts:
         t = rec_to_out(z, tl)
         if t is not None and hd + 1.0 <= t <= total - 2.0:
             zooms.append(t)
@@ -2701,7 +2815,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
         vf = [pre]
 
     # --- видео ---
-    if cfg["zoom"] and zooms:
+    if zooms and cfg.get("zoom") not in (False, "off"):
         A = cfg["zoom_amount"]
         env = "+".join(
             f"clip((t-{z - 0.12:.2f})/0.12,0,1)*clip(({z + 1.6:.2f}-t)/0.35,0,1)"
@@ -3073,6 +3187,8 @@ def clip_config(proj, clip):
     if proj.get("settings") and "censor" not in proj["settings"]:
         cfg["censor"] = "full"                      # нарезки до 1.3.0 — пересборка как была
     cfg.update({k: v for k, v in clip.get("overrides", {}).items() if k in OVERRIDE_KEYS})
+    for k in ("hook", "zoom"):                  # у клипа старое True — «включить»
+        cfg[k] = tri(clip.get("overrides", {}).get(k), "on") or tri(cfg.get(k))
     return cfg
 
 
@@ -3083,6 +3199,7 @@ def make_clip_record(c, num, file):
         "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
         "title": c["title"], "reason": c["reason"],
         "zooms": c["zooms"],
+        **({"zoom_auto": c["zoom_auto"]} if "zoom_auto" in c else {}),
         "marks": c.get("marks", []),           # метки из OBS, по которым найден клип
         "meta": c.get("meta"),                 # название и хэштеги от языковой модели
         "desc_custom": None,                   # своё описание по площадкам, если поправил
@@ -3246,8 +3363,8 @@ def write_report(proj):
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c["score_parts"].items() if abs(v) >= 0.05)
         if parts:
             rep.append(f"    из чего оценка: {parts}")
-        rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}, "
-                   f"зумов: {len(c['zooms'])}")
+        rep.append(f"    запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}; "
+                   + clip_zooms(c, clip_config(proj, c))[1])
         rep.append("    " + hook_text(c))
         if c.get("forecast") and c.get("features"):
             import forecast
@@ -3411,8 +3528,8 @@ def hook_text(c):
     if h.get("on"):
         return (f"хук: {fmt_time(h['start'])} в записи, {h['end'] - h['start']:.1f} с "
                 f"(с {h['start'] - c['start']:.0f}-й секунды клипа) — {h['why']}")
-    forced = c.get("overrides", {}).get("hook")
-    if forced is False:
+    forced = tri(c.get("overrides", {}).get("hook"), "on")
+    if forced == "off":
         return "без хука — выключен для этого клипа"
     if h.get("auto"):
         return f"без хука — выключен галочкой (был бы: {h['why']})"
@@ -3475,7 +3592,7 @@ def add_clip(path, c, origin, progress=None, cancel=None):
     segments = load_segments(proj)
     out_dir = os.path.dirname(proj["_path"])
     if not c.get("hook"):
-        c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments,
+        c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments, voice=clip_voice(src, c["s"], c["e"]),
                                 threshold=proj.get("hook_threshold"),
                                 cfg=dict(CONFIG, **proj.get("settings", {})))
     num = next_clip_num(proj)
@@ -3526,6 +3643,7 @@ def moment_at(proj, t, segments):
     score = float(reaction[int(peak)]) if inside else 0.0
     return {"s": round(s, 2), "e": round(e, 2), "peak": float(peak), "score": score,
             "zooms": zoom_points(s, e, peak, loud_z) if loud_z else [],
+            "zoom_auto": auto_zooms(s, e, reaction, None, proj.get("hook_threshold")),
             "parts": {}, "title": moment_title("", segments, s, e, peak), "reason": "",
             "marks": []}
 
@@ -3722,7 +3840,8 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
                 for i in range(max(0, int(a)), min(len(react), int(math.ceil(b)))):
                     react[i] = 0.0
             clip["hook"] = decide_hook(s, e, react, segments,
-                                       threshold=proj.get("hook_threshold"), cfg=cfg)
+                                       threshold=proj.get("hook_threshold"), cfg=cfg,
+                                       voice=clip_voice(src, s, e))
             if clip["hook"].get("start") is not None and \
                     in_cuts(clip["hook"]["start"], clip["hook"]["end"], cuts):
                 clip["hook"].update(auto=False, why="момент хука вырезан")
@@ -3745,7 +3864,8 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
     if progress:
         progress("рендер", 0, clip["file"])
     t0 = time.time()
-    job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span}
+    job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span,
+           **({"zoom_auto": clip["zoom_auto"]} if "zoom_auto" in clip else {})}
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
         bl = render_clip(src, job, segments,
                          proj["source_info"], out, tmp, cfg, cancel,
@@ -4398,9 +4518,10 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj["hook_threshold"] = round(thr, 2)
     for i, c in enumerate(clips, 1):
         check_cancel(cancel)
-        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr)
+        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice)
+        c["zoom_auto"] = auto_zooms(c["s"], c["e"], reaction, parts, thr)
         h = c["hook"]
-        if h["auto"] and mode != "none" and CONFIG["hook"]:
+        if h["auto"] and mode != "none" and tri(CONFIG["hook"]) != "off":
             prog("поиск", i / len(clips) * 100, "проверяю хуки моделью")
             spoils, why = llm_hook_spoils(text_between(segments, c["s"], c["e"]),
                                           text_between(segments, h["start"], h["end"]), mode)
@@ -4424,7 +4545,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
             log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
                 f"оценка {c['score']:.1f} — {c['title']}")
             log("       " + hook_text({"start": c["s"], "hook": dict(
-                c["hook"], on=c["hook"]["auto"] and CONFIG["hook"])}))
+                c["hook"], on=c["hook"]["auto"] and tri(CONFIG["hook"]) != "off")}))
         return out_dir
 
     os.makedirs(out_dir, exist_ok=True)

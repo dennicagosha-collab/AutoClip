@@ -32,7 +32,7 @@ def test_all_settings_survive_restart(app_module):
     cut, st = win.cut, win.settings_page
 
     st.cb_subs.setChecked(False)
-    st.cb_zoom.setChecked(False)
+    st.cb_zoom.setCurrentIndex(st.cb_zoom.findData("off"))
     st.cb_bleep.setChecked(False)
     st.sound.setCurrentText("буп")
     cut.count.setValue(7)
@@ -57,7 +57,7 @@ def test_all_settings_survive_restart(app_module):
 
     with open(autoclip.SETTINGS_PATH, encoding="utf-8") as f:
         saved = json.load(f)
-    expect = {"subs": False, "zoom": False, "bleep": False, "sound": "буп", "clips": 7,
+    expect = {"subs": False, "zoom": "off", "bleep": False, "sound": "буп", "clips": 7,
               "cam": "Вебка снизу", "sub_pos": "Снизу", "safe_zone": False, "preset": "Мой 720p30", "llm": "none",
               "ollama_model": "llama3:8b", "obs_dir": r"D:\OBS", "nick_text": "Gosha",
               "hashtags": "#стрим #игры"}
