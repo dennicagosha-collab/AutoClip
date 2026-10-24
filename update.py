@@ -22,7 +22,7 @@ import zipfile
 import autoclip
 from autoclip import AutoClipError
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REPO = "dennicagosha-collab/AutoClip"   # пусто — обновления выключены
 API = "https://api.github.com/repos/{repo}/releases/latest"
 
