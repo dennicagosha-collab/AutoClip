@@ -336,3 +336,41 @@ def test_text_tab_edits_survive_rebuild(win, cut, monkeypatch):
     assert list(c2["overrides"]["words_edit"].values()) == ["исправил"] and len(c2["overrides"]["mat_words"]) == 1
     assert page.t_words.item(0, 1).text() == "исправил" and not page.pending()
     assert c2["bleeps"] >= 1                                           # «это мат» — запикано
+
+
+def test_remove_without_rating_not_learned(cut, fake_trash):
+    import forecast
+    proj = autoclip.load_project(cut)
+    a, b = proj["clips"][0], proj["clips"][1]
+    autoclip.set_status(cut, a["id"], "good")
+    autoclip.set_status(cut, b["id"], "good")
+    autoclip.remove_clip(cut, b["id"])                                 # дубль — убрать без оценки
+    left = autoclip.load_project(cut)["clips"]
+    assert b["id"] not in [c["id"] for c in left]
+    assert not os.path.exists(os.path.join(cut, b["file"]))
+    assert any(f.endswith(b["file"]) for f in os.listdir(fake_trash))  # в корзине, не насовсем
+    ids = [s["id"] for s in forecast.collect()]
+    assert a["id"] in ids and b["id"] not in ids                       # на обучение не влияет
+
+
+def test_context_menu(win, cut, monkeypatch):
+    import app as A
+    from PySide6.QtWidgets import QMessageBox
+    page = win.clips
+    page.load(cut)
+    c = page.current_clip()
+    shown = []
+    monkeypatch.setattr(A, "show_in_folder", lambda p: shown.append(p))
+    menu = page.build_menu()
+    acts = {a.text(): a for a in menu.actions() if a.text()}
+    assert {"Показать в папке", "Открыть в плеере", "Отправить в Telegram", "Переименовать", "Пересобрать",
+            "Хороший", "В корзину (не нравится)", "Удалить (без оценки)"} <= set(acts)
+    assert not acts["Отправить в Telegram"].isEnabled()                # бот не подключён
+    acts["Показать в папке"].trigger()
+    assert shown == [os.path.join(cut, c["file"])]                     # именно этот файл
+    acts["Переименовать"].trigger()
+    assert page.ed_stack.currentIndex() == 1
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    n = page.list.count()
+    acts["Удалить (без оценки)"].trigger()
+    assert page.list.count() == n - 1

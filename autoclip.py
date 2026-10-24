@@ -2853,6 +2853,40 @@ def set_status(path, ref, status):
     return clip
 
 
+def remove_clip(path, ref):
+    """«Удалить (без оценки)»: клип убирается из программы, файл и обложка — в корзину Windows.
+    На обучение не влияет (дубли, технический брак)."""
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    folder = os.path.dirname(proj["_path"])
+    trash(os.path.join(folder, clip["file"]))
+    trash(cover_path_for(folder, clip["file"]))
+    proj["clips"] = [c for c in proj["clips"] if c["id"] != clip["id"]]
+    save_project(proj)
+    write_report(proj)
+    return clip
+
+
+TG_LIMIT_MB = 50          # Telegram Bot API: файл от бота — не больше 50 МБ
+
+
+def light_copy(src, dst, limit_mb=TG_LIMIT_MB, on_frac=None, cancel=None):
+    """Облегчённая копия клипа, которая точно влезет в limit_mb (720×1280, битрейт по длине)."""
+    dur = _probe_dur(src)
+    audio_k = 128
+    video_k = max(300, int((limit_mb * 0.92 * 8 * 1024) / max(dur, 1.0)) - audio_k)
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src, "-vf", "scale=720:-2", "-c:v", "libx264",
+           "-preset", "veryfast", "-b:v", f"{video_k}k", "-maxrate", f"{video_k}k",
+           "-bufsize", f"{video_k * 2}k", "-c:a", "aac", "-b:a", f"{audio_k}k",
+           "-movflags", "+faststart", dst]
+    p = run(cmd, cancel=cancel, on_time=(lambda t: on_frac(min(1.0, t / dur))) if on_frac else None)
+    if p.returncode != 0 or not os.path.isfile(dst):
+        raise AutoClipError("❌ Не получилось сделать облегчённую копию:\n" + p.stderr[-400:])
+    if os.path.getsize(dst) > limit_mb * 1024 * 1024:
+        raise AutoClipError(f"❌ Даже облегчённая копия больше {limit_mb} МБ — клип слишком длинный.")
+    return dst
+
+
 def save_clip_as(path, ref, dest):
     """Копия готового клипа в другое место. Файл с тем же именем там уходит в корзину."""
     proj = load_project(path)

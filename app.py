@@ -209,6 +209,7 @@ class Bus(QObject):
     rebuilt = Signal(str, object)          # id клипа, текст ошибки или None
     added = Signal(object, object)         # новый клип (id) или None, текст ошибки или None
     rebuild_progress = Signal(float)       # пересборка клипа, проценты
+    send_state = Signal(str)               # отправка клипа в Telegram: что сейчас происходит
     weekly_progress = Signal(float, str)
     weekly_done = Signal(str, object)      # путь к подборке, текст ошибки или None
     trained = Signal(object)               # итог обучения прогноза
@@ -1544,6 +1545,8 @@ class ClipsPage(QWidget):
         self._covers = {}              # обложки списка: путь → (время изменения, значок)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self.clip_menu)
         self.left_stack.addWidget(self.list)
         self.left_stack.addWidget(found)
         split.addWidget(left)
@@ -1965,6 +1968,7 @@ class ClipsPage(QWidget):
         self.win.bus.rebuilt.connect(self._rebuilt)
         self.win.bus.added.connect(self._added)
         self.win.bus.rebuild_progress.connect(self._rebuild_progress)
+        self.win.bus.send_state.connect(lambda t: self.state.setText(t))
         self.refresh_recent()
 
     # ---------- нарезки ----------
@@ -2238,6 +2242,87 @@ class ClipsPage(QWidget):
                 self._segs = None
             self._segs_for = pp
         return self._segs
+
+    # ---------- меню по правой кнопке ----------
+    def clip_menu(self, pos):
+        it = self.list.itemAt(pos)
+        if it is None:
+            return
+        self.list.setCurrentItem(it)
+        menu = self.build_menu()
+        if menu:
+            menu.exec(self.list.viewport().mapToGlobal(pos))
+
+    def build_menu(self):
+        """Действия для выбранного клипа или кандидата (меню по правой кнопке)."""
+        k = self.current_candidate()
+        menu = QMenu(self)
+        if k:
+            menu.addAction("Просмотр", self.play_candidate)
+            if not k.get("deleted"):
+                menu.addAction("Собрать", self.build_candidate)
+            menu.addAction("Вернуть" if k.get("deleted") else "Удалить кандидата", self.delete_candidate)
+            return menu
+        c = self.current_clip()
+        if not c:
+            return None
+        path = self.clip_path(c)
+        menu.addAction("Показать в папке", lambda: show_in_folder(path))
+        menu.addAction("Открыть в плеере", lambda: open_path(path))
+        tg = menu.addAction("Отправить в Telegram", self.send_to_telegram)
+        tg.setEnabled(telegram_bot.is_connected() and os.path.isfile(path))
+        if not tg.isEnabled():
+            tg.setToolTip("Подключи бота в «Настройках» → «Telegram»")
+        menu.addSeparator()
+        menu.addAction("Переименовать", self.rename_clip)
+        menu.addAction("Пересобрать", self.rebuild)
+        menu.addAction("Убрать из хороших" if c["status"] == "good" else "Хороший", self.toggle_good)
+        menu.addSeparator()
+        menu.addAction("В корзину (не нравится)", self.to_trash)
+        menu.addAction("Удалить (без оценки)", self.remove_clip)
+        return menu
+
+    def rename_clip(self):
+        self.show_tab(1)                                    # «Текст» — там название
+        self.t_title.setFocus()
+        self.t_title.selectAll()
+
+    def remove_clip(self):
+        c = self.current_clip()
+        if not c:
+            return
+        r = QMessageBox.question(self, "AutoClip", f"Удалить клип «{c['title']}» без оценки?\n"
+                                 "Файл уйдёт в корзину Windows, на обучение это не повлияет.")
+        if r != QMessageBox.Yes:
+            return
+        row = self.list.currentRow()
+        self.player.release_file()
+        try:
+            autoclip.remove_clip(self.proj["_path"], c["id"])
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        self.base = {}
+        self.reload()
+        if self.list.count():
+            self.list.setCurrentRow(min(row, self.list.count() - 1))
+
+    def send_to_telegram(self):
+        c = self.current_clip()
+        if not c:
+            return
+        path = self.clip_path(c)
+        text = autoclip.clip_description(c, "tiktok", self.tag_cfg())
+        bus = self.win.bus
+        bus.send_state.emit("Telegram: готовлю…")
+
+        def job(bot):
+            try:
+                light = bot.send_clip(path, text, on_state=lambda t: bus.send_state.emit("Telegram: " + t))
+                bus.send_state.emit("Отправлено в Telegram" + (" (облегчённая копия)" if light else "") + " ✓")
+            except autoclip.AutoClipError as e:
+                bus.send_state.emit("Не отправилось: " + str(e).replace("❌ ", ""))
+        self.win.telegram.do(job)
 
     # ---------- текст: слова субтитров, мат, название ----------
     def _build_text_tab(self):

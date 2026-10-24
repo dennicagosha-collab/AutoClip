@@ -1,6 +1,7 @@
 """Telegram-бот: разбор ответов, чужой chat_id, старые ответы и кнопки (Telegram подменён)."""
 import datetime
 import json
+import os
 
 import pytest
 
@@ -261,3 +262,31 @@ def test_update_buttons(tmp_path):
     assert bot.poll(0) == [("update", "1.2.0")]
     api.press(ME, btn[2])                                            # уже ответил — неактуально
     assert bot.poll(0) == [] and api.answers[-1] == tg.STALE
+
+
+def test_send_clip_small_and_light_copy(tmp_path):
+    import subprocess
+    api = FakeTelegram()
+    bot = connected_bot(api)
+    sizes = []
+    real = api.__call__
+
+    def spy(method, params, files=None):
+        if method == "sendVideo":
+            sizes.append(os.path.getsize(files["video"]))
+        return real(method, params, files)
+    bot._api = spy
+    clip = tmp_path / "клип.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1080x1920:r=30:d=6",
+                    "-f", "lavfi", "-i", "sine=f=300:d=6", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-b:v", "8M", "-c:a", "aac", "-shortest", str(clip)], check=True)
+    assert os.path.getsize(clip) > 2 * 1024 * 1024
+    assert bot.send_clip(str(clip), "Название\n\n#стрим", limit_mb=50) is False     # влезает — как есть
+    assert sizes[-1] == os.path.getsize(clip)
+    states = []
+    assert bot.send_clip(str(clip), "Название", limit_mb=1, on_state=states.append) is True
+    assert sizes[-1] <= 1024 * 1024                                           # копия в лимите
+    assert "облегчённая версия" in api.sent[-1][1]["caption"]
+    assert any("облегчённую копию" in s for s in states)
+    assert TOKEN not in " ".join(str(x) for x in api.sent)                    # токен не в сообщениях
+

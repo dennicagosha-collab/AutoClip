@@ -75,7 +75,7 @@ def http_api(token, method, params=None, files=None, timeout=35):
                 raw = f.read()
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
             body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"; "
-                     f"filename=\"cover{os.path.splitext(path)[1]}\"\r\nContent-Type: {mime}\r\n\r\n"
+                     f"filename=\"file{os.path.splitext(path)[1]}\"\r\nContent-Type: {mime}\r\n\r\n"
                      ).encode("utf-8") + raw + b"\r\n"
         data = body + f"--{boundary}--\r\n".encode()
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
@@ -203,6 +203,27 @@ class Bot:
     def send_photo(self, path, caption):
         return self.call("sendPhoto", {"chat_id": self.st["chat_id"], "caption": caption},
                          files={"photo": path})
+
+    def send_clip(self, path, caption, limit_mb=None, on_state=None):
+        """Видео клипа с названием и описанием. Больше лимита Telegram — облегчённая копия
+        во временной папке (после отправки удаляется), подпись об этом. Возвращает, была ли копия."""
+        import tempfile
+        limit = limit_mb or autoclip.TG_LIMIT_MB
+        say = on_state or (lambda t: None)
+        caption = caption[:1000]                         # подпись в Telegram — до 1024 знаков
+        if os.path.getsize(path) <= limit * 1024 * 1024:
+            say("Отправляю…")
+            self.call("sendVideo", {"chat_id": self.st["chat_id"], "caption": caption,
+                                    "supports_streaming": "true"}, files={"video": path}, timeout=600)
+            return False
+        with tempfile.TemporaryDirectory(prefix="autoclip_tg_") as tmp:
+            small = os.path.join(tmp, "клип.mp4")
+            autoclip.light_copy(path, small, limit, on_frac=lambda f: say(f"Делаю облегчённую копию… {f:.0%}"))
+            say("Отправляю облегчённую копию…")
+            note = "облегчённая версия, полный файл — на ПК"
+            self.call("sendVideo", {"chat_id": self.st["chat_id"], "caption": f"{caption[:950]}\n\n({note})",
+                                    "supports_streaming": "true"}, files={"video": small}, timeout=600)
+        return True
 
     def test(self):
         self.send("Проверка связи: AutoClip на месте.")
