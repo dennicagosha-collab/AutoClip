@@ -37,6 +37,9 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(autostart, "_reg_set", reg.__setitem__)
     monkeypatch.setattr(autostart, "_reg_del", lambda n: reg.pop(n, None))
     monkeypatch.setattr(autostart, "startup_dir", lambda: str(tmp_path / "автозагрузка"))
+    import backup                                      # копия — из временной папки, не из %APPDATA%
+    (tmp_path / "данные").mkdir(exist_ok=True)
+    monkeypatch.setattr(backup, "data_dir", lambda: str(tmp_path / "данные"))
 
 
 @pytest.fixture

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """AutoClip — окно на PySide6. Вся обработка — в autoclip.py, здесь только интерфейс."""
 
+import datetime
 import json
 import os
 import re
@@ -69,6 +70,7 @@ DEFAULTS = {
     "weekly_days": 7, "weekly_format": "vertical", "weekly_dir": autoclip.WEEKLY_DIR,
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
     "censor": "partial", "clip_length": "normal", "bleep_pool": [],
+    "backup_remind": True, "backup_since": "", "backup_told": "",
 }
 
 TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
@@ -4137,6 +4139,28 @@ class SettingsPage(QWidget):
         self.show_telegram()
 
         # --- отчёт об ошибке ---
+        box, v = card("Резервная копия", "Все настройки, звуки, шрифты, стили, список нарезок, история "
+                                         "просмотров, прогноз, Telegram и вход в соцсети — в один файл. "
+                                         "Пригодится при переустановке Windows.")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        b = QPushButton("Сохранить копию…")
+        b.clicked.connect(self.save_backup)
+        row.addWidget(b)
+        b = QPushButton("Восстановить из копии…")
+        b.clicked.connect(self.restore_backup)
+        row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        v.addWidget(hint("В копии лежит токен Telegram-бота — никому её не пересылай."))
+        self.backup_state = hint("")
+        v.addWidget(self.backup_state)
+        self.cb_backup_remind = self._toggle("backup_remind")
+        v.addWidget(option_row("Напоминать раз в месяц", self.cb_backup_remind,
+                               "Тихо, в трее или в Telegram: «Давно не сохранял копию настроек»"))
+        self.show_backup_state()
+        lay.addWidget(box)
+
         box, v = card("Отчёт об ошибке", "Что-то пошло не так — собери отчёт и отправь его. В нём "
                                          "логи, версии программ, настройки без ключей и токенов, "
                                          "отчёт последней нарезки. Записей и клипов в нём нет.")
@@ -4449,6 +4473,64 @@ class SettingsPage(QWidget):
                         f"<span style='color:{'#7dd99a' if w > 0 else '#ff7a90'}'>{n} "
                         f"{'+' if w > 0 else '−'}{abs(w):.2f}</span>" for n, w in pairs))
         self.model_state.setText("<br>".join(lines))
+
+    def show_backup_state(self):
+        import backup
+        last = backup.last_saved()
+        self.backup_state.setText(f"Последняя копия: {last:%d.%m.%Y %H:%M}" if last else "Копию ещё не сохранял.")
+
+    def save_backup(self):
+        import backup
+        name = f"AutoClip копия {datetime.date.today():%Y-%m-%d}.zip"
+        start = os.path.join(os.path.expanduser("~"), "Documents", name)
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить копию", start, "Копия AutoClip (*.zip)")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = backup.save_backup(path)
+        except (OSError, autoclip.AutoClipError) as e:
+            QMessageBox.warning(self, "AutoClip", f"Копию сохранить не получилось: {e}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.show_backup_state()
+        extra = (f"\nНе вошли занятые файлы ({len(res['skipped'])}) — закрой окна соцсетей и сохрани ещё раз, "
+                 "если важен вход в соцсети." if res["skipped"] else "")
+        QMessageBox.information(self, "AutoClip", f"Копия сохранена: {path}\n\nВ ней токен Telegram-бота — "
+                                                  f"никому её не пересылай.{extra}")
+
+    def restore_backup(self):
+        import backup
+        import update
+        path, _ = QFileDialog.getOpenFileName(self, "Восстановить из копии",
+                                              os.path.join(os.path.expanduser("~"), "Documents"),
+                                              "Копия AutoClip (*.zip)")
+        if not path:
+            return
+        try:
+            m = backup.read_manifest(path)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        when = str(m.get("date", ""))[:16].replace("T", " ")
+        if ask_choice(self, f"Восстановить копию от {when} (версия {m.get('version', '?')})? Нынешние "
+                            "настройки и данные уйдут в корзину Windows, AutoClip перезапустится.",
+                      [("yes", "Восстановить"), ("no", "Отмена")]) != "yes":
+            return
+        try:
+            res = backup.restore_backup(path)
+        except (OSError, autoclip.AutoClipError) as e:
+            QMessageBox.warning(self, "AutoClip", f"Восстановить не получилось: {e}")
+            return
+        self.win.settings.clear()
+        self.win.settings.update(load_settings())       # при закрытии сохранятся уже восстановленные
+        self.s = self.win.settings
+        note = f"\nНарезок, папок которых нет, пропущено: {res['missing']}." if res["missing"] else ""
+        QMessageBox.information(self, "AutoClip", "Копия восстановлена. AutoClip перезапустится." + note)
+        if getattr(self.win, "standalone", False):
+            update.restart(False)
+            self.win.quit_app()
 
     def set_autostart(self, on):
         import autostart
@@ -4867,6 +4949,12 @@ class MainWindow(QMainWindow):
         self.retrain()
         QTimer.singleShot(1500, self.ask_views)
 
+        # --- резервная копия: тихо напомнить раз в месяц ---
+        if not self.settings.get("backup_since"):
+            self.settings["backup_since"] = datetime.datetime.now().isoformat(timespec="seconds")
+            save_settings(self.settings)
+        QTimer.singleShot(8000, self.remind_backup)
+
         # --- после обновления один раз показать «Что нового» ---
         self._news = None
         QTimer.singleShot(1200, self.news_after_update)
@@ -5198,6 +5286,22 @@ class MainWindow(QMainWindow):
         if e.type() == QEvent.ActivationChange and self.isActiveWindow():
             QTimer.singleShot(200, self.ask_pending)
         super().changeEvent(e)
+
+    def remind_backup(self):
+        import backup
+        try:
+            since = datetime.datetime.fromisoformat(self.settings.get("backup_since") or "")
+        except ValueError:
+            since = None
+        if not backup.need_reminder(self.settings, first_run=since):
+            return
+        text = "Давно не сохранял копию настроек AutoClip — «Настройки» → «Резервная копия»."
+        if self.tray and self.tray.isVisible():
+            self.tray.showMessage("AutoClip", text, QSystemTrayIcon.Information, 8000)
+        self.telegram.do(lambda bot: bot.send(text))
+        self.bus.log.emit("💾 " + text)
+        self.settings["backup_told"] = datetime.datetime.now().isoformat(timespec="seconds")
+        save_settings(self.settings)
 
     def quit_app(self):
         self._quitting = True
