@@ -3869,6 +3869,47 @@ def move_old_cuts(roots, base, log_fn=None):
     return done, skipped
 
 
+def cut_summaries(extra=()):
+    """Список нарезок AutoClip (5.14): из списка нарезок и из «Папки для клипов» (по маркеру).
+    [{"path", "name", "folder", "date", "recording", "counts": {статус: число}}], новые — первыми."""
+    seen, out = set(), []
+    base = clips_base_dir()
+    paths = list(known_projects()) + find_cuts([base] if base else []) + list(extra)
+    for pp in paths:
+        pp = os.path.abspath(pp)
+        key = os.path.normcase(pp)
+        if key in seen or not os.path.isfile(pp):
+            continue
+        seen.add(key)
+        try:
+            with open(pp, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        counts = {}
+        for c in data.get("clips", []):
+            st = STATUS_ALIASES.get(c.get("status"), c.get("status"))
+            if c.get("published") and st != "rejected":
+                st = "published"
+            counts[st] = counts.get(st, 0) + 1
+        root = cut_root({"_path": pp})
+        out.append({"path": pp, "name": os.path.basename(root), "folder": root,
+                    "date": (data.get("run") or {}).get("date") or data.get("created") or "",
+                    "recording": os.path.basename(data.get("source") or ""), "counts": counts})
+    return sorted(out, key=lambda x: x["date"], reverse=True)
+
+
+def cut_label(x):
+    """Строка нарезки в списке: «Клипы 26.10.2026 · 26.10 03:05 · запись · новых 14, выложу 3…»."""
+    d = x["date"]
+    when = f"{d[8:10]}.{d[5:7]} {d[11:16]}" if len(d) >= 16 else ""
+    c = x["counts"]
+    parts = [f"{name} {c[k]}" for k, name in (("new", "новых"), ("post", "выложу"), ("ok", "норм"),
+                                               ("published", "выложено")) if c.get(k)]
+    return "  ·  ".join(p for p in (x["name"], when, os.path.splitext(x["recording"])[0],
+                                    ", ".join(parts) or "клипов нет") if p)
+
+
 def clip_dirs(video):
     """Папки нарезок записи по порядку: «<запись>_clips», «<запись>_clips_2», …"""
     base = os.path.splitext(os.path.abspath(video))[0] + "_clips"

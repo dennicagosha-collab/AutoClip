@@ -1515,7 +1515,15 @@ class ClipsPage(QWidget):
         self.projects.setPlaceholderText("Выбери нарезку")
         self.projects.activated.connect(lambda i: self.load(self.projects.itemData(i)))
         top.addWidget(self.projects, 1)
-        b = QPushButton("Открыть папку с клипами…")
+        b = QPushButton("Копировать путь")
+        b.setToolTip("Путь к папке этой нарезки — в буфер")
+        b.clicked.connect(self.copy_cut_path)
+        top.addWidget(b)
+        b = QPushButton("Открыть папку")
+        b.clicked.connect(self.open_cut_folder)
+        top.addWidget(b)
+        b = QPushButton("Другая…")
+        b.setToolTip("Открыть нарезку из другой папки")
         b.clicked.connect(self.pick)
         top.addWidget(b)
         lay.addLayout(top)
@@ -2084,22 +2092,24 @@ class ClipsPage(QWidget):
 
     # ---------- нарезки ----------
     def refresh_recent(self):
-        recent = [p for p in self.win.settings.get("recent", []) if os.path.isfile(p)]
-        self.win.settings["recent"] = recent
+        """Список нарезок AutoClip (5.14): все нарезки — по маркеру и из списка нарезок."""
+        self.cuts = autoclip.cut_summaries(self.win.settings.get("recent", []))
         self.projects.clear()
-        for p in recent:
-            label = os.path.basename(autoclip.cut_root({"_path": p}))
-            try:
-                with open(p, encoding="utf-8") as f:
-                    run = json.load(f).get("run", {}).get("date", "")
-                if run:                              # «2026-10-21T23:15:02» → «21.10 23:15»
-                    label += f"  ·  нарезка {run[8:10]}.{run[5:7]} {run[11:16]}"
-            except (OSError, ValueError):
-                pass
-            self.projects.addItem(label, p)
+        for x in self.cuts:
+            self.projects.addItem(autoclip.cut_label(x), x["path"])
         # пока нарезку не выбрали — список пустой (при запуске «Клипы» пустые)
-        cur = self.proj["_path"] if self.proj else None
-        self.projects.setCurrentIndex(recent.index(cur) if cur in recent else -1)
+        cur = os.path.normcase(os.path.abspath(self.proj["_path"])) if self.proj else None
+        idx = next((k for k, x in enumerate(self.cuts) if os.path.normcase(x["path"]) == cur), -1)
+        self.projects.setCurrentIndex(idx)
+
+    def copy_cut_path(self):
+        if self.proj:
+            QApplication.clipboard().setText(autoclip.cut_root(self.proj))
+            self.state.setText("Путь к папке — в буфере")
+
+    def open_cut_folder(self):
+        if self.proj:
+            open_path(autoclip.cut_root(self.proj))
 
     def remember(self, pp):
         recent = [p for p in self.win.settings.get("recent", []) if p != pp]
@@ -2126,7 +2136,7 @@ class ClipsPage(QWidget):
             autoclip.register_project(proj["_path"])
         except OSError:
             pass
-        self.projects.setCurrentIndex(0)
+        self.refresh_recent()
         self.search.blockSignals(True)
         self.search.clear()                          # поиск — по расшифровке этой записи
         self.search.blockSignals(False)
