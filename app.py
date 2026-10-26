@@ -2458,9 +2458,32 @@ class ClipsPage(QWidget):
         self.t_words.setMinimumHeight(150)
         self.t_words.itemChanged.connect(self._word_changed)
         tl.addWidget(self.t_words, 1)
+        row = QHBoxLayout()
+        b = QPushButton("Добавить слово здесь")
+        b.setToolTip("Слово, которого нет в субтитрах (например, мат, который слышно), — на месте "
+                     "просмотра. Мат замаскируется и закроется звуком сам")
+        b.clicked.connect(self.add_word_here)
+        row.addWidget(b)
+        row.addStretch(1)
+        tl.addLayout(row)
         # вкладки: Клип, Текст, Описание, Публикация, Музыка
         self.ed_stack.insertWidget(1, page)
-        self.w_edit, self.m_words = {}, []
+        self.w_edit, self.m_words, self.w_add = {}, [], []
+
+    def add_word_here(self):
+        c = self.current_clip()
+        if not c:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        t = self.rec_at_player(c)
+        text, ok = QInputDialog.getText(self, "AutoClip", f"Слово на {autoclip.fmt_time_exact(t)}:")
+        if not ok or not text.strip():
+            return
+        a, b = autoclip.word_span_at(self.proj["source"], t)
+        self.w_add.append([a, b, text.strip()])
+        self.fill_words(c)
+        self.refresh_bleeps()
+        self._changed()
 
     def fill_words(self, c):
         from PySide6.QtWidgets import QTableWidgetItem
@@ -2484,12 +2507,35 @@ class ClipsPage(QWidget):
             mi.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             mi.setCheckState(Qt.Checked if on else Qt.Unchecked)
             self.t_words.setItem(r, 2, mi)
+        for i, (a, b, text) in enumerate(self.w_add):            # добавленные вручную (5.8)
+            r = self.t_words.rowCount()
+            self.t_words.insertRow(r)
+            ti = QTableWidgetItem(autoclip.fmt_time_exact(a) + " +")
+            ti.setFlags(Qt.ItemIsEnabled)
+            ti.setToolTip("Добавлено вручную. Сотри слово — уберётся")
+            ti.setData(Qt.UserRole, ("add", i, None))
+            self.t_words.setItem(r, 0, ti)
+            self.t_words.setItem(r, 1, QTableWidgetItem(text))
+            mi = QTableWidgetItem("мат" if autoclip.is_profane(text) else "")
+            mi.setFlags(Qt.ItemIsEnabled)
+            self.t_words.setItem(r, 2, mi)
         self._filling_words = False
 
     def _word_changed(self, item):
         if getattr(self, "_filling_words", False):
             return
         src, orig, auto = self.t_words.item(item.row(), 0).data(Qt.UserRole)
+        if src == "add":                                          # добавленное вручную слово
+            if item.column() == 1:
+                text = item.text().strip()
+                if text:
+                    self.w_add[orig][2] = text
+                else:
+                    self.w_add.pop(orig)
+                    QTimer.singleShot(0, lambda: self.fill_words(self.current_clip()))
+                self.refresh_bleeps()
+                self._changed()
+            return
         if item.column() == 1:
             text = item.text().strip()
             self.w_edit = {k: v for k, v in self.w_edit.items() if abs(float(k) - src) >= 0.06}
@@ -2971,6 +3017,7 @@ class ClipsPage(QWidget):
                      "hook_at": (c.get("overrides") or {}).get("hook_at"),
                      "words_edit": dict((c.get("overrides") or {}).get("words_edit") or {}),
                      "mat_words": list((c.get("overrides") or {}).get("mat_words") or []),
+                     "words_add": [list(x) for x in (c.get("overrides") or {}).get("words_add") or []],
                      "title": (c.get("overrides") or {}).get("title") or c["title"],
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
                      "cuts": [list(x) for x in (c.get("overrides") or {}).get("cuts") or []],
@@ -3019,6 +3066,7 @@ class ClipsPage(QWidget):
         self.cut_ab = [None, None]
         self.show_cuts()
         self.w_edit = dict(self.base["words_edit"])
+        self.w_add = [list(x) for x in self.base["words_add"]]
         self.m_words = list(self.base["mat_words"])
         self.t_title.setText(self.base["title"])
         self.fill_words(c)
@@ -3051,6 +3099,7 @@ class ClipsPage(QWidget):
                 "bleep_add": [list(x) for x in self.b_add],
                 "hook_at": list(self.hook_at) if self.hook_at else None,
                 "words_edit": dict(self.w_edit),
+                "words_add": [list(x) for x in self.w_add],
                 "mat_words": list(self.m_words),
                 "title": self.t_title.text().strip() or (self.base or {}).get("title", ""),
                 "bleep_remove": list(self.b_rem),

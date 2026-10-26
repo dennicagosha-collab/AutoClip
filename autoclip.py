@@ -3061,6 +3061,40 @@ def apply_word_edits(words, cfg):
     return out
 
 
+def add_manual_words(words, cfg, tl):
+    """«Добавить слово здесь» (5.8): слова, которых Whisper не услышал, — [начало, конец, текст] во
+    времени записи. Встают в субтитры; мат маскируется и закрывается звуком сам (is_profane)."""
+    out = list(words)
+    for item in cfg.get("words_add") or []:
+        a, b, text = float(item[0]), float(item[1]), str(item[2]).strip()
+        if not text:
+            continue
+        for ra, rb, o, part in tl:
+            if ra - 0.01 <= a < rb:
+                out.append({"s": round(o + a - ra, 3), "e": round(o + min(b, rb) - ra, 3), "w": text,
+                            "part": part, "src": a, "added": True, "spk": "me"})
+    return sorted(out, key=lambda w: w["s"])
+
+
+def word_span_at(src, t, voice=None):
+    """Где звучит слово у места t: голос по Silero вокруг (не длиннее 1,5 с), иначе 0,5 с от t."""
+    if voice is None:
+        voice = clip_voice(src, max(0.0, t - 2.0), t + 2.0) if os.path.isfile(src) else []
+    best = None
+    for a, b in voice:
+        d = 0.0 if a <= t <= b else min(abs(a - t), abs(b - t))
+        if d <= 0.7 and (best is None or d < best[0]):
+            best = (d, a, b)
+    if best is None:
+        return round(t, 2), round(t + 0.5, 2)
+    _, a, b = best
+    a = max(a, t - 0.6)
+    b = min(b, a + 1.5)
+    if b - a < 0.2:
+        b = a + 0.3
+    return round(a, 2), round(b, 2)
+
+
 def mark_manual_bleeps(words, cfg, s, e=None, hook=None, hd=0.0):
     """Ручные правки писка у клипа (время — в записи, чтобы пережить сдвиг границ):
     bleep_remove — начала слов, где писк снять; bleep_add — [начало, конец] куска, где запикать
@@ -3149,6 +3183,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             if not last:
                 w["until"] = round(o + rb - ra, 3)  # субтитры куска исчезают ровно на склейке
             words.append(w)
+    words = add_manual_words(words, cfg, tl)
     words = mark_manual_bleeps(words, cfg, tl)
     words = apply_word_edits(words, cfg)
     zooms = []
@@ -3496,7 +3531,7 @@ def normalize_clip(c):
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
                  "words_edit", "mat_words", "title", "censor", "cuts", "bleep_seed",
-                 "bleep_pool") + STYLE_KEYS
+                 "bleep_pool", "words_add") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
