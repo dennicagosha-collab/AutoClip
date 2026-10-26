@@ -5350,6 +5350,13 @@ class MainWindow(QMainWindow):
     def finished(self, out):
         self.busy = False
         self.cut.finished(out)
+        got = autoclip.CONFIG.get("ollama_model")
+        if got and got != self.settings.get("ollama_model"):     # программа взяла другую модель (5.6)
+            self.settings["ollama_model"] = got
+            save_settings(self.settings)
+            self.settings_page.ollama.blockSignals(True)
+            self.settings_page.ollama.setText(got)
+            self.settings_page.ollama.blockSignals(False)
         QTimer.singleShot(1500, self.ask_pending_update)     # отложенное обновление — после работы
         if out:
             self.telegram.do(lambda bot: bot.notify_cut(out))

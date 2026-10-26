@@ -1252,6 +1252,22 @@ def resolve_ollama_model(models=None):
             or names.get("qwen3:14b") or models[0])
 
 
+def remember_setting(key, value):
+    """Записать одну настройку в настройки.json (если файл есть) — для того, что программа решила сама."""
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get(key) == value:
+            return
+        data[key] = value
+        tmp = SETTINGS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, SETTINGS_PATH)
+    except (OSError, ValueError):
+        pass
+
+
 def pick_llm(mode):
     """Какую модель звать: ollama / anthropic / none. Для Ollama заодно проверяет, что
     модель из настроек скачана, а если нет — берёт скачанную и говорит об этом."""
@@ -1260,8 +1276,11 @@ def pick_llm(mode):
             model = resolve_ollama_model()
             if model:
                 if model != CONFIG["ollama_model"]:
-                    log(f"   ⚠️  модели {CONFIG['ollama_model']} нет в Ollama — беру {model}")
+                    # один раз: запомнить найденную модель в настройках — дальше без предупреждений
+                    log(f"   ℹ️  модели {CONFIG['ollama_model']} нет в Ollama — беру {model} "
+                        "и запоминаю её в настройках")
                     CONFIG["ollama_model"] = model
+                    remember_setting("ollama_model", model)
                 return "ollama"
             log("   ⚠️  в Ollama нет ни одной модели — скачай: ollama pull qwen3:14b")
         elif mode == "ollama":
