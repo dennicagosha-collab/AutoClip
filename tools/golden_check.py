@@ -24,16 +24,27 @@ GOLDEN_DIR = os.path.join(HERE, "tests", "golden")
 RECORDINGS = r"D:\Записи"
 
 
-def load_golden(path):
+def load_golden(path, with_meta=False):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     moments = list(data["moments"])
     try:
         import boundaries                                  # правки Гоши — тоже эталон
-        moments += boundaries.golden_from_edits(data["recording"])
+        moments += boundaries.golden_from_edits(data["recording"], data.get("fingerprint"))
     except Exception:
         pass
+    if with_meta:
+        return data["recording"], moments, data
     return data["recording"], moments
+
+
+def find_video(folder, data):
+    """Запись эталона: по имени, если отпечаток совпал, иначе — по отпечатку среди записей (5.1)."""
+    fp = data.get("fingerprint")
+    path = os.path.join(folder, data["recording"])
+    if os.path.isfile(path) and (not fp or autoclip.same_recording(autoclip.fingerprint(path), fp)):
+        return path
+    return autoclip.find_recording(fp, [folder]) if fp else None
 
 
 def _in(v, rng):
@@ -128,10 +139,10 @@ def main(argv=None):
     files = [a.golden] if a.golden else sorted(glob.glob(os.path.join(GOLDEN_DIR, "*.json")))
     total = good = 0
     for path in files:
-        rec, moments = load_golden(path)
-        video = os.path.join(a.dir, rec)
-        if not os.path.isfile(video):
-            print(f"Нет записи {video} — пропускаю")
+        rec, moments, meta = load_golden(path, with_meta=True)
+        video = find_video(a.dir, meta)
+        if not video:
+            print(f"Нет записи {rec} (по отпечатку тоже) — пропускаю")
             continue
         for r in range(a.runs):
             print(f"\n### {rec}, прогон {r + 1}\n")

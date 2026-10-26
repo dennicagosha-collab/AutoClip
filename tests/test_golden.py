@@ -27,7 +27,7 @@ def test_summary_counts_dead_and_cut_words():
 
 
 def test_golden_file_valid():
-    rec, moments = golden_check.load_golden(os.path.join(golden_check.GOLDEN_DIR, "02-08-08.json"))
+    rec, moments = golden_check.load_golden(os.path.join(golden_check.GOLDEN_DIR, "123123123.json"))
     assert rec.endswith(".mp4") and len(moments) >= 6
     for m in moments:
         assert m["start"][1] is None or m["start"][1] <= m["anchor"] <= (m["end"][0] or 1e9)
@@ -37,10 +37,10 @@ def test_golden_file_valid():
 def test_golden_on_recording(request):
     if not request.config.getoption("--golden"):
         pytest.skip("медленная проверка на записи — с ключом --golden")
-    path = os.path.join(golden_check.GOLDEN_DIR, "02-08-08.json")
-    rec, moments = golden_check.load_golden(path)
-    video = os.path.join(golden_check.RECORDINGS, rec)
-    if not os.path.isfile(video):
+    path = os.path.join(golden_check.GOLDEN_DIR, "123123123.json")
+    rec, moments, meta = golden_check.load_golden(path, with_meta=True)
+    video = golden_check.find_video(golden_check.RECORDINGS, meta)
+    if not video:
         pytest.skip("записи нет")
     rows, _ = golden_check.run_once(video, moments)
     bad = [(m["name"], b) for m, c, k, b in rows if b]

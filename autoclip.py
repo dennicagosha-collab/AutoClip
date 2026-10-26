@@ -969,6 +969,85 @@ def _cache_filled(path):
         return False
 
 
+FP_CHUNK = 4 * 1024 * 1024      # отпечаток: столько байт с начала и с конца файла
+_fp_cache = {}
+
+
+def fingerprint(path, dur=None):
+    """Отпечаток записи по содержимому — не зависит от имени файла (5.1): размер, хэш первых и
+    последних 4 МБ и длительность. Переименованная запись узнаётся по нему."""
+    import hashlib
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime)
+    if key in _fp_cache:
+        return _fp_cache[key]
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        h.update(f.read(FP_CHUNK))
+        if st.st_size > 2 * FP_CHUNK:
+            f.seek(st.st_size - FP_CHUNK)
+            h.update(f.read(FP_CHUNK))
+    if dur is None:
+        try:
+            dur = probe(path)["dur"]
+        except Exception:
+            dur = 0.0
+    fp = f"{st.st_size:x}-{h.hexdigest()[:16]}-{int(round(float(dur or 0)))}"
+    _fp_cache[key] = fp
+    return fp
+
+
+def same_recording(fp_a, fp_b):
+    """Один и тот же файл: размер и хэш совпадают (длительность — справочно)."""
+    return bool(fp_a and fp_b) and fp_a.split("-")[:2] == fp_b.split("-")[:2]
+
+
+def find_recording(fp, folders, exts=None):
+    """Найти запись по отпечатку в папках (не по имени)."""
+    size = fp.split("-")[0] if fp else ""
+    for d in folders:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            full = os.path.join(d, n)
+            if not n.lower().endswith(exts or VIDEO_EXT) or not os.path.isfile(full):
+                continue
+            if f"{os.path.getsize(full):x}" != size:
+                continue                                   # размер не тот — хэш не считаем
+            if same_recording(fingerprint(full), fp):
+                return full
+    return None
+
+
+def _transcript_fp(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("fp") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def find_cache(video):
+    """Кэш расшифровки записи: сначала по имени рядом с записью, потом по отпечатку
+    (запись переименовали — кэш со старым именем всё равно найдётся). (новый, старый) — пути или None."""
+    new, old = cache_paths(video)
+    if os.path.exists(new) or os.path.exists(old):
+        return (new if os.path.exists(new) else None), (old if os.path.exists(old) else None)
+    fp = fingerprint(video)
+    folder = os.path.dirname(os.path.abspath(video))
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        names = []
+    for n in names:
+        if n.endswith(".transcript.v2.json") and same_recording(_transcript_fp(os.path.join(folder, n)), fp):
+            return os.path.join(folder, n), None
+    return None, None
+
+
 def cache_paths(video):
     stem = os.path.splitext(os.path.abspath(video))[0]
     return stem + ".transcript.v2.json", stem + ".transcript.json"
@@ -981,9 +1060,9 @@ def read_transcript(path):
     return data["segments"] if isinstance(data, dict) else data
 
 
-def _save_transcript(path, segments, how, filled=False):
+def _save_transcript(path, segments, how, filled=False, fp=None):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled},
+        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled, "fp": fp},
                   f, ensure_ascii=False)
 
 
@@ -993,6 +1072,11 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     из неё берутся, но время уточняется по звуку. fresh — расшифровать заново.
     Дорожки 2 и 3 (микрофон и Discord) — отдельно; у слова spk: me / team."""
     new_cache, old_cache = cache_paths(video)
+    fp = fingerprint(video, dur)
+    if not fresh:
+        found_new, found_old = find_cache(video)        # по имени или по отпечатку (5.1)
+        new_cache = found_new or new_cache
+        old_cache = found_old or old_cache
     if not fresh and os.path.exists(new_cache) and _cache_filled(new_cache):
         log("📝 Расшифровка уже есть, беру из кэша.")
         return read_transcript(new_cache), new_cache
@@ -1006,12 +1090,12 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     if not fresh and os.path.exists(new_cache):
         # расшифровка есть, но пропущенные фразы ещё не искали (до 1.4.0) — дослушать один раз
         segments = _fill_all(read_transcript(new_cache), plan, audios, cancel)
-        _save_transcript(new_cache, segments, "whisper + дослушаны пропуски", filled=True)
+        _save_transcript(new_cache, segments, "whisper + дослушаны пропуски", filled=True, fp=fp)
         return segments, new_cache
     if not fresh and os.path.exists(old_cache) and tracks < 3:
         log("📝 Расшифровка уже есть, беру из кэша и уточняю время слов по звуку.")
         segments = _refine_segments(read_transcript(old_cache), audios["me"])
-        _save_transcript(new_cache, segments, "старая расшифровка, время по звуку")
+        _save_transcript(new_cache, segments, "старая расшифровка, время по звуку", fp=fp)
         return segments, new_cache
     model = _load_whisper()
     log("📝 Расшифровываю речь (на 3 часа записи — примерно 10–25 минут на видеокарте)...")
@@ -1029,7 +1113,7 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     segments.sort(key=lambda sg: sg["s"])
     segments = _fill_all(segments, plan, audios, cancel, model)
     log(f"   готово за {(time.time() - t0) / 60:.1f} мин")
-    _save_transcript(new_cache, segments, "whisper", filled=True)
+    _save_transcript(new_cache, segments, "whisper", filled=True, fp=fp)
     return segments, new_cache
 
 
@@ -3390,7 +3474,49 @@ def load_project(path):
     with open(pp, encoding="utf-8") as f:
         proj = json.load(f)
     proj["_path"] = pp
+    relocate_source(proj)
     return proj
+
+
+def relocate_source(proj):
+    """Запись переименовали или перенесли — найти её по отпечатку (а у старых нарезок без
+    отпечатка — по длительности и кадру) в той же папке и в папке записей. Путь обновляется."""
+    src = proj.get("source") or ""
+    if not src or os.path.isfile(src):
+        return False
+    folders = [os.path.dirname(src), os.path.dirname(os.path.dirname(proj["_path"])),
+               os.path.dirname(proj["_path"])]
+    found = None
+    if proj.get("source_fp"):
+        found = find_recording(proj["source_fp"], folders)
+    else:
+        vi = proj.get("source_info") or {}
+        for d in folders:
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            for n in names:
+                full = os.path.join(d, n)
+                if not n.lower().endswith(VIDEO_EXT) or not os.path.isfile(full):
+                    continue
+                try:
+                    pi = probe(full)
+                except Exception:
+                    continue
+                if abs(pi["dur"] - vi.get("dur", -1)) < 0.6 and (pi["w"], pi["h"]) == (vi.get("w"), vi.get("h")):
+                    found = full
+                    break
+            if found:
+                break
+    if not found:
+        return False
+    proj["source"] = os.path.abspath(found)
+    try:
+        save_project(proj)
+    except OSError:
+        pass
+    return True
 
 
 def save_project(proj):
@@ -3406,6 +3532,7 @@ def save_project(proj):
 def new_project(video, vinfo, out_dir, transcript):
     return {"_path": os.path.join(out_dir, PROJECT_FILE), "version": PROJECT_VERSION,
             "source": os.path.abspath(video), "source_info": vinfo,
+            "source_fp": fingerprint(video, vinfo.get("dur")) if os.path.isfile(video) else None,
             "transcript": os.path.abspath(transcript), "created": now_iso(),
             "settings": {}, "run": {}, "clips": []}
 

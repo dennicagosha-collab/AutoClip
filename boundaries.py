@@ -43,6 +43,7 @@ def record_edit(proj, clip, new_start, new_end, cuts=None, segments=None):
     if segments:
         text = A.text_between(segments, max(0.0, new_start - 8), new_end + 8)[:400]
     item = {"date": A.now_iso(), "recording": os.path.basename(proj.get("source", "")),
+            "fp": proj.get("source_fp"),
             "project": proj.get("_path", ""), "clip": clip.get("id"), "peak": clip.get("peak"),
             "program": [round(prog_s, 2), round(prog_e, 2)],
             "gosha": [round(float(new_start), 2), round(float(new_end), 2)],
@@ -57,11 +58,11 @@ def record_edit(proj, clip, new_start, new_end, cuts=None, segments=None):
     return item
 
 
-def golden_from_edits(recording, tol=1.5):
-    """Правки Гоши для записи — в виде эталонных моментов для golden_check."""
+def golden_from_edits(recording, fp=None, tol=1.5):
+    """Правки Гоши для записи (по отпечатку, а без него — по имени) — эталонные моменты для golden_check."""
     out = []
     for x in load():
-        if x.get("recording") != recording:
+        if not (A.same_recording(x.get("fp"), fp) if fp and x.get("fp") else x.get("recording") == recording):
             continue
         s, e = x["gosha"]
         anchor = x.get("peak") if x.get("peak") is not None and s <= x["peak"] <= e else (s + e) / 2
