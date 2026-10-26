@@ -1586,6 +1586,7 @@ class ClipsPage(QWidget):
         self.list.setTextElideMode(Qt.ElideNone)
         self.list.setIconSize(QSize(COVER_W, COVER_H))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)    # Ctrl/Shift — несколько (5.15)
         self._covers = {}              # обложки списка: путь → (время изменения, значок)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(lambda _: self.player.play())
@@ -2371,13 +2372,106 @@ class ClipsPage(QWidget):
         it = self.list.itemAt(pos)
         if it is None:
             return
-        self.list.setCurrentItem(it)
+        if not it.isSelected():
+            self.list.setCurrentItem(it)
         menu = self.build_menu()
         if menu:
             menu.exec(self.list.viewport().mapToGlobal(pos))
 
+    def selected_clips(self):
+        """Выбранные клипы (Ctrl/Shift), без кандидатов."""
+        ids = {it.data(Qt.UserRole) for it in self.list.selectedItems()}
+        return [c for c in (self.proj or {}).get("clips", []) if c["id"] in ids and c["status"] != "rejected"]
+
+    def build_multi_menu(self, clips):
+        """Действия сразу для нескольких клипов (5.15)."""
+        n = len(clips)
+        menu = QMenu(self)
+        menu.addAction(f"Выложу ({n})", lambda: self.bulk_rate(clips, "post"))
+        menu.addAction(f"Норм ({n})", lambda: self.bulk_rate(clips, "ok"))
+        menu.addSeparator()
+        for key, name in autoclip.PLATFORMS.items():
+            menu.addAction(f"Выложил на {name} ({n})", lambda k=key: self.bulk_published(clips, k))
+        tg = menu.addAction(f"Отправить в Telegram по очереди ({n})", lambda: self.bulk_telegram(clips))
+        tg.setEnabled(telegram_bot.is_connected())
+        menu.addAction(f"Пересобрать ({n})", lambda: self.bulk_rebuild(clips))
+        menu.addAction("Показать в папке", lambda: show_in_folder(self.clip_path(clips[0])))
+        menu.addSeparator()
+        menu.addAction(f"Не то — в корзину ({n})", lambda: self.bulk_rate(clips, "bad"))
+        menu.addAction(f"Удалить без оценки ({n})", lambda: self.bulk_remove(clips))
+        return menu
+
+    def _bulk(self, clips, fn, done_text):
+        self.player.release_file()
+        errors = []
+        for c in clips:
+            try:
+                fn(c)
+            except autoclip.AutoClipError as e:
+                errors.append(f"{c['title']}: {e}")
+        self.base = {}
+        self.reload()
+        self.state.setText(done_text if not errors else "Не со всеми вышло: " + "; ".join(errors)[:300])
+
+    def bulk_rate(self, clips, rating):
+        if rating == "bad":
+            r = QMessageBox.question(self, "AutoClip", f"«Не то»: {len(clips)} клипов — в корзину Windows?")
+            if r != QMessageBox.Yes:
+                return
+        self._bulk(clips, lambda c: autoclip.set_rating(self.proj["_path"], c["id"], rating),
+                   f"Оценка у {len(clips)} клипов: {autoclip.RATINGS[rating]}")
+
+    def bulk_published(self, clips, platform):
+        self._bulk(clips, lambda c: autoclip.mark_published(self.proj["_path"], c["id"], platform, True),
+                   f"Отмечено выложенными на {autoclip.PLATFORMS[platform]}: {len(clips)}")
+
+    def bulk_remove(self, clips):
+        r = QMessageBox.question(self, "AutoClip", f"Удалить {len(clips)} клипов без оценки?\n"
+                                 "Файлы уйдут в корзину Windows, на обучение это не повлияет.")
+        if r != QMessageBox.Yes:
+            return
+        self._bulk(clips, lambda c: autoclip.remove_clip(self.proj["_path"], c["id"]), f"Удалено: {len(clips)}")
+
+    def bulk_telegram(self, clips):
+        bus = self.win.bus
+        items = [(self.clip_path(c), autoclip.clip_description(c, "tiktok", self.tag_cfg()), c["title"])
+                 for c in clips]
+        bus.send_state.emit(f"Telegram: в очереди {len(items)}")
+
+        def job(bot):
+            for k, (path, text, title) in enumerate(items, 1):
+                try:
+                    bot.send_clip(path, text, on_state=lambda t, k=k: bus.send_state.emit(
+                        f"Telegram {k}/{len(items)}: {t}"))
+                except autoclip.AutoClipError as e:
+                    bus.send_state.emit(f"«{title}» не отправился: " + str(e).replace("❌ ", ""))
+            bus.send_state.emit(f"Отправлено в Telegram: {len(items)} ✓")
+        self.win.telegram.do(job)
+
+    def bulk_rebuild(self, clips):
+        if self.busy:
+            return
+        self.busy = True
+        self.editor.setEnabled(False)
+        self.player.release_file()
+        pp, bus, ids = self.proj["_path"], self.win.bus, [c["id"] for c in clips]
+
+        def work():
+            err = None
+            for k, cid in enumerate(ids, 1):
+                bus.send_state.emit(f"Пересобираю {k} из {len(ids)}…")
+                try:
+                    autoclip.rebuild_clip(pp, cid)
+                except autoclip.AutoClipError as e:
+                    err = str(e)
+            bus.rebuilt.emit(ids[0], err)
+        threading.Thread(target=work, daemon=True).start()
+
     def build_menu(self):
         """Действия для выбранного клипа или кандидата (меню по правой кнопке)."""
+        many = self.selected_clips()
+        if len(many) > 1:
+            return self.build_multi_menu(many)
         k = self.current_candidate()
         menu = QMenu(self)
         if k:
