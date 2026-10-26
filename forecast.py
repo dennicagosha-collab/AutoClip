@@ -271,11 +271,21 @@ def train(save=True, samples=None):
             "n_retention": sum(bool(s.get("retention")) for s in samples),
             "like": None, "views": None, "retention": None}
 
-    rated = [s for s in samples if s["like"] is not None]
+    rated = []
+    for s in samples:
+        if s["like"] is None:
+            continue
+        if 0 < s["like"] < 1:
+            # «Норм» (5.3): момент найден верно, но выкладывать не буду — наполовину «да» и
+            # наполовину «нет» (два примера с весом по половине): модель учит «стоит ли выкладывать»
+            w = s.get("weight", 1.0)
+            rated += [dict(s, like=1, weight=w * s["like"]), dict(s, like=0, weight=w * (1 - s["like"]))]
+        else:
+            rated.append(s)
     if len(rated) >= MIN_SAMPLES and len({s["like"] for s in rated}) == 2:
         mean, std, X = _standardize([vector(s["features"]) for s in rated])
         m = LogisticRegression(C=1.0, max_iter=1000).fit(
-            X, [s["like"] for s in rated], sample_weight=[s.get("weight", 1.0) for s in rated])
+            X, [int(s["like"]) for s in rated], sample_weight=[s.get("weight", 1.0) for s in rated])
         info["like"] = {"coef": [round(float(c), 4) for c in m.coef_[0]],
                         "intercept": round(float(m.intercept_[0]), 4), "mean": mean, "std": std}
 

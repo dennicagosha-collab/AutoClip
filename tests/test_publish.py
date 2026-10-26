@@ -66,7 +66,7 @@ def test_mark_published(tmp_path):
     assert set(c["published"]) == {"tiktok", "youtube"}
     autoclip.mark_published(path, cid, "tiktok", False)
     c = autoclip.mark_published(path, cid, "youtube", False)
-    assert c["published"] == {} and c["status"] == "good"           # сняли всё — снова «хороший»
+    assert c["published"] == {} and c["status"] == "post"           # сняли всё — снова «Выложу»
     with pytest.raises(autoclip.AutoClipError):
         autoclip.mark_published(path, cid, "вконтакте")
 
@@ -124,6 +124,6 @@ def test_publish_tab_and_drag(tmp_path, monkeypatch):
     page.save_link("tiktok")
     c = autoclip.find_clip(autoclip.load_project(path), cid)
     assert c["status"] == "published" and c["published"]["tiktok"]["url"].endswith("/2")
-    page.set_filter(3)                                                        # «Выложены»
+    page.set_filter(4)                                                        # «Выложены»
     assert page.list.count() == 1
     win.close()

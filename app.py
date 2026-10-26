@@ -1483,7 +1483,7 @@ class ClipList(QListWidget):
         return Qt.CopyAction
 
 
-FILTERS = (("Все", None), ("Новые", {"new"}), ("Хорошие", {"good"}), ("Выложены", {"published"}),
+FILTERS = (("Все", None), ("Новые", {"new"}), ("Выложу", {"post"}), ("Норм", {"ok"}), ("Выложены", {"published"}),
            ("Кандидаты", {"candidate"}), ("Удалённые", {"deleted"}))
 CAND = "cand:"       # так в списке помечены кандидаты (моменты без видео)
 SHIFT = 2.0          # шаг сдвига начала и конца, сек
@@ -1857,16 +1857,23 @@ class ClipsPage(QWidget):
         ed.addLayout(row)
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_good = QPushButton("👍  Хороший")
-        self.btn_good.clicked.connect(self.toggle_good)
-        self.btn_trash = QPushButton("В корзину")
+        self.btn_good = QPushButton("👍  Выложу")
+        self.btn_good.setToolTip("Момент хороший — буду выкладывать")
+        self.btn_good.setCheckable(True)
+        self.btn_good.clicked.connect(lambda: self.rate("post"))
+        self.btn_ok = QPushButton("Норм")
+        self.btn_ok.setToolTip("Момент найден правильно, но выкладывать не буду")
+        self.btn_ok.setCheckable(True)
+        self.btn_ok.clicked.connect(lambda: self.rate("ok"))
+        self.btn_trash = QPushButton("Не то")
+        self.btn_trash.setToolTip("Так больше не надо — клип в корзину Windows")
         self.btn_trash.setObjectName("danger")
         self.btn_trash.clicked.connect(self.to_trash)
         self.btn_save = QPushButton("Сохранить как…")
         self.btn_save.clicked.connect(self.save_as)
         self.btn_show = QPushButton("Показать в папке")
         self.btn_show.clicked.connect(self.show_file)
-        for w in (self.btn_good, self.btn_trash, self.btn_save, self.btn_show):
+        for w in (self.btn_good, self.btn_ok, self.btn_trash, self.btn_save, self.btn_show):
             row.addWidget(w)
         row.addStretch(1)
         ed.addLayout(row)
@@ -2383,9 +2390,10 @@ class ClipsPage(QWidget):
         menu.addSeparator()
         menu.addAction("Переименовать", self.rename_clip)
         menu.addAction("Пересобрать", self.rebuild)
-        menu.addAction("Убрать из хороших" if c["status"] == "good" else "Хороший", self.toggle_good)
+        menu.addAction("Выложу", lambda: self.rate("post"))
+        menu.addAction("Норм", lambda: self.rate("ok"))
         menu.addSeparator()
-        menu.addAction("В корзину (не нравится)", self.to_trash)
+        menu.addAction("Не то (в корзину)", self.to_trash)
         menu.addAction("Удалить (без оценки)", self.remove_clip)
         return menu
 
@@ -3021,8 +3029,8 @@ class ClipsPage(QWidget):
         self.refresh_bleeps()
         self.fill_tracks()
         self.show_music()
-        good = c["status"] == "good"
-        self.btn_good.setText("↩  Убрать из хороших" if good else "👍  Хороший")
+        self.btn_good.setChecked(c.get("rating") == "post")
+        self.btn_ok.setChecked(c.get("rating") == "ok")
         self._changed()
         self.refresh_desc()
         self.refresh_pub()
@@ -3291,11 +3299,15 @@ class ClipsPage(QWidget):
             QTimer.singleShot(0, self.win.close)    # «Применить» при закрытии — теперь закрываем
 
     def toggle_good(self):
+        self.rate("post")
+
+    def rate(self, rating):
+        """«Выложу» / «Норм»; повторное нажатие снимает оценку."""
         c = self.current_clip()
         if not c:
             return
         try:
-            autoclip.set_status(self.proj["_path"], c["id"], "new" if c["status"] == "good" else "good")
+            autoclip.set_rating(self.proj["_path"], c["id"], None if c.get("rating") == rating else rating)
         except autoclip.AutoClipError as e:
             QMessageBox.warning(self, "AutoClip", str(e))
             return
@@ -3306,7 +3318,7 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         if not c:
             return
-        r = QMessageBox.question(self, "AutoClip", f"Убрать клип «{c['title']}» в корзину?\n"
+        r = QMessageBox.question(self, "AutoClip", f"«Не то»: клип «{c['title']}» — в корзину?\n"
                                  "Файл можно будет вернуть из корзины Windows.")
         if r != QMessageBox.Yes:
             return
@@ -4459,7 +4471,7 @@ class SettingsPage(QWidget):
             self.model_state.setText(f"Не получилось обучиться: {(info or {}).get('error', '')}")
             return
         need = forecast.MIN_SAMPLES
-        lines = [f"Оценок «Хороший» / «В корзину»: <b>{info['n_like']}</b> из {need}, "
+        lines = [f"Оценок «Выложу» / «Норм» / «Не то»: <b>{info['n_like']}</b> из {need}, "
                  f"клипов с просмотрами: <b>{info['n_views']}</b> из {need}, "
                  f"с досмотрами: <b>{info.get('n_retention', 0)}</b> из {forecast.MIN_RETENTION}."]
         if not (info.get("like") or info.get("views") or info.get("retention")):

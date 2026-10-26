@@ -136,7 +136,7 @@ def test_candidates_in_clip_list(win, cut):
     last = page.list.item(page.list.count() - 1)
     assert str(last.data(0x0100)).startswith(A.CAND)                 # внизу списка
     assert last.data(A.CLIP_PATH) is None                            # без видео — не перетащить
-    page.set_filter(4)                                               # «Кандидаты»
+    page.set_filter(5)                                               # «Кандидаты»
     assert page.list.count() == n_cands
     page.list.setCurrentRow(0)
     assert page.current_clip() is None and page.current_candidate()
@@ -157,7 +157,7 @@ def test_old_project_without_candidates(win, cut):
     json.dump(data, open(pp, "w", encoding="utf-8"), ensure_ascii=False)
     w.clips.load(cut)
     assert w.clips.list.count() == len(data["clips"])
-    w.clips.set_filter(4)
+    w.clips.set_filter(5)
     assert w.clips.list.count() == 0
 
 
@@ -166,19 +166,19 @@ def test_delete_restore_candidate_and_learning(win, cut):
     import forecast
     page = w.clips
     page.load(cut)
-    page.set_filter(4)                                               # «Кандидаты»
+    page.set_filter(5)                                               # «Кандидаты»
     n = page.list.count()
     k = page.current_candidate()
     page.delete_candidate()
     assert page.list.count() == n - 1
-    page.set_filter(5)                                               # «Удалённые»
+    page.set_filter(6)                                               # «Удалённые»
     assert page.list.count() == 1 and page.current_candidate()["id"] == k["id"]
     assert page.btn_cand_del.text() == "Вернуть" and page.btn_build.isHidden()
     got = [s for s in forecast.collect() if s["id"] == k["id"]]
     assert got and got[0]["like"] == 0 and got[0]["weight"] == forecast.WEAK   # слабое «не нравится»
     page.delete_candidate()                                          # «Вернуть»
     assert page.list.count() == 0
-    page.set_filter(4)
+    page.set_filter(5)
     assert page.list.count() == n
     assert not [s for s in forecast.collect() if s["id"] == k["id"]]
     rec = autoclip.build_candidate(cut, k["id"])                     # «Собрать» — слабое «нравится»
@@ -191,7 +191,7 @@ def test_candidate_preview_plays_its_range(win, cut):
     from qtwait import pump
     page = w.clips
     page.load(cut)
-    page.set_filter(4)
+    page.set_filter(5)
     k = page.current_candidate()
     page.play_candidate()
     assert page.player._stop_at == int(k["end"] * 1000)              # стоп на конце кандидата

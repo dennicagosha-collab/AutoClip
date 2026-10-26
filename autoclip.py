@@ -3410,7 +3410,25 @@ def parse_time(t):
 
 PROJECT_FILE = "project.json"
 PROJECT_VERSION = 1
-STATUSES = {"new": "новый", "good": "хороший", "published": "выложен", "rejected": "отклонён"}
+# статус клипа (5.3): новый → «Выложу» / «Норм» / «Не то»; «выложен» — сам по себе (5.4)
+STATUSES = {"new": "новый", "post": "выложу", "ok": "норм", "published": "выложен", "rejected": "не то"}
+STATUS_ALIASES = {"good": "post"}          # «Хороший» до 1.4.0
+RATINGS = {"post": "Выложу", "ok": "Норм", "bad": "Не то"}
+
+
+def normalize_clip(c):
+    """Старые статусы → новые (5.3) и починка «выложен» (5.4). True — что-то поменялось."""
+    before = (c.get("status"), c.get("rating"))
+    st = STATUS_ALIASES.get(c.get("status"), c.get("status"))
+    if st == "rejected":
+        c["rating"] = "bad"
+    elif st in ("post", "ok"):
+        c.setdefault("rating", st)
+    if c.get("published") and st != "rejected":
+        st = "published"                                  # отметили «Выложил» — значит выложен
+        c.setdefault("rating", "post")
+    c["status"] = st
+    return (c.get("status"), c.get("rating")) != before
 # что можно переопределить у отдельного клипа
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
@@ -3475,6 +3493,11 @@ def load_project(path):
         proj = json.load(f)
     proj["_path"] = pp
     relocate_source(proj)
+    if any([normalize_clip(c) for c in proj.get("clips", [])]):
+        try:
+            save_project(proj)                            # старые статусы и «выложен» — починить
+        except OSError:
+            pass
     return proj
 
 
@@ -3617,8 +3640,17 @@ def clip_tags(c):
     return tags
 
 
+def set_rating(path, ref, rating):
+    """Оценка клипа (5.3): «post» — Выложу, «ok» — Норм, «bad» — Не то (файл — в корзину Windows),
+    None — снять оценку. Выложенный клип остаётся «выложен», меняется только оценка."""
+    if rating is not None and rating not in RATINGS:
+        raise AutoClipError(f"❌ Нет такой оценки: {rating}")
+    return set_status(path, ref, {"bad": "rejected", None: "new"}.get(rating, rating))
+
+
 def set_status(path, ref, status):
-    """Новый статус клипа. «Отклонён» — файл клипа уходит в корзину Windows."""
+    """Новый статус клипа. «Не то» (rejected) — файл клипа уходит в корзину Windows."""
+    status = STATUS_ALIASES.get(status, status)
     if status not in STATUSES:
         raise AutoClipError(f"❌ Нет такого статуса: {status}")
     proj = load_project(path)
@@ -3629,6 +3661,14 @@ def set_status(path, ref, status):
         folder = os.path.dirname(proj["_path"])
         trash(os.path.join(folder, clip["file"]))
         trash(cover_path_for(folder, clip["file"]))
+    if status == "rejected":
+        clip["rating"] = "bad"
+    elif status in ("post", "ok"):
+        clip["rating"] = status
+    elif status == "new":
+        clip.pop("rating", None)
+    if clip.get("published") and status in ("new", "post", "ok"):
+        status = "published"                              # выложенный остаётся выложенным (5.4)
     clip["status"] = status
     clip["status_date"] = now_iso()
     save_project(proj)
@@ -4340,7 +4380,7 @@ def weekly_candidates(days=7, now=None):
         for c in proj["clips"]:
             path = os.path.join(folder, c["file"])
             date = _clip_date(c)
-            if c["status"] in ("good", "published") and date >= since and os.path.isfile(path):
+            if c["status"] in ("post", "published") and date >= since and os.path.isfile(path):
                 h = c.get("hook") or {}
                 hook = (h["end"] - h["start"]) if h.get("on") and h.get("start") is not None else 0
                 out.append({"project": proj["_path"], "id": c["id"], "path": path,
@@ -4562,9 +4602,11 @@ def mark_published(path, ref, platform, on=True, url=""):
         pub.pop(platform, None)
     clip["published"] = pub
     if pub and clip["status"] != "published":
-        clip["status"], clip["status_date"] = "published", now_iso()
+        clip["status"], clip["status_date"] = "published", now_iso()     # из любого статуса (5.4)
+        clip.setdefault("rating", "post")
     elif not pub and clip["status"] == "published":
-        clip["status"], clip["status_date"] = "good", now_iso()
+        back = clip.get("rating") if clip.get("rating") in ("post", "ok") else "new"
+        clip["status"], clip["status_date"] = back, now_iso()
     save_project(proj)
     write_report(proj)
     return clip

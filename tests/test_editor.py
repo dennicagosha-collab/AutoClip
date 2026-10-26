@@ -43,7 +43,7 @@ def test_time_exact_roundtrip():
 
 def test_status_good_and_back(cut):
     c = autoclip.load_project(cut)["clips"][0]
-    assert autoclip.set_status(cut, c["id"], "good")["status"] == "good"
+    assert autoclip.set_status(cut, c["id"], "good")["status"] == "post"
     assert autoclip.set_status(cut, c["id"], "new")["status"] == "new"
     with pytest.raises(autoclip.AutoClipError):
         autoclip.set_status(cut, c["id"], "крутой")
@@ -79,8 +79,8 @@ def test_quiet_start(tmp_path):
 
 
 def test_clip_tags():
-    c = {"status": "good", "hook": {"on": True}, "quiet_start": True, "marks": [10.0]}
-    assert autoclip.clip_tags(c) == ["хороший", "хук", "тихое начало", "метка"]
+    c = {"status": "post", "hook": {"on": True}, "quiet_start": True, "marks": [10.0]}
+    assert autoclip.clip_tags(c) == ["выложу", "хук", "тихое начало", "метка"]
 
 
 # ---------- окно ----------
@@ -153,7 +153,7 @@ def test_editor_shift_and_rebuild(win, cut, monkeypatch):
 
     # «Хороший» и фильтры
     page.toggle_good()
-    assert autoclip.find_clip(autoclip.load_project(cut), c["id"])["status"] == "good"
+    assert autoclip.find_clip(autoclip.load_project(cut), c["id"])["status"] == "post"
     page.set_filter(2)                                       # «Хорошие»
     assert page.list.count() == 1
     page.set_filter(1)                                       # «Новые»
@@ -364,7 +364,7 @@ def test_context_menu(win, cut, monkeypatch):
     menu = page.build_menu()
     acts = {a.text(): a for a in menu.actions() if a.text()}
     assert {"Показать в папке", "Открыть в плеере", "Отправить в Telegram", "Переименовать", "Пересобрать",
-            "Хороший", "В корзину (не нравится)", "Удалить (без оценки)"} <= set(acts)
+            "Выложу", "Норм", "Не то (в корзину)", "Удалить (без оценки)"} <= set(acts)
     assert not acts["Отправить в Telegram"].isEnabled()                # бот не подключён
     acts["Показать в папке"].trigger()
     assert shown == [os.path.join(cut, c["file"])]                     # именно этот файл
