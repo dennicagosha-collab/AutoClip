@@ -30,9 +30,17 @@ def load_golden(path, with_meta=False):
     moments = list(data["moments"])
     try:
         import boundaries                                  # правки Гоши — тоже эталон
-        moments += boundaries.golden_from_edits(data["recording"], data.get("fingerprint"))
+        edits = boundaries.golden_from_edits(data["recording"], data.get("fingerprint"))
     except Exception:
-        pass
+        edits = []
+    for ed in edits:
+        # правка Гоши важнее эталона из ТЗ: заменяет эталон этого момента (D.1)
+        same = next((m for m in moments if ed["start"][0] - 2 <= m["anchor"] <= ed["end"][1] + 2), None)
+        if same:
+            same.update(start=ed["start"], end=ed["end"], must=ed["must"],
+                        why=(same.get("why", "") + "; по правке Гоши").strip("; "))
+        else:
+            moments.append(ed)
     if with_meta:
         return data["recording"], moments, data
     return data["recording"], moments

@@ -5433,6 +5433,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj["loud_z"] = [round(float(x), 2) for x in loud_z]   # для «Клип отсюда»: точки зума
     want = CONFIG["auto_max"] if CONFIG.get("clips_mode") == "auto" else CONFIG["clips"]
     dead = dead_seconds(loud, punch, loud_z, voice, all_words(segments))
+    proj["dead_runs"] = [[a_, b_] for a_, b_ in dead_runs(dead, 0, len(dead)) if b_ - a_ >= 3]   # для таймлайна
     import story                           # начало и конец истории момента (4.2)
     burst, all_w = story.burst_of(loud, punch), all_words(segments)
 

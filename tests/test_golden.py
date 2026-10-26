@@ -45,3 +45,15 @@ def test_golden_on_recording(request):
     rows, _ = golden_check.run_once(video, moments)
     bad = [(m["name"], b) for m, c, k, b in rows if b]
     assert not bad, bad
+
+
+def test_gosha_edit_replaces_golden(tmp_path, monkeypatch):
+    import json as _json
+    import boundaries
+    g = tmp_path / "g.json"
+    g.write_text(_json.dumps({"recording": "з.mp4", "moments": [
+        {"name": "м", "anchor": 50.0, "start": [None, 40.0], "end": [58.0, 62.0], "must": [40.0, 58.0]}]}),
+        encoding="utf-8")
+    boundaries._save([{"recording": "з.mp4", "peak": 50.0, "program": [38.0, 60.0], "gosha": [35.0, 55.0]}])
+    rec, moments = golden_check.load_golden(str(g))
+    assert len(moments) == 1 and moments[0]["start"] == [33.5, 36.5] and moments[0]["end"] == [53.5, 56.5]

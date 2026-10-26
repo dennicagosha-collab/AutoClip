@@ -9,7 +9,7 @@
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 BG = QColor("#16171c")
@@ -22,6 +22,7 @@ CUT = QColor(0, 0, 0, 150)
 ZOOM = QColor("#7dd99a")
 TEXT = QColor("#eceef2")
 MUTED = QColor("#8b8f9a")
+DEAD = QColor(139, 143, 154, 90)
 
 HANDLE = 7          # ширина ручки, px
 PAD = 10.0          # запас записи до и после клипа, сек (масштаб колесом)
@@ -52,6 +53,7 @@ class Timeline(QWidget):
         self.marks = []                   # время меток OBS
         self.zooms = []                   # время зумов
         self.words = []                   # [(начало, конец, текст)] — подписи при крупном масштабе
+        self.dead = []                    # мёртвые куски: нет речи и тихо в игре
         self.playhead = None              # время записи под бегунком
         self.sel = None                   # выделение [от, до] — для «Вырезать»
         self._drag = None
@@ -67,7 +69,9 @@ class Timeline(QWidget):
         self.s, self.e = float(s), float(e)
         self.update()
 
-    def set_layers(self, hook=None, bleeps=(), cuts=(), marks=(), zooms=(), words=()):
+    def set_layers(self, hook=None, bleeps=(), cuts=(), marks=(), zooms=(), words=(), dead=None):
+        if dead is not None:
+            self.dead = [list(d) for d in dead]
         self.hook = tuple(hook) if hook else None
         self.bleeps, self.cuts = list(bleeps), [list(c) for c in cuts]
         self.marks, self.zooms, self.words = list(marks), list(zooms), list(words)
@@ -113,6 +117,11 @@ class Timeline(QWidget):
         # вне клипа — притушено
         p.fillRect(QRectF(0, top, max(0, xs), h - top), QColor(0, 0, 0, 90))
         p.fillRect(QRectF(xe, top, max(0, w - xe), h - top), QColor(0, 0, 0, 90))
+        # мёртвые куски — штриховка (нет речи и тихо в игре)
+        for a, b in self.dead:
+            r = QRectF(self.x_of(a), top, self.x_of(b) - self.x_of(a), h - top)
+            if r.right() >= 0 and r.left() <= w:
+                p.fillRect(r, QBrush(DEAD, Qt.BDiagPattern))
         # вырезки
         for a, b in self.cuts:
             p.fillRect(QRectF(self.x_of(a), top, self.x_of(b) - self.x_of(a), h - top), CUT)
@@ -283,3 +292,30 @@ def wave_of(audio, start, sr=8000, step=0.05):
     m = np.abs(x[:k * n].reshape(k, n)).max(axis=1)
     m = m / (float(m.max()) or 1.0)
     return [(start + i * step, float(v)) for i, v in enumerate(m)]
+
+
+def estimate_dead(audio, start, words, sr=8000, min_len=3):
+    """Мёртвые куски для старых нарезок (без сохранённых): секунды без слов и тише обычного —
+    приблизительно, по громкости кусочка записи. [[начало, конец]] во времени записи."""
+    import numpy as np
+    x = np.asarray(audio, dtype=np.float32)
+    n = len(x) // sr
+    if n < min_len:
+        return []
+    rms = np.sqrt((x[:n * sr].reshape(n, sr) ** 2).mean(axis=1))
+    quiet = rms < 0.6 * float(np.median(rms))
+    for a, b in words:
+        for i in range(max(0, int(a - start)), min(n, int(math.ceil(b - start)))):
+            quiet[i] = False
+    out, i = [], 0
+    while i < n:
+        if quiet[i]:
+            j = i
+            while j < n and quiet[j]:
+                j += 1
+            if j - i >= min_len:
+                out.append([start + i, start + j])
+            i = j
+        else:
+            i += 1
+    return out

@@ -100,3 +100,15 @@ def test_editor_timeline_edits_and_undo(tmp_path, fake_trash, monkeypatch, qapp)
     assert not page.pending()
     page.base = {}
     win.close()
+
+
+def test_dead_pieces_stored_and_estimated(tmp_path, qapp):
+    import numpy as np
+    from timeline import Timeline, estimate_dead
+    x = np.concatenate([np.full(8000 * 5, 0.3), np.full(8000 * 4, 0.01), np.full(8000 * 5, 0.3)]).astype(np.float32)
+    x[::2] *= -1
+    assert estimate_dead(x, 100.0, []) == [[105.0, 109.0]]                     # тихие 4 с без речи
+    assert estimate_dead(x, 100.0, [(106.0, 106.5)]) == []                     # там говорят — не мёртвое
+    tl = Timeline()
+    tl.set_layers(dead=[[1.0, 5.0]])
+    assert tl.dead == [[1.0, 5.0]]

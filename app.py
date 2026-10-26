@@ -1345,9 +1345,19 @@ class CutPage(QWidget):
         lay.addWidget(self.bar)
         self.eta = None
 
+        from PySide6.QtWidgets import QToolButton
+        self.btn_log = QToolButton()                # лог — свёрнут в «Подробности ▸» (D.1)
+        self.btn_log.setObjectName("more")
+        self.btn_log.setText("Подробности  ▸")
+        self.btn_log.setCheckable(True)
+        self.btn_log.toggled.connect(self._toggle_log)
+        lay.addWidget(self.btn_log, 0, Qt.AlignLeft)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.hide()
         lay.addWidget(self.log, 1)
+        self.log_spacer = QWidget()
+        lay.addWidget(self.log_spacer, 1)
 
         row = QHBoxLayout()
         self.btn_folder = QPushButton("Открыть папку с клипами")
@@ -1505,6 +1515,11 @@ class CutPage(QWidget):
                            (self.bar.height() - self.scissors.height()) // 2)
         self.scissors.show()
 
+    def _toggle_log(self, on):
+        self.log.setVisible(on)
+        self.log_spacer.setVisible(not on)
+        self.btn_log.setText("Подробности  ▾" if on else "Подробности  ▸")
+
     def _busy_style(self, on):
         self.btn.setProperty("busy", on)
         self.btn.style().unpolish(self.btn)
@@ -1633,17 +1648,21 @@ class ClipsPage(QWidget):
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        frow = QHBoxLayout()
-        frow.setSpacing(4)
+        from PySide6.QtWidgets import QGridLayout
+        frow = QGridLayout()                       # фильтры в два ряда — подписи не обрезаются (D.1)
+        frow.setHorizontalSpacing(4)
+        frow.setVerticalSpacing(4)
         self.filter_btns = []
+        per_row = (len(FILTERS) + 1) // 2
         for i, (name, _) in enumerate(FILTERS):
             fb = QPushButton(name)
             fb.setCheckable(True)
             fb.setObjectName("filter")
+            fb.setMinimumWidth(fb.fontMetrics().horizontalAdvance(name) + 28)
             fb.clicked.connect(lambda _, i=i: self.set_filter(i))
-            frow.addWidget(fb)
+            frow.addWidget(fb, i // per_row, i % per_row)
             self.filter_btns.append(fb)
-        frow.addStretch(1)
+        frow.setColumnStretch(per_row, 1)
         ll.addLayout(frow)
         self.filter = 0
         self.filter_btns[0].setChecked(True)
@@ -3436,8 +3455,11 @@ class ClipsPage(QWidget):
             zooms = autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[0]
         except Exception:
             zooms = []
+        dead = self.proj.get("dead_runs")
+        if dead is None:
+            dead = getattr(self, "_dead_est", {}).get(c["id"], [])     # старая нарезка — по громкости
         self.tl.set_layers(hook=self.hook_at, bleeps=bleeps, cuts=self.cuts, marks=c.get("marks") or [],
-                           zooms=zooms, words=[(w["s"], w["e"], w["w"]) for w in words])
+                           zooms=zooms, words=[(w["s"], w["e"], w["w"]) for w in words], dead=dead)
 
     def load_wave(self, c):
         """Волна звука записи вокруг клипа — в фоне (ffmpeg), чтобы окно не подвисало."""
@@ -3448,6 +3470,9 @@ class ClipsPage(QWidget):
         a = max(0.0, c["start"] - 30.0)
         b = c["end"] + 30.0
         cid = c["id"]
+        spans = [(w["s"], w["e"]) for seg in (self.segments() or []) for w in seg.get("words", [])
+                 if w["e"] > a and w["s"] < b]
+        need_dead = self.proj.get("dead_runs") is None
 
         def work():
             try:
@@ -3455,16 +3480,22 @@ class ClipsPage(QWidget):
                 p = autoclip.run(["ffmpeg", "-v", "error", "-ss", f"{a:.2f}", "-t", f"{b - a:.2f}", "-i", src,
                                   "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"], binary=True)
                 x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768
-                from timeline import wave_of
-                self.wave_ready.emit(cid, wave_of(x, a))
+                from timeline import estimate_dead, wave_of
+                dead = estimate_dead(x, a, spans) if need_dead else None
+                self.wave_ready.emit(cid, (wave_of(x, a), dead))
             except Exception:
-                self.wave_ready.emit(cid, [])
+                self.wave_ready.emit(cid, ([], None))
         threading.Thread(target=work, daemon=True).start()
 
-    def _wave_ready(self, cid, wave):
+    def _wave_ready(self, cid, data):
+        wave, dead = data
+        if dead is not None:
+            self._dead_est = getattr(self, "_dead_est", {})
+            self._dead_est[cid] = dead
         c = self.current_clip()
         if c and c["id"] == cid:
             self.tl.set_wave(wave)
+            self.tl_refresh()
 
     def _snapshot(self):
         return {"start": self.e_start.text(), "end": self.e_end.text(),
