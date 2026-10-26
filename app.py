@@ -214,8 +214,7 @@ def load_settings():
 
 def save_settings(data):
     try:
-        with open(autoclip.SETTINGS_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
+        autoclip.write_json(autoclip.SETTINGS_PATH, data)           # атомарно (P3)
     except Exception:
         pass
 
@@ -668,6 +667,14 @@ class Toast(QLabel):
         self.show()
         fade_in(self, 180)
         self.timer.start(ms)
+
+
+def in_game():
+    """Игра (или любая программа) на весь экран — никаких всплывающих окон (P3)."""
+    try:
+        return autoclip.fullscreen_app() is not None
+    except Exception:
+        return False
 
 
 def stage_name(st):
@@ -1345,6 +1352,18 @@ class CutPage(QWidget):
         lay.addWidget(self.bar)
         self.eta = None
 
+        self.resume_bar = QWidget()                 # прерванная нарезка — доделать с места обрыва (P3)
+        rb = QHBoxLayout(self.resume_bar)
+        rb.setContentsMargins(0, 0, 0, 0)
+        self.resume_text = QLabel("")
+        rb.addWidget(self.resume_text, 1)
+        self.btn_resume = QPushButton("Доделать")
+        self.btn_resume.setObjectName("primary")
+        self.btn_resume.clicked.connect(lambda: self.win.resume_cut(self.resume_path))
+        rb.addWidget(self.btn_resume)
+        self.resume_bar.hide()
+        self.resume_path = None
+        lay.addWidget(self.resume_bar)
         from PySide6.QtWidgets import QToolButton
         self.btn_log = QToolButton()                # лог — свёрнут в «Подробности ▸» (D.1)
         self.btn_log.setObjectName("more")
@@ -1514,6 +1533,21 @@ class CutPage(QWidget):
         self.scissors.move(max(0, min(self.bar.width() - self.scissors.width(), x)),
                            (self.bar.height() - self.scissors.height()) // 2)
         self.scissors.show()
+
+    def show_unfinished(self):
+        """Есть прерванная нарезка — предложить доделать."""
+        try:
+            items = autoclip.unfinished_cuts()
+        except Exception:
+            items = []
+        if not items or self.win.busy:
+            self.resume_bar.hide()
+            return
+        pp, left = items[0]
+        self.resume_path = pp
+        name = os.path.basename(autoclip.cut_root({"_path": pp}))
+        self.resume_text.setText(f"Нарезка «{name}» прервалась — не собрано клипов: {left}.")
+        self.resume_bar.show()
 
     def _toggle_log(self, on):
         self.log.setVisible(on)
@@ -4761,6 +4795,17 @@ class SettingsPage(QWidget):
         self.show_backup_state()
         lay.addWidget(box)
 
+        box, v = card("Состояние системы", "Всё, от чего зависит нарезка: ffmpeg, видеокарта, Whisper, "
+                                           "Ollama, Telegram, место на дисках, дорожки в записи.")
+        self.health_text = QLabel("Нажми «Проверить».")
+        self.health_text.setWordWrap(True)
+        self.health_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.health_text)
+        self.health_btn = QPushButton("Проверить")
+        self.health_btn.clicked.connect(self.check_health)
+        v.addWidget(self.health_btn, 0, Qt.AlignLeft)
+        lay.addWidget(box)
+
         box, v = card("Отчёт об ошибке", "Что-то пошло не так — собери отчёт и отправь его. В нём "
                                          "логи, версии программ, настройки без ключей и токенов, "
                                          "отчёт последней нарезки. Записей и клипов в нём нет.")
@@ -5073,6 +5118,33 @@ class SettingsPage(QWidget):
                         f"<span style='color:{'#7dd99a' if w > 0 else '#ff7a90'}'>{n} "
                         f"{'+' if w > 0 else '−'}{abs(w):.2f}</span>" for n, w in pairs))
         self.model_state.setText("<br>".join(lines))
+
+    def check_health(self):
+        """«Состояние системы»: проверка в фоне, итог — списком ✓ / ✗ / ·."""
+        import health
+        self.health_btn.setEnabled(False)
+        self.health_text.setText("Проверяю…")
+        out = {}
+
+        def work():
+            try:
+                out["rows"] = health.status()
+            except Exception as e:
+                out["rows"] = [("Проверка", False, str(e))]
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+
+        def poll():
+            if th.is_alive():
+                QTimer.singleShot(200, poll)
+                return
+            mark = {True: ("✓", "#7dd99a"), False: ("✗", "#ff7a90"), None: ("·", MUTED)}
+            self.health_text.setText("<br>".join(
+                f"<span style='color:{mark[ok][1]}'>{mark[ok][0]}</span> <b>{name}</b> — {text}"
+                for name, ok, text in out["rows"]))
+            self.health_btn.setEnabled(True)
+        QTimer.singleShot(200, poll)
 
     def show_backup_state(self):
         import backup
@@ -5560,6 +5632,8 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
         QTimer.singleShot(8000, self.remind_backup)
 
+        QTimer.singleShot(1500, self.cut.show_unfinished)     # прерванная нарезка — предложить доделать
+
         # --- после обновления один раз показать «Что нового» ---
         self._news = None
         QTimer.singleShot(1200, self.news_after_update)
@@ -5601,6 +5675,9 @@ class MainWindow(QMainWindow):
             return
         qs = forecast.due_questions(days)
         if not qs or getattr(self, "_views_dialog", None):
+            return
+        if in_game():                                    # в игре окно не показываем — спросим позже
+            QTimer.singleShot(120000, self.ask_views)
             return
         dlg = ViewsDialog(self, qs)
         self._views_dialog = dlg
@@ -5654,6 +5731,9 @@ class MainWindow(QMainWindow):
         seen = self.settings.get("seen_version") or ""
         if seen == update.VERSION or not self.isVisible():
             return
+        if in_game():
+            QTimer.singleShot(120000, self.news_after_update)
+            return
         self.settings["seen_version"] = update.VERSION
         save_settings(self.settings)
         fresh = update.news_since(seen)
@@ -5700,7 +5780,7 @@ class MainWindow(QMainWindow):
             self.telegram.do(lambda bot, rel=rel: bot.notify_update(rel, update.VERSION))
         if self._update_dialog:
             return
-        if not manual and (not self.isVisible() or self.working()):
+        if not manual and (not self.isVisible() or self.working() or in_game()):
             # окна нет (в трее, идёт игра) или идёт работа — спросим, когда откроют / закончится
             self._pending_update = rel
             if self.tray and not self.isVisible():
@@ -5721,7 +5801,7 @@ class MainWindow(QMainWindow):
 
     def ask_pending_update(self):
         rel = self._pending_update
-        if rel and self.isVisible() and not self.working() and not self._update_dialog:
+        if rel and self.isVisible() and not self.working() and not self._update_dialog and not in_game():
             self.update_found(rel, False)
 
     def install_update(self, dlg):
@@ -5821,7 +5901,7 @@ class MainWindow(QMainWindow):
             self.ask_pending()
 
     def ask_pending(self):
-        if self._dialog or not self._pending:
+        if self._dialog or not self._pending or in_game():
             return
         path, info = self._pending.pop(0)
         self._dialog = NewRecordingDialog(self, path, info)
@@ -5937,6 +6017,30 @@ class MainWindow(QMainWindow):
             self._toast = Toast(self)
         self._toast.show_text(text, ms)
 
+    def resume_cut(self, pp):
+        if self.busy or not pp:
+            return
+        self.busy = True
+        self.cancel.clear()
+        self.cut.resume_bar.hide()
+        self.cut.eta = autoclip.Eta()
+        self.cut.btn.setText("■   Остановить")
+        self.cut._busy_style(True)
+
+        def work():
+            out = None
+            try:
+                out = autoclip.resume_cut(pp, progress=lambda st, pct, msg: self.bus.progress.emit(st, float(pct), msg),
+                                          cancel=self.cancel)
+            except autoclip.Cancelled as e:
+                self.bus.log.emit(str(e))
+            except autoclip.AutoClipError as e:
+                self.bus.log.emit(str(e))
+            except Exception:
+                self.bus.log.emit("❌ Неожиданная ошибка:\n" + traceback.format_exc()[-1500:])
+            self.bus.done.emit(out)
+        threading.Thread(target=work, daemon=True).start()
+
     # --- нарезка в фоне ---
     def start_cut(self, files):
         self.busy = True
@@ -5964,6 +6068,7 @@ class MainWindow(QMainWindow):
     def finished(self, out):
         self.busy = False
         self.cut.finished(out)
+        QTimer.singleShot(500, self.cut.show_unfinished)
         got = autoclip.CONFIG.get("ollama_model")
         if got and got != self.settings.get("ollama_model"):     # программа взяла другую модель (5.6)
             self.settings["ollama_model"] = got
@@ -6134,6 +6239,61 @@ def start_window(win, argv):
     return True
 
 
+def friendly_error(exc_type, exc, tb_text=""):
+    """Понятный текст вместо трассировки: что случилось и что делать."""
+    name = getattr(exc_type, "__name__", "Ошибка")
+    text = str(exc) or name
+    if isinstance(exc, MemoryError):
+        return "Не хватило памяти. Закрой лишние программы (или игру) и попробуй ещё раз."
+    if isinstance(exc, PermissionError):
+        return f"Файл занят другой программой или нет доступа: {text}. Закрой его там и попробуй снова."
+    if isinstance(exc, FileNotFoundError):
+        return f"Не найден файл: {text}."
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 112:
+        return "На диске закончилось место. Освободи место и попробуй ещё раз."
+    if isinstance(exc, autoclip.AutoClipError):
+        return text.replace("❌ ", "")
+    return f"Что-то пошло не так ({name}: {text[:200]})."
+
+
+def install_error_hook(win):
+    """Любая непойманная ошибка — в лог и понятным окном с кнопкой «Отчёт об ошибке»
+    (во время игры — без окна, только в лог и в трей)."""
+    import threading as _threading
+
+    def show(exc_type, exc, tb):
+        tb_text = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            diag.FileLog().write("❌ Непойманная ошибка:\n" + tb_text)
+        except Exception:
+            pass
+        msg = friendly_error(exc_type, exc, tb_text)
+        try:
+            win.bus.log.emit("❌ " + msg)
+        except Exception:
+            pass
+
+        def ui():
+            if in_game() or not win.isVisible():
+                if win.tray:
+                    win.tray.showMessage("AutoClip — ошибка", msg, QSystemTrayIcon.Warning, 8000)
+                return
+            box = QMessageBox(win)
+            box.setWindowTitle("AutoClip")
+            box.setIcon(QMessageBox.Warning)
+            box.setText(msg)
+            rep_btn = box.addButton("Отчёт об ошибке", QMessageBox.ActionRole)
+            box.addButton("Закрыть", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is rep_btn:
+                win.make_report()
+        QTimer.singleShot(0, ui)
+
+    sys.excepthook = show
+    _threading.excepthook = lambda a: show(a.exc_type, a.exc_value, a.exc_traceback)
+    return show
+
+
 def main():
     autoclip.migrate_user_data()
     try:
@@ -6167,6 +6327,7 @@ def main():
     win.standalone = True
     instance = InstanceServer(lambda m: win.show_window() if "show" in m else None)
     app.aboutToQuit.connect(instance.close)
+    install_error_hook(win)
     start_window(win, sys.argv)
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
     if videos:

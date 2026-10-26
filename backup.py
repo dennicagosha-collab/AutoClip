@@ -59,7 +59,16 @@ def save_backup(dest):
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for full, arc in _items(root):
             try:
-                z.write(full, "data/" + arc)
+                if arc == "telegram.json":
+                    # в копии токен — открытым (secrets "plain"): шифр DPAPI на новой Windows не прочитать
+                    import secret
+                    with open(full, encoding="utf-8") as f:
+                        plain = json.load(f)
+                    if isinstance(plain, dict) and plain.get("token"):
+                        plain["token"] = secret.unprotect(plain["token"]) or ""
+                    z.writestr("data/" + arc, json.dumps(plain, ensure_ascii=False, indent=1))
+                else:
+                    z.write(full, "data/" + arc)
                 files.append(arc)
             except OSError:
                 skipped.append(arc)
@@ -111,6 +120,13 @@ def restore_backup(path):
         for top in tops:
             shutil.move(os.path.join(tmp, top), os.path.join(root, top))
     missing = _drop_missing_projects(os.path.join(root, os.path.basename(autoclip.PROJECTS_INDEX)))
+    try:                                               # токен из копии — снова зашифровать на этой Windows
+        import telegram_bot
+        st = telegram_bot.load_state()
+        if st.get("token"):
+            telegram_bot.save_state(st)
+    except Exception:
+        pass
     return {"files": len(m.get("files", [])), "missing": missing}
 
 
@@ -122,8 +138,7 @@ def _drop_missing_projects(index):
         return 0
     keep = [p for p in items if isinstance(p, str) and os.path.isfile(p)]
     if len(keep) != len(items):
-        with open(index, "w", encoding="utf-8") as f:
-            json.dump(keep, f, ensure_ascii=False, indent=1)
+        autoclip.write_json(index, keep)
     return len(items) - len(keep)
 
 
@@ -134,8 +149,7 @@ def _stamp():
 
 
 def mark_saved(when=None):
-    with open(_stamp(), "w", encoding="utf-8") as f:
-        json.dump({"saved": (when or datetime.datetime.now()).isoformat(timespec="seconds")}, f)
+    autoclip.write_json(_stamp(), {"saved": (when or datetime.datetime.now()).isoformat(timespec="seconds")})
 
 
 def last_saved():

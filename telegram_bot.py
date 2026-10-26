@@ -112,7 +112,12 @@ def load_state():
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
                 st = json.load(f)
-            return st if isinstance(st, dict) else {}
+            if not isinstance(st, dict):
+                return {}
+            if st.get("token"):                         # токен на диске — зашифрован (DPAPI, P3)
+                import secret
+                st["token"] = secret.unprotect(st["token"]) or ""
+            return st
         except FileNotFoundError:
             return {}
         except PermissionError:
@@ -125,9 +130,13 @@ def load_state():
 
 
 def save_state(st):
+    import secret
+    disk = dict(st)
+    if disk.get("token"):
+        disk["token"] = secret.protect(disk["token"])  # на диске — только зашифрованный (DPAPI, P3)
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=1)
+        json.dump(disk, f, ensure_ascii=False, indent=1)
     for attempt in range(20):                  # файл может читать поток связи — Windows не даст заменить
         try:
             os.replace(tmp, STATE_PATH)

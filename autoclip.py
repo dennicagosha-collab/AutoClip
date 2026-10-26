@@ -195,6 +195,30 @@ def _is_cancelled(cancel):
     return bool(cancel())
 
 
+def write_atomic(path, text):
+    """Атомарная запись (P3): во временный файл рядом и замена одним шагом — при сбое или выключении
+    света остаётся либо старый файл, либо новый целиком, но не обрывок. Файл занят — подождать."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    for attempt in range(40):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.025)
+    os.replace(tmp, path)
+
+
+def write_json(path, data, indent=1):
+    write_atomic(path, json.dumps(data, ensure_ascii=False, indent=indent))
+
+
 def check_cancel(cancel):
     if _is_cancelled(cancel):
         raise Cancelled()
@@ -209,10 +233,21 @@ def _flags():
     return _NO_WINDOW | (_proc_priority if os.name == "nt" else 0)
 
 
+WATCHDOG_S = 180          # ffmpeg без хода работы столько секунд — завис: убить и повторить один раз
+
+
 def run(cmd, cwd=None, quiet=True, cancel=None, binary=False, on_time=None):
-    """on_time(секунд готово) — ход работы ffmpeg (через -progress), для полосы прогресса."""
+    """on_time(секунд готово) — ход работы ffmpeg (через -progress), для полосы прогресса.
+    С on_time работает сторож: нет хода работы WATCHDOG_S секунд — процесс убивается и
+    запускается ещё раз (один раз), об этом пишется в лог."""
     if on_time is not None:
-        return _run_progress(cmd, cwd, quiet, cancel, on_time)
+        p = _run_progress(cmd, cwd, quiet, cancel, on_time)
+        if getattr(p, "stalled", False):
+            log(f"   ⚠️  ffmpeg завис ({WATCHDOG_S // 60} мин без хода работы) — убил и запускаю ещё раз")
+            p = _run_progress(cmd, cwd, quiet, cancel, on_time)
+            if getattr(p, "stalled", False):
+                log("   ❌ ffmpeg завис и второй раз — этот шаг пропущен")
+        return p
     text = {} if binary else {"encoding": "utf-8", "errors": "replace"}
     proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE,
@@ -241,7 +276,19 @@ def _run_progress(cmd, cwd, quiet, cancel, on_time):
     err = []
     t = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
     t.start()
+    last = [time.time()]
+    stalled = []
+
+    def watch():
+        while proc.poll() is None:
+            if time.time() - last[0] > WATCHDOG_S:
+                stalled.append(True)
+                proc.kill()
+                return
+            time.sleep(1.0)
+    threading.Thread(target=watch, daemon=True).start()
     for line in proc.stdout:
+        last[0] = time.time()
         if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
             try:
                 on_time(int(line.split("=", 1)[1]) / 1e6)
@@ -254,6 +301,7 @@ def _run_progress(cmd, cwd, quiet, cancel, on_time):
     proc.wait()
     t.join(5)
     p = subprocess.CompletedProcess(cmd, proc.returncode, "", "".join(err))
+    p.stalled = bool(stalled)
     if p.returncode != 0 and not quiet:
         log(p.stderr[-3000:])
     return p
@@ -899,7 +947,31 @@ def _asr(model, audio, vad, dur, spk, progress=None, cancel=None, part=(0, 1)):
                                        condition_on_previous_text=False)
     out, last_print = [], 0
     k, n = part
+    # сторож Whisper (P3): зависший расчёт на видеокарте не прервать изнутри, но молчать нельзя —
+    # если 10 минут нет ни одного куска, сказать об этом в лог (и отменить можно кнопкой)
+    import threading
+    alive = [time.time(), True]
+
+    def watch():
+        told = False
+        while alive[1]:
+            if not told and time.time() - alive[0] > 600:
+                log("   ⚠️  Whisper 10 минут не выдаёт текст — возможно, завис. Можно остановить и нарезать снова.")
+                told = True
+            time.sleep(5)
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        out = _asr_collect(segments, spk, progress, cancel, dur, part, alive)
+    finally:
+        alive[1] = False
+    return out
+
+
+def _asr_collect(segments, spk, progress, cancel, dur, part, alive):
+    out, last_print = [], 0
+    k, n = part
     for sg in segments:
+        alive[0] = time.time()
         check_cancel(cancel)
         words = [{"s": round(w.start, 2), "e": round(w.end, 2), "w": w.word.strip(), "spk": spk}
                  for w in (sg.words or []) if w.word.strip()]
@@ -1213,9 +1285,8 @@ def read_transcript(path):
 
 
 def _save_transcript(path, segments, how, filled=False, fp=None):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled,
-                   "lang_checked": filled, "fp": fp}, f, ensure_ascii=False)
+    write_json(path, {"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled,
+                      "lang_checked": filled, "fp": fp}, indent=None)
 
 
 def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
@@ -1266,6 +1337,9 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
                             "   Если ошибка про cublas/cudnn — запусти install.bat ещё раз.")
     segments.sort(key=lambda sg: sg["s"])
     segments = _fill_all(segments, plan, audios, cancel, model)
+    import health
+    health.free_whisper(model)                         # видеопамять — сразу отдать (P3)
+    model = None
     log(f"   готово за {(time.time() - t0) / 60:.1f} мин")
     _save_transcript(new_cache, segments, "whisper", filled=True, fp=fp)
     return segments, new_cache
@@ -1276,6 +1350,7 @@ def _fill_all(segments, plan, audios, cancel=None, model=None):
     ещё и пометить реплики игры (5.7). На записях с дорожками микрофона и Discord общая не
     слушается вовсе — там только люди."""
     total = 0
+    loaded_here = model is None
     if len(plan) == 1 and plan[0][0] == 0:
         model = model or _load_whisper()
         n = mark_foreign(model, audios[plan[0][1]], segments, cancel)
@@ -1287,10 +1362,14 @@ def _fill_all(segments, plan, audios, cancel=None, model=None):
             continue
         if model is None:
             model = _load_whisper()
+            loaded_here = True
         segments, n = fill_holes(model, audios[spk], segments, spk, regions, cancel)
         total += n
     if total:
         log(f"   дослушал пропуски Whisper: +{total} слов")
+    if loaded_here and model is not None:
+        import health
+        health.free_whisper(model)                     # своя модель — видеопамять сразу отдать
     return segments
 
 
@@ -2840,8 +2919,7 @@ def save_style(name, values):
 
 def delete_style(name):
     own = [st for st in load_styles() if not st.get("builtin") and st["name"] != name]
-    with open(STYLES_PATH, "w", encoding="utf-8") as f:
-        json.dump(own, f, ensure_ascii=False, indent=1)
+    write_json(STYLES_PATH, own)
 
 
 PREVIEW_WORDS = ["вот", "это", "поворот"]
@@ -4293,8 +4371,7 @@ def write_report(proj):
         rep += [f"    {n}: {sec:.0f} с" for n, sec in run_info.get("timings", [])]
         if run_info.get("encoder"):
             rep.append(f"    кодек: {run_info['encoder']}")
-    with open(os.path.join(out_dir, "отчёт.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(rep))
+    write_atomic(os.path.join(out_dir, "отчёт.txt"), "\n".join(rep))
 
 
 # ---------------- хэштеги и описание ----------------
@@ -5327,9 +5404,11 @@ def process(video, analyze_only=False, progress=None, cancel=None):
     if mode == "background":
         _proc_priority = _LOW_PRIORITY
         _set_self_priority(True)
+    whisper_model = CONFIG.get("whisper_model")
     try:
         return _process(video, analyze_only, progress, cancel, workers)
     finally:
+        CONFIG["whisper_model"] = whisper_model          # «поменьше» — только на эту нарезку
         if mode == "background":
             _proc_priority = 0
             _set_self_priority(False)
@@ -5382,6 +5461,17 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     with tempfile.TemporaryDirectory(prefix="autoclip_") as tmp:
         wav = os.path.join(tmp, "audio.wav")
         t = time.time()
+        # ресурсы перед тяжёлым (P3): мало памяти, горячая видеокарта — подождать; мало видеопамяти
+        # для Whisper — взять модель поменьше; нет места на диске — не начинать
+        import health
+        try:
+            ready = _cache_filled(cache_paths(video, fingerprint(video, vinfo["dur"]))[0])
+        except OSError:
+            ready = False
+        left = health.wait_resources(out_dir, need_whisper=not ready, cancel=cancel, log=log)
+        if left and not ready and any("видеопамяти" in t for t in left) and CONFIG["whisper_model"] == "large-v3":
+            log("   видеопамяти мало — расшифровываю моделью medium")
+            CONFIG["whisper_model"] = "medium"
         prog("звук", 0, "достаю звук")
         extract_audio(video, wav, cancel)
         loud = loudness_per_second(wav)
@@ -5418,6 +5508,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
             log(f"   образцы для модели: {len(examples)} лучших из "
                 f"{getattr(forecast.taste_examples, 'total', len(examples))} твоих оценок")
         moments = llm_moments(segments, mode, progress, cancel, examples)
+        if mode == "ollama":
+            import health
+            health.free_ollama()                       # не держать её в видеопамяти до названий
         log(f"   модель предложила {len(moments)} моментов")
     else:
         log("🤖 Без языковой модели — ищу по звуку и речи.")
@@ -5484,6 +5577,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                 c["meta"]["title"] = moment_title("", segments, c["s"], c["e"], c["peak"])
             if c["meta"] and c["meta"]["title"]:
                 c["title"] = c["meta"]["title"]          # и имя файла станет понятным
+    if mode == "ollama":
+        import health
+        health.free_ollama()                     # перед сборкой клипов видеопамять — только кодировщику
     prog("поиск", 100)
     t = mark("поиск моментов", t)
 
@@ -5497,6 +5593,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                 c["hook"], on=c["hook"]["auto"] and tri(CONFIG["hook"]) != "off")}))
         return out_dir
 
+    import health
+    health.wait_resources(out_dir, need_whisper=False, cancel=cancel, log=log)    # перед сборкой клипов
     os.makedirs(out_dir, exist_ok=True)
     if layout == 2:
         make_service_dir(out_dir, proj["cut_id"])
@@ -5519,37 +5617,24 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                 prog("рендер", sum(fracs.values()) / len(clips) * 100, name)
         return f
 
+    # что собираем — запоминаем заранее: прервётся нарезка (сбой, выключили свет) — её можно
+    # доделать с места обрыва (P3, resume_cut)
+    proj["planned"] = [json.loads(json.dumps(dict(c, num=num), default=float)) for num, c in enumerate(clips, 1)]
+    proj["run"]["complete"] = False
+    save_project(proj)
+
     def build(num, c):
-        """Один клип: рендер, тихое начало, обложка, прогноз. Своя временная папка —
-        клипы можно собирать одновременно."""
-        check_cancel(cancel)
-        name = clip_rel(proj, "new", f"{num:02d}_{safe_name(c['title'])}.mp4")
-        os.makedirs(os.path.dirname(os.path.join(out_dir, name)), exist_ok=True)
-        log(f"   [{num}/{len(clips)}] {name}")
-        rec = make_clip_record(c, num, name)
-        cfg = clip_config(proj, rec)
-        span = hook_span(rec, cfg)
-        rec["hook"]["on"] = span is not None
-        job = dict(c, hook=span)
-        with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-            rec["bleeps"] = render_clip(video, job, segments, vinfo,
-                                        os.path.join(out_dir, name), tmp, cfg, cancel,
-                                        on_frac=frac_of(num, name))
-        rec["bleep_seq"] = job.get("bleep_seq")
-        if rec["bleeps"] is None:
+        rec = render_planned(proj, video, vinfo, segments, reaction, num, c, len(clips), cancel,
+                             frac_of(num, c.get("title", "")))
+        if rec is None:
             return None
-        rec["rendered"] = now_iso()
-        rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
-        rec["cover"] = make_cover(video, vinfo, rec, reaction,
-                                  cover_path_for(out_dir, name), cfg, cancel)
-        add_forecast(rec, segments)
         with lock:
             proj["clips"].append(rec)
             proj["clips"].sort(key=lambda r: r["num"])
             save_project(proj)                   # после каждого клипа: остановка ничего не теряет
             done[0] += 1
             fracs[num] = 1.0
-            prog("рендер", sum(fracs.values()) / len(clips) * 100, name)
+            prog("рендер", sum(fracs.values()) / len(clips) * 100, rec["file"])
         return rec
 
     prog("рендер", 0)
@@ -5571,11 +5656,91 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
 
     mark("рендер клипов", t)
     proj["run"].update(timings=timings, minutes=round((time.time() - t_start) / 60, 2),
-                       whisper=WHISPER_DEVICE, encoder=_ENCODER)
+                       whisper=WHISPER_DEVICE, encoder=_ENCODER, complete=True)
+    proj.pop("planned", None)
     save_project(proj)
     write_report(proj)
     log(f"✅ Готово за {(time.time() - t_start) / 60:.1f} мин → {out_dir}")
     return out_dir
+
+
+def render_planned(proj, video, vinfo, segments, reaction, num, c, total, cancel=None, on_frac=None):
+    """Один клип нарезки: рендер, тихое начало, обложка, прогноз. Своя временная папка —
+    клипы можно собирать одновременно. → запись клипа или None (ffmpeg не смог)."""
+    check_cancel(cancel)
+    out_dir = cut_root(proj)
+    name = clip_rel(proj, "new", f"{num:02d}_{safe_name(c['title'])}.mp4")
+    os.makedirs(os.path.dirname(os.path.join(out_dir, name)), exist_ok=True)
+    log(f"   [{num}/{total}] {name}")
+    rec = make_clip_record(c, num, name)
+    cfg = clip_config(proj, rec)
+    span = hook_span(rec, cfg)
+    rec["hook"]["on"] = span is not None
+    job = dict(c, hook=span)
+    with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
+        rec["bleeps"] = render_clip(video, job, segments, vinfo, os.path.join(out_dir, name), tmp, cfg, cancel,
+                                    on_frac=on_frac)
+    rec["bleep_seq"] = job.get("bleep_seq")
+    if rec["bleeps"] is None:
+        return None
+    rec["rendered"] = now_iso()
+    rec["quiet_start"] = quiet_start(os.path.join(out_dir, name))
+    rec["cover"] = make_cover(video, vinfo, rec, reaction, cover_path_for(out_dir, name), cfg, cancel)
+    add_forecast(rec, segments)
+    return rec
+
+
+def unfinished_cuts():
+    """Нарезки, прерванные на сборке клипов (P3): [(project.json, сколько клипов не собрано)]."""
+    out = []
+    for x in cut_summaries():
+        try:
+            with open(x["path"], encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if (data.get("run") or {}).get("complete") is False and data.get("planned"):
+            have = {c.get("num") for c in data.get("clips", [])}
+            left = [c for c in data["planned"] if c.get("num") not in have]
+            if left:
+                out.append((x["path"], len(left)))
+    return out
+
+
+def resume_cut(path, progress=None, cancel=None):
+    """Доделать прерванную нарезку с места обрыва: собрать клипы, которых ещё нет. → папка нарезки."""
+    need_ffmpeg()
+    proj = load_project(path)
+    planned = proj.get("planned") or []
+    have = {c.get("num") for c in proj["clips"]}
+    left = [c for c in planned if c.get("num") not in have]
+    if not left:
+        proj["run"]["complete"] = True
+        proj.pop("planned", None)
+        save_project(proj)
+        return cut_root(proj)
+    src = proj["source"]
+    if not os.path.isfile(src):
+        raise AutoClipError(f"❌ Не найдена исходная запись: {src}")
+    segments = load_segments(proj)
+    reaction = proj.get("reaction") or []
+    log(f"🔁 Доделываю нарезку {os.path.basename(cut_root(proj))}: осталось {len(left)} клипов")
+    for k, c in enumerate(left, 1):
+        if progress:
+            progress("рендер", (k - 1) / len(left) * 100, c.get("title", ""))
+        rec = render_planned(proj, src, proj["source_info"], segments, reaction, c["num"], c, len(planned), cancel)
+        if rec is not None:
+            proj["clips"].append(rec)
+            proj["clips"].sort(key=lambda r: r["num"])
+            save_project(proj)
+    proj["run"]["complete"] = True
+    proj.pop("planned", None)
+    save_project(proj)
+    write_report(proj)
+    log("✅ Нарезка доделана")
+    if progress:
+        progress("рендер", 100, "")
+    return cut_root(proj)
 
 
 if __name__ == "__main__":

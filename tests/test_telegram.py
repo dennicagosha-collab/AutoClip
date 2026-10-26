@@ -81,7 +81,7 @@ def test_connect_remembers_chat_and_ignores_old_messages(tmp_path):
     assert bot.set_token(TOKEN) == "autoclip_test_bot"
     api.msg(ME, "/start")
     assert bot.wait_start(seconds=1) == ME
-    st = json.load(open(tg.STATE_PATH, encoding="utf-8"))
+    st = tg.load_state()                                              # на диске токен зашифрован (P3)
     assert st["chat_id"] == ME and st["token"] == TOKEN
     assert tg.is_connected() and "подключён" in api.texts()[-1]
 

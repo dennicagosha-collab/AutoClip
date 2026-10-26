@@ -47,6 +47,9 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(backup, "data_dir", lambda: str(tmp_path / "данные"))
     import boundaries                                  # правки границ — во временную папку
     monkeypatch.setattr(boundaries, "PATH", str(tmp_path / "границы.json"))
+    import health                                      # ресурсы ПК в тестах не ждём
+    monkeypatch.setattr(health, "wait_resources", lambda *a, **k: [])
+    monkeypatch.setattr(health, "free_ollama", lambda *a, **k: False)
     import store                                       # общее хранилище оценок — тоже временное
     monkeypatch.setattr(store, "PATH", str(tmp_path / "оценки.json"))
 
@@ -64,6 +67,13 @@ def fake_trash(tmp_path, monkeypatch):
 
     monkeypatch.setattr(autoclip, "_send_to_trash", send)
     return bin_dir
+
+
+@pytest.fixture(autouse=True)
+def no_fullscreen_game(monkeypatch):
+    """На этом компьютере может идти игра на весь экран — тогда окно прячет вопросы (P3). В тестах
+    игры нет, если тест сам её не изображает."""
+    monkeypatch.setattr(autoclip, "fullscreen_app", lambda: None)
 
 
 @pytest.fixture(autouse=True)
