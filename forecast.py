@@ -202,51 +202,32 @@ def _write_json(path, data):
 WEAK = 0.5
 
 
+def migrate_store(extra_dirs=()):
+    """Один раз перенести оценки из всех нарезок в общее хранилище (5.2)."""
+    import store
+    projects = list(A.known_projects())
+    dirs = set(extra_dirs or ())
+    try:                                                   # и папка записей OBS из настроек
+        with open(A.SETTINGS_PATH, encoding="utf-8") as f:
+            obs = json.load(f).get("obs_dir")
+        if obs:
+            dirs.add(obs)
+    except (OSError, ValueError, AttributeError):
+        pass
+    for pp in projects:
+        d = os.path.dirname(os.path.abspath(pp))
+        dirs.add(os.path.dirname(d))                       # папка, где лежат нарезки
+        dirs.add(os.path.dirname(os.path.dirname(d)))      # …и на уровень выше (.autoclip, 5.11)
+    projects += store.find_projects(sorted(d for d in dirs if d))
+    return store.migrate(projects)
+
+
 def collect():
-    """Примеры для обучения из всех нарезок: признаки, оценка Гоши, просмотры по площадкам.
-    Признаки старых клипов досчитываются из расшифровки (файлы проектов не меняются)."""
-    samples = []
-    for pp in A.known_projects():
-        try:
-            proj = A.load_project(pp)
-        except (A.AutoClipError, OSError, ValueError):
-            continue
-        segs = None
-        for c in proj["clips"]:
-            like = {"good": 1, "published": 1, "rejected": 0}.get(c["status"])
-            weight = 1.0
-            if like is None and c.get("origin") == "candidate" and c["status"] == "new":
-                like, weight = 1, WEAK                   # собрал кандидата — понравился, но слабее
-            if c.get("removed"):
-                continue                                 # «Удалить (без оценки)» — не учим
-            views = {p: v["views"] for p, v in (c.get("published") or {}).items()
-                     if isinstance(v, dict) and isinstance(v.get("views"), (int, float))}
-            retention = {p: float(v["retention"]) for p, v in (c.get("published") or {}).items()
-                         if isinstance(v, dict) and isinstance(v.get("retention"), (int, float))}
-            if like is None and not views:
-                continue
-            f = c.get("features")
-            if not f:
-                if segs is None:
-                    try:
-                        segs = A.load_segments(proj)
-                    except A.AutoClipError:
-                        segs = []
-                f = clip_features(c, segs)
-            samples.append({"features": f, "like": like, "views": views, "retention": retention,
-                            "weight": weight, "project": proj["_path"], "id": c["id"]})
-        for k in proj.get("candidates") or []:
-            if not k.get("deleted"):
-                continue                                 # удалил кандидата — не понравился, слабее
-            if segs is None:
-                try:
-                    segs = A.load_segments(proj)
-                except A.AutoClipError:
-                    segs = []
-            f = clip_features(dict(k, hook={"on": False}, quiet_start=False), segs)
-            samples.append({"features": f, "like": 0, "views": {}, "weight": WEAK,
-                            "project": proj["_path"], "id": k["id"]})
-    return samples
+    """Примеры для обучения — только из общего хранилища оценок (5.2): удалённые записи и папки
+    клипов ничего не стирают. Нарезки до 1.4.0 переносятся туда один раз."""
+    import store
+    migrate_store()
+    return store.samples()
 
 
 def _standardize(rows):
@@ -383,30 +364,10 @@ def explain(model, top=5):
 # ---------------- вкус для языковой модели ----------------
 
 def taste_examples(k=5):
-    """3–5 расшифровок клипов, которые Гоша отметил «Хороший» или которые набрали больше
-    всего просмотров — примеры для языковой модели."""
-    picked = []
-    for pp in A.known_projects():
-        try:
-            proj = A.load_project(pp)
-        except (A.AutoClipError, OSError, ValueError):
-            continue
-        for c in proj["clips"]:
-            views = max([v.get("views", 0) for v in (c.get("published") or {}).values()
-                         if isinstance(v, dict)] or [0])
-            if c["status"] in ("good", "published") or views:
-                picked.append((views, c.get("status_date") or c.get("created") or "", proj, c))
-    picked.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    out, cache = [], {}
-    for _, _, proj, c in picked:
-        if len(out) >= k:
-            break
-        if proj["_path"] not in cache:
-            try:
-                cache[proj["_path"]] = A.load_segments(proj)
-            except A.AutoClipError:
-                cache[proj["_path"]] = []
-        text = A.text_between(cache[proj["_path"]], c["start"], c["end"]).strip()
-        if text:
-            out.append(text[:300])
-    return out
+    """Образцы вкуса для модели — из хранилища: клипы «Выложу» и с лучшими просмотрами.
+    Возвращает тексты (не больше k); taste_examples.total — сколько всего твоих оценок."""
+    import store
+    migrate_store()
+    texts, total = store.taste(k)
+    taste_examples.total = total
+    return texts

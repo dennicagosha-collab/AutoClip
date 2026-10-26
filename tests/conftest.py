@@ -42,6 +42,8 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(backup, "data_dir", lambda: str(tmp_path / "данные"))
     import boundaries                                  # правки границ — во временную папку
     monkeypatch.setattr(boundaries, "PATH", str(tmp_path / "границы.json"))
+    import store                                       # общее хранилище оценок — тоже временное
+    monkeypatch.setattr(store, "PATH", str(tmp_path / "оценки.json"))
 
 
 @pytest.fixture

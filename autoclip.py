@@ -3527,6 +3527,11 @@ def save_project(proj):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
     os.replace(tmp, pp)
+    try:
+        import store                            # оценки — ещё и в общее хранилище (5.2)
+        store.sync_project(proj)
+    except Exception as e:
+        warn_once(f"   ⚠️  оценки не записались в общее хранилище: {e}")
 
 
 def new_project(video, vinfo, out_dir, transcript):
@@ -3639,6 +3644,11 @@ def remove_clip(path, ref):
     folder = os.path.dirname(proj["_path"])
     trash(os.path.join(folder, clip["file"]))
     trash(cover_path_for(folder, clip["file"]))
+    try:
+        import store
+        store.forget_clip(proj, clip)
+    except Exception:
+        pass
     proj["clips"] = [c for c in proj["clips"] if c["id"] != clip["id"]]
     save_project(proj)
     write_report(proj)
@@ -4859,7 +4869,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         except Exception:
             examples = []
         if examples:
-            log(f"   примеры твоего вкуса: {len(examples)}")
+            log(f"   образцы для модели: {len(examples)} лучших из "
+                f"{getattr(forecast.taste_examples, 'total', len(examples))} твоих оценок")
         moments = llm_moments(segments, mode, progress, cancel, examples)
         log(f"   модель предложила {len(moments)} моментов")
     else:
