@@ -102,10 +102,10 @@ def test_stage_strip_shows_current_and_total(monkeypatch):
     cut.eta = autoclip.Eta()
     cut.show_progress("модель", 50, "")
     bar = cut.bar
-    assert (bar.state, bar.name, round(bar.pct), bar.index + 1, bar.count) == ("busy", "Модель", 50, 3, 5)
+    assert (bar.state, bar.name, round(bar.target), bar.index + 1, bar.count) == ("busy", "Модель", 50, 3, 5)
     assert cut.total.text().startswith("Всего ")
     cut.show_progress("рендер", 10, "")
-    assert (bar.name, round(bar.pct)) == ("Рендер", 10)                 # новый этап — снова с нуля
+    assert (bar.name, round(bar.target)) == ("Рендер", 10)              # новый этап — снова с нуля
     cut.finished("D:/папка")
     assert bar.state == "done"
     win.close()
@@ -143,6 +143,10 @@ def test_animations_only_when_visible(monkeypatch):
     cut.eta = autoclip.Eta()
     cut.show_progress("поиск", 50, "")
     assert cut.scissors.isVisible() and cut.scissors.x() > 0  # ножницы едут по полосе
+    bar = cut.bar
+    assert bar.pct < 50 and bar.target == 50                     # полоса не прыгает, а плавно догоняет
+    pump(1200)
+    assert 40 < bar.pct <= 50 and cut.scissors.x() > 100
     cut.finished(None)
     assert not cut.scissors.isVisible()
     win.close()

@@ -1585,7 +1585,76 @@ _THINKING_MODELS = ("qwen3", "deepseek-r1", "magistral", "gpt-oss")
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
 
 
-def _ask_llm(prompt, mode, max_tokens=2000):
+OLLAMA_CTX = 8192          # кусок записи 10 мин ≈ 3–4 тыс. токенов + ответ: хватает, а видеопамяти нужно меньше
+OLLAMA_WAIT_S = 180        # модель молчит дольше — не ждём, ищем без неё
+OLLAMA_EXPECT_TOKENS = 700  # примерно столько токенов в ответе с моментами — для полосы прогресса
+
+
+def _ollama_stream(payload, on_tokens=None, cancel=None, wait_s=OLLAMA_WAIT_S):
+    """Ответ Ollama по кусочкам: полоса движется по мере ответа, «Остановить» обрывает запрос
+    (Ollama сразу бросает считать — следующая нарезка не ждёт в очереди)."""
+    req = urllib.request.Request(CONFIG["ollama_url"] + "/api/chat",
+                                 data=json.dumps(dict(payload, stream=True)).encode("utf-8"),
+                                 headers={"content-type": "application/json"})
+    parts, n, checked = [], 0, False
+    with urllib.request.urlopen(req, timeout=wait_s) as r:
+        for raw in r:
+            if cancel is not None and cancel.is_set():
+                r.close()                              # обрываем — Ollama перестаёт считать
+                check_cancel(cancel)
+            try:
+                msg = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                continue
+            if msg.get("error"):
+                raise RuntimeError(msg["error"])
+            piece = (msg.get("message") or {}).get("content", "")
+            if piece:
+                parts.append(piece)
+                n += 1
+                if on_tokens:
+                    on_tokens(n)
+                if not checked:
+                    checked = True
+                    _check_ollama_vram(payload.get("model", ""))
+            if msg.get("done"):
+                break
+    return "".join(parts)
+
+
+def _warn_gpu_busy():
+    """Видеокарта занята игрой или другой программой — шаг «Модель» будет в разы дольше. Сказать заранее."""
+    try:
+        import health
+        g = health.gpu()
+    except Exception:
+        g = None
+    if g:
+        try:                                            # сама модель, если уже загружена, — не «чужая» память
+            with urllib.request.urlopen(CONFIG["ollama_url"] + "/api/ps", timeout=3) as r:
+                g["free"] += sum(m.get("size_vram", 0) for m in json.loads(r.read().decode("utf-8")).get("models", [])) / 2**20
+        except Exception:
+            pass
+    if g and (g["util"] >= 30 or g["free"] < 6000):
+        warn_once(f"⚠️  Видеокарта занята (игра или другая программа: загрузка {g['util']:.0f}%, "
+                  f"свободно {g['free'] / 1024:.1f} ГБ) — шаг «Модель» займёт несколько минут вместо секунд.")
+
+
+def _check_ollama_vram(model):
+    """Модель целиком в видеокарте? Нет — честно предупредить, что будет медленно."""
+    try:
+        with urllib.request.urlopen(CONFIG["ollama_url"] + "/api/ps", timeout=3) as r:
+            ps = json.loads(r.read().decode("utf-8")).get("models", [])
+    except Exception:
+        return
+    for m in ps:
+        if m.get("name") == model and m.get("size") and m.get("size_vram", 0) < 0.95 * m["size"]:
+            part = 100 - int(100 * m.get("size_vram", 0) / m["size"])
+            warn_once(f"⚠️  Видеокарта занята другими программами — {part}% модели считается на процессоре, "
+                      "это в разы медленнее. Закрой игру или браузер, если долго.")
+
+
+def _ask_llm(prompt, mode, max_tokens=2000, on_tokens=None, cancel=None):
     """Текст ответа языковой модели (ollama / anthropic). Ошибки сети — исключением."""
     if mode == "ollama":
         model = CONFIG["ollama_model"]
@@ -1593,10 +1662,12 @@ def _ask_llm(prompt, mode, max_tokens=2000):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "format": "json", "stream": False,
-            "options": {"temperature": 0.3, "num_ctx": 16384},
+            "options": {"temperature": 0.3, "num_ctx": OLLAMA_CTX},
         }
         if model.lower().startswith(_THINKING_MODELS):
             payload["think"] = False             # Qwen3 и др. иначе сначала «думают вслух»
+        if on_tokens is not None or cancel is not None:
+            return _THINK_BLOCK.sub("", _ollama_stream(payload, on_tokens, cancel)).strip()
         r = _http_json(CONFIG["ollama_url"] + "/api/chat", payload, {}, timeout=600)
         # если модель всё же подумала вслух — рассуждения не нужны, нужен только ответ
         return _THINK_BLOCK.sub("", r.get("message", {}).get("content", "")).strip()
@@ -1621,6 +1692,8 @@ def llm_moments(segments, mode, progress=None, cancel=None, examples=()):
     if mode == "none" or not segments:
         return []
     taste = taste_block(examples)
+    if mode == "ollama":
+        _warn_gpu_busy()
     chunk_len, overlap = 600.0, 30.0
     end_all = segments[-1]["e"]
     moments, start = [], 0.0
@@ -1638,10 +1711,23 @@ def llm_moments(segments, mode, progress=None, cancel=None, examples=()):
         if progress:
             progress("модель", (i - 1) / n_chunks * 100, f"кусок {i} из {n_chunks}")
         prompt = LLM_PROMPT.replace("Расшифровка:\n", taste + "Расшифровка:\n") + "\n".join(lines)
+
+        def on_tokens(k, i=i):                     # полоса «Модель» движется, пока модель пишет ответ
+            if progress:
+                part = min(0.95, k / OLLAMA_EXPECT_TOKENS)
+                progress("модель", (i - 1 + part) / n_chunks * 100, f"кусок {i} из {n_chunks}")
         try:
-            moments += _parse_moments(_ask_llm(prompt, mode))
+            if mode == "ollama":
+                moments += _parse_moments(_ask_llm(prompt, mode, on_tokens=on_tokens, cancel=cancel))
+            else:
+                moments += _parse_moments(_ask_llm(prompt, mode))
+        except Cancelled:
+            raise
         except urllib.error.HTTPError as e:
             warn_once(f"   ⚠️  модель ответила ошибкой {e.code}: {e.read()[:300]!r}")
+        except TimeoutError:
+            log(f"⚠️  Модель не отвечает {OLLAMA_WAIT_S // 60} мин — ищу моменты без неё.")
+            return moments
         except Exception as e:
             log(f"   ⚠️  модель недоступна ({e}), продолжаю без неё")
             return moments

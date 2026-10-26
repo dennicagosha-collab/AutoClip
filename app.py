@@ -1608,32 +1608,72 @@ class StageBar(QWidget):
         self.setFixedHeight(52)
         self.setMinimumWidth(320)
         self.name, self.pct, self.index, self.count = "", 0.0, 0, len(autoclip.STAGES)
+        self.target = 0.0                         # куда идёт полоса; pct — что сейчас нарисовано (плавно догоняет)
         self.state = "idle"                       # idle / busy / done
         self.text = "Готов к нарезке"
         self.shine = 0.0
+        self.snip = 0                             # ножницы «щёлкают»
+        self.scissors = QLabel(self)              # крупные ножницы в красном кружке — на краю полосы
+        self.scissors.setObjectName("scissors")
+        self.scissors.setFixedSize(34, 34)
+        self.scissors.setAlignment(Qt.AlignCenter)
+        self.scissors.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.scissors.setStyleSheet(f"background: {ACCENT}; border-radius: 17px; border: 2px solid #ffffff;")
+        self._snips = [self._snip_pm(a) for a in (0, -14)]
+        self.scissors.setPixmap(self._snips[0])
+        self.scissors.hide()
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._tick)
 
+    @staticmethod
+    def _snip_pm(angle):
+        from PySide6.QtGui import QTransform
+        pm = theme.pixmap("scissors", "#ffffff", 20, stroke=2.4)
+        if angle:
+            pm = pm.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+            pm.setDevicePixelRatio(2)
+        return pm
+
     def set_stage(self, name, pct, index, count):
-        self.name, self.pct, self.index, self.count = name, max(0.0, min(100.0, float(pct))), index, count
+        pct = max(0.0, min(100.0, float(pct)))
+        if index != self.index or self.state != "busy":
+            self.pct = 0.0                         # новый этап — полоса с нуля
+        self.name, self.target, self.index, self.count = name, pct, index, count
         self.state = "busy"
+        if not animations_ok(self):
+            self.pct = pct                         # без анимаций — сразу
         if not self._timer.isActive():
             self._timer.start()
+        self._place_scissors()
         self.update()
 
     def set_idle(self, text="Готов к нарезке"):
-        self.state, self.text, self.pct = "idle", text, 0.0
+        self.state, self.text, self.pct, self.target = "idle", text, 0.0, 0.0
         self._timer.stop()
+        self.scissors.hide()
         self.update()
 
     def set_done(self, text="Готово"):
-        self.state, self.text, self.pct = "done", text, 100.0
+        self.state, self.text, self.pct, self.target = "done", text, 100.0, 100.0
         self._timer.stop()
+        self.scissors.hide()
         self.update()
 
     def fraction(self):
         return self.pct / 100.0
+
+    def _place_scissors(self):
+        if self.state != "busy" or not animations_ok(self):
+            self.scissors.hide()
+            return
+        r = self.rect().adjusted(1, 1, -1, -1)
+        fw = max(28.0, r.width() * self.pct / 100)
+        x = int(r.left() + fw - self.scissors.width() / 2)
+        x = max(0, min(self.width() - self.scissors.width(), x))
+        self.scissors.move(x, (self.height() - self.scissors.height()) // 2)
+        self.scissors.show()
+        self.scissors.raise_()
 
     def hideEvent(self, e):
         super().hideEvent(e)
@@ -1646,8 +1686,16 @@ class StageBar(QWidget):
 
     def _tick(self):
         if not animations_ok(self):
+            self.pct = self.target
+            self.scissors.hide()
             return
+        gap = self.target - self.pct              # полоса плавно догоняет, без рывков
+        self.pct = self.target if abs(gap) < 0.05 else self.pct + gap * 0.18
         self.shine = (self.shine + 0.012) % 1.0
+        self.snip = (self.snip + 1) % 16
+        if self.snip in (0, 8):
+            self.scissors.setPixmap(self._snips[self.snip // 8])
+        self._place_scissors()
         self.update()
 
     def paintEvent(self, e):
@@ -1689,7 +1737,8 @@ class StageBar(QWidget):
         tr = r.adjusted(18, 0, -18, 0)
         if self.state == "busy":
             p.drawText(tr, Qt.AlignVCenter | Qt.AlignLeft, self.name)
-            p.drawText(tr, Qt.AlignVCenter | Qt.AlignRight, f"{self.pct:.0f}%")
+            p.drawText(tr.adjusted(0, 0, -30 if self.pct > 93 else 0, 0), Qt.AlignVCenter | Qt.AlignRight,
+                       f"{self.target:.0f}%")
             nw = QFontMetrics(f).horizontalAdvance(self.name)
             f2 = QFont(f)
             f2.setPixelSize(12)
@@ -2102,21 +2151,10 @@ class CutPage(QWidget):
         self.total.setText("")
         self.feed.clear()
 
-    def _move_scissors(self, frac):
-        """Ножницы едут по полосе нарезки вместе с прогрессом (5.20)."""
-        if getattr(self, "scissors", None) is None:
-            self.scissors = QLabel(self.bar)
-            self.scissors.setObjectName("scissors")
-            self.scissors.setPixmap(theme.pixmap("scissors", "#ffffff", 16))
-            self.scissors.setAttribute(Qt.WA_TransparentForMouseEvents)
-        if not animations_ok(self) or frac >= 1:
-            self.scissors.hide()
-            return
-        self.scissors.adjustSize()
-        x = int(self.bar.width() * frac) - self.scissors.width() - 4      # у края заполненной части
-        self.scissors.move(max(0, min(self.bar.width() - self.scissors.width(), x)),
-                           self.bar.height() - self.scissors.height() - 4)
-        self.scissors.show()
+    @property
+    def scissors(self):
+        """Ножницы едут по краю полосы (их рисует сама полоса)."""
+        return self.bar.scissors
 
     def show_unfinished(self):
         """Есть прерванная нарезка — предложить доделать."""
@@ -2153,14 +2191,11 @@ class CutPage(QWidget):
         i = stages.index(stage)
         frac = stage_fraction(stage, pct)
         self.bar.set_stage(stage_name(stage), pct, i, len(stages))       # в полосе — этап и его 0–100%
-        self._move_scissors(self.bar.fraction())
         left = self.eta.update(frac) if self.eta else None
         self.total.setText(f"Всего {frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
 
     def finished(self, out):
         self.eta = None
-        if getattr(self, "scissors", None) is not None:
-            self.scissors.hide()
         if out:
             self.bar.set_done("Готово — клипы в папке")
             self.total.setText("Всего 100%")

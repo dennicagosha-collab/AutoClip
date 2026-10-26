@@ -224,3 +224,121 @@ def test_title_only_from_this_clip():
     moments = [{"s": 40, "e": 80, "score": 9, "title": "Бессмертная вайпер умерла", "reason": ""}]
     clips = autoclip.pick_clips(smooth, np.zeros(n), segs, moments, 120.0)
     assert clips and clips[0]["title"] == "просто"                    # название — из слов клипа
+
+
+class _FakeStream:
+    """Ответ Ollama кусочками (stream=True)."""
+
+    def __init__(self, pieces, on_close=None):
+        import json as _j
+        self.lines = [(_j.dumps({"message": {"content": p}, "done": False}) + "\n").encode() for p in pieces]
+        self.lines.append(b'{"message": {"content": ""}, "done": true}\n')
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_ollama_stream_moves_progress_and_stops(monkeypatch):
+    """Полоса «Модель» движется по мере ответа; «Остановить» обрывает запрос к Ollama."""
+    import threading
+    import urllib.request
+    pieces = ['{"moments": [', '{"start": 1, "end": 5, "score": 8, "title": "т", "reason": "р"}', ']}']
+    fake = _FakeStream(pieces)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: fake)
+    monkeypatch.setattr(autoclip, "_check_ollama_vram", lambda model: None)
+    monkeypatch.setattr(autoclip, "_warn_gpu_busy", lambda: None)
+    segs = [{"s": float(i), "e": i + 1.0, "text": f"фраза {i}", "words": []} for i in range(10)]
+    pts = []
+    m = autoclip.llm_moments(segs, "ollama", progress=lambda st, pct, msg: pts.append(pct))
+    assert len(m) == 1 and len(pts) >= 3 and pts == sorted(pts) and max(pts) < 100
+    cancel = threading.Event()
+    cancel.set()
+    fake2 = _FakeStream(pieces)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: fake2)
+    with pytest.raises(autoclip.Cancelled):
+        autoclip._ask_llm("x", "ollama", cancel=cancel)
+    assert fake2.closed                                   # запрос оборван — Ollama не дожёвывает
+
+
+def test_ollama_silent_too_long_goes_on_without_model(monkeypatch):
+    """Модель молчит дольше трёх минут — нарезка не висит, ищет без неё."""
+    import urllib.request
+
+    def silent(req, timeout=None):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(urllib.request, "urlopen", silent)
+    monkeypatch.setattr(autoclip, "_warn_gpu_busy", lambda: None)
+    logs = []
+    monkeypatch.setattr(autoclip, "log", logs.append)
+    segs = [{"s": float(i), "e": i + 1.0, "text": f"фраза {i}", "words": []} for i in range(10)]
+    assert autoclip.llm_moments(segs, "ollama", progress=lambda *a: None) == []
+    assert any("не отвечает" in x for x in logs)
+
+
+class _FakeStream:
+    """Ответ Ollama кусочками (stream=True)."""
+
+    def __init__(self, pieces):
+        import json as _j
+        self.lines = [(_j.dumps({"message": {"content": p}, "done": False}) + "\n").encode() for p in pieces]
+        self.lines.append(b'{"message": {"content": ""}, "done": true}\n')
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def close(self):
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_ollama_stream_moves_progress_and_stops(monkeypatch):
+    """Полоса «Модель» движется по мере ответа; «Остановить» обрывает запрос к Ollama."""
+    import threading
+    import urllib.request
+    pieces = ['{"moments": [', '{"start": 1, "end": 5, "score": 8, "title": "т", "reason": "р"}', ']}']
+    fake = _FakeStream(pieces)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: fake)
+    monkeypatch.setattr(autoclip, "_check_ollama_vram", lambda model: None)
+    monkeypatch.setattr(autoclip, "_warn_gpu_busy", lambda: None)
+    segs = [{"s": float(i), "e": i + 1.0, "text": f"фраза {i}", "words": []} for i in range(10)]
+    pts = []
+    m = autoclip.llm_moments(segs, "ollama", progress=lambda st, pct, msg: pts.append(pct))
+    assert len(m) == 1 and len(pts) >= 3 and pts == sorted(pts) and max(pts) < 100
+    cancel = threading.Event()
+    cancel.set()
+    fake2 = _FakeStream(pieces)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: fake2)
+    with pytest.raises(autoclip.Cancelled):
+        autoclip._ask_llm("x", "ollama", cancel=cancel)
+    assert fake2.closed                                   # запрос оборван — Ollama не дожёвывает
+
+
+def test_ollama_silent_too_long_goes_on_without_model(monkeypatch):
+    """Модель молчит дольше трёх минут — нарезка не висит, ищет без неё."""
+    import urllib.request
+
+    def silent(req, timeout=None):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr(urllib.request, "urlopen", silent)
+    monkeypatch.setattr(autoclip, "_warn_gpu_busy", lambda: None)
+    logs = []
+    monkeypatch.setattr(autoclip, "log", logs.append)
+    segs = [{"s": float(i), "e": i + 1.0, "text": f"фраза {i}", "words": []} for i in range(10)]
+    assert autoclip.llm_moments(segs, "ollama", progress=lambda *a: None) == []
+    assert any("не отвечает" in x for x in logs)
