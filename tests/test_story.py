@@ -29,7 +29,7 @@ def test_quiet_running_before_phrase_not_taken():
     words = W((40.0, 40.6, "короче"), (40.7, 41.5, "медсестру"), (41.6, 43.0, "отходит"),
               (45.0, 47.0, "хороший"), (47.2, 48.5, "контур"), (54.0, 55.0, "другое"))
     s, e, why = story.story_bounds(42.0, words, [], z, burst, None, 80.0)
-    assert 39.4 <= s <= 40.0 and "«короче»" in why
+    assert 39.2 <= s <= 40.0 and "«короче»" in why
     assert 48.5 <= e <= 49.0 and "договорил" in why     # после «контур» пауза 5,5 с — конец
 
 

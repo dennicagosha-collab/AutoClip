@@ -190,13 +190,13 @@ def test_pick_llm_switches_to_downloaded_model(monkeypatch):
 def test_llm_failure_warned_once_per_cut(tmp_path, monkeypatch, fake_trash):
     import urllib.error
     v = tmp_path / "запись.mp4"
-    audio = "aevalsrc='0.03*sin(2*PI*300*t)*(1+25*between(mod(t,20),10,12))':s=48000:d=60"
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=270x480:r=30:d=60",
+    audio = "aevalsrc='0.03*sin(2*PI*300*t)*(1+25*between(mod(t,20),10,12))':s=48000:d=100"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=270x480:r=30:d=100",
                     "-f", "lavfi", "-i", audio, "-c:v", "libx264", "-preset", "ultrafast",
                     "-c:a", "aac", "-shortest", str(v)], check=True)
     segs = [{"s": t, "e": t + 2.4, "text": "ну вот смотри сюда",
              "words": [{"s": t + i * 0.6, "e": t + i * 0.6 + 0.5, "w": w}
-                       for i, w in enumerate(["ну", "вот", "смотри", "сюда"])]} for t in range(0, 60, 4)]
+                       for i, w in enumerate(["ну", "вот", "смотри", "сюда"])]} for t in range(0, 100, 4)]
     with open(tmp_path / "запись.transcript.json", "w", encoding="utf-8") as f:
         json.dump(segs, f, ensure_ascii=False)
 
