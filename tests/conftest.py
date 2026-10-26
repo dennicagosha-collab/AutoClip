@@ -21,6 +21,7 @@ def clean_config(monkeypatch, tmp_path):
     monkeypatch.setattr(autoclip, "RECORDINGS_LOG", str(tmp_path / "записи.json"))
     monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))   # не настоящие
     monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(autoclip, "CACHE_DIR", str(tmp_path / "кэш"))           # кэш расшифровок
     import forecast
     monkeypatch.setattr(forecast, "HISTORY_PATH", str(tmp_path / "история.json"))
     monkeypatch.setattr(forecast, "MODEL_PATH", str(tmp_path / "модель.json"))

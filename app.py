@@ -71,7 +71,7 @@ DEFAULTS = {
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
     "censor": "partial", "clip_length": "normal", "bleep_pool": [],
     "backup_remind": True, "backup_since": "", "backup_told": "",
-    "clips_dir": autoclip.CONFIG["clips_dir"],
+    "clips_dir": autoclip.CONFIG["clips_dir"], "cache_days": 30,
 }
 
 TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
@@ -1379,6 +1379,7 @@ class CutPage(QWidget):
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
         c["censor"] = "full" if s.get("censor") == "full" else "partial"
         c["clips_dir"] = s.get("clips_dir", DEFAULTS["clips_dir"]) or ""
+        c["cache_days"] = int(s.get("cache_days", 30))
         c["clip_length"] = s.get("clip_length") if s.get("clip_length") in autoclip.LENGTHS else "normal"
         autoclip.apply_length(c)
         c["subs_team"] = bool(s.get("subs_team", False))
@@ -4071,6 +4072,11 @@ class SettingsPage(QWidget):
         b.clicked.connect(self.pick_clips_dir)
         row.addWidget(b)
         v.addLayout(row)
+        self.cache_days = Stepper(3, 365, int(self.s.get("cache_days", 30)))
+        self.cache_days.valueChanged.connect(lambda x: self._set("cache_days", x))
+        v.addWidget(option_row("Хранить кэш расшифровки, дней", self.cache_days,
+                               "Кэш лежит в папке настроек, не в папке записей. Неиспользуемый удаляется "
+                               "сам — понадобится, запись расшифруется заново"))
         lay.addWidget(box)
 
         box, v = card("OBS", "Новая запись в этой папке — AutoClip предложит её нарезать. "

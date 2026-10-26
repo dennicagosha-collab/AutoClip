@@ -48,7 +48,7 @@ def main(argv=None):
     ap.add_argument("--b", default=None, help="вторая расшифровка (по умолчанию v2)")
     ap.add_argument("--list", action="store_true")
     x = ap.parse_args(argv)
-    v2, v1 = autoclip.cache_paths(x.video)
+    v2, v1 = autoclip.find_cache(x.video)
     a = autoclip.read_transcript(x.a or v1)
     b = autoclip.read_transcript(x.b or v2)
     r = compare(a, b)

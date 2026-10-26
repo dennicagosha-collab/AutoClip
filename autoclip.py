@@ -139,6 +139,7 @@ CONFIG = {
     "preset": "TikTok 1080p60",   # имя пресета из load_presets()
     "clip_length": "normal",      # длина клипов: short / normal / long (LENGTHS)
     "clips_dir": r"D:\Клипы",    # куда класть нарезки (5.11); пусто — рядом с записью, как до 1.5.0
+    "cache_days": 30,             # кэш расшифровки, которым не пользовались столько дней, удаляется (5.13)
 }
 # ======================================================
 
@@ -1068,27 +1069,140 @@ def _transcript_fp(path):
         return None
 
 
-def find_cache(video):
-    """Кэш расшифровки записи: сначала по имени рядом с записью, потом по отпечатку
-    (запись переименовали — кэш со старым именем всё равно найдётся). (новый, старый) — пути или None."""
-    new, old = cache_paths(video)
-    if os.path.exists(new) or os.path.exists(old):
-        return (new if os.path.exists(new) else None), (old if os.path.exists(old) else None)
-    fp = fingerprint(video)
-    folder = os.path.dirname(os.path.abspath(video))
-    try:
-        names = os.listdir(folder)
-    except OSError:
-        names = []
-    for n in names:
-        if n.endswith(".transcript.v2.json") and same_recording(_transcript_fp(os.path.join(folder, n)), fp):
-            return os.path.join(folder, n), None
-    return None, None
+# кэш расшифровок — не в папке записей (5.13); тот же %APPDATA%\AutoClip, что и user_dir()
+CACHE_DIR = os.path.join(os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config"),
+                         "AutoClip", "кэш")
+CACHE_INDEX = "старые пути.json"                  # старый путь кэша → новый (для прежних нарезок)
 
 
-def cache_paths(video):
+def cache_paths(video, fp=None):
+    """Кэш расшифровки записи в %APPDATA%\\AutoClip\\кэш по отпечатку: (новый, старый v1)."""
+    fp = fp or fingerprint(video)
+    return (os.path.join(CACHE_DIR, f"{fp}.transcript.v2.json"),
+            os.path.join(CACHE_DIR, f"{fp}.transcript.json"))
+
+
+def legacy_cache_paths(video):
     stem = os.path.splitext(os.path.abspath(video))[0]
     return stem + ".transcript.v2.json", stem + ".transcript.json"
+
+
+def _cache_index():
+    try:
+        with open(os.path.join(CACHE_DIR, CACHE_INDEX), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _cache_index_add(old, new):
+    idx = _cache_index()
+    idx[os.path.normcase(os.path.abspath(old))] = new
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp = os.path.join(CACHE_DIR, CACHE_INDEX + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, os.path.join(CACHE_DIR, CACHE_INDEX))
+
+
+def move_cache(old, new):
+    """Перенести файл кэша в кэш-папку (другой диск — копия и удаление: это служебный кэш)."""
+    import shutil
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    if not os.path.exists(new):
+        shutil.move(old, new)
+    elif os.path.exists(old):
+        os.remove(old)
+    _cache_index_add(old, new)
+    return new
+
+
+def resolve_cache_path(path):
+    """Кэш, на который ссылается старая нарезка, переехал — где он теперь."""
+    if path and os.path.isfile(path):
+        return path
+    return _cache_index().get(os.path.normcase(os.path.abspath(path or ""))) or path
+
+
+def find_cache(video, fp=None):
+    """Кэш расшифровки записи: в кэш-папке по отпечатку; если его там нет, а рядом с записью
+    лежит старый (по имени или по отпечатку внутри) — он переносится в кэш-папку. (новый, старый v1)."""
+    fp = fp or fingerprint(video)
+    new, old = cache_paths(video, fp)
+    if not (os.path.exists(new) or os.path.exists(old)):
+        lnew, lold = legacy_cache_paths(video)
+        if not os.path.exists(lnew):
+            folder = os.path.dirname(os.path.abspath(video))
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                names = []
+            lnew = next((os.path.join(folder, n) for n in names if n.endswith(".transcript.v2.json")
+                         and same_recording(_transcript_fp(os.path.join(folder, n)), fp)), lnew)
+        if os.path.exists(lnew):
+            move_cache(lnew, new)
+        if os.path.exists(lold):
+            move_cache(lold, old)
+    return (new if os.path.exists(new) else None), (old if os.path.exists(old) else None)
+
+
+def touch_cache(path):
+    """Кэшем пользовались — отодвинуть его удаление (5.13)."""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def clean_cache(days=30, now=None):
+    """Кэш, которым не пользовались дольше days дней, удаляется сам — это служебный кэш, он
+    восстанавливается повторной расшифровкой. → сколько файлов удалено."""
+    import time
+    now = now or time.time()
+    n = 0
+    try:
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return 0
+    for name in names:
+        full = os.path.join(CACHE_DIR, name)
+        if name.endswith(".json") and ".transcript" in name and os.path.isfile(full) and \
+                now - os.path.getmtime(full) > days * 86400:
+            try:
+                os.remove(full)
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def move_legacy_caches(folders):
+    """Перенести все кэши расшифровок из папок записей в кэш-папку (5.13). → сколько файлов."""
+    n = 0
+    for d in folders:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith((".transcript.v2.json", ".transcript.json")):
+                continue
+            full = os.path.join(d, name)
+            v2 = name.endswith(".transcript.v2.json")
+            stem = name[:-len(".transcript.v2.json")] if v2 else name[:-len(".transcript.json")]
+            video = next((os.path.join(d, stem + ext) for ext in VIDEO_EXT
+                          if os.path.isfile(os.path.join(d, stem + ext))), None)
+            fp = _transcript_fp(full) if v2 else None
+            if not fp and video:
+                fp = fingerprint(video)
+            key = fp or f"old-{stem}"
+            new = os.path.join(CACHE_DIR, f"{key}.transcript{'.v2' if v2 else ''}.json")
+            try:
+                move_cache(full, new)
+                n += 1
+            except OSError:
+                pass
+    return n
 
 
 def read_transcript(path):
@@ -1109,14 +1223,16 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
     Старая расшифровка («.transcript.json», её используют прежние нарезки) не меняется: слова
     из неё берутся, но время уточняется по звуку. fresh — расшифровать заново.
     Дорожки 2 и 3 (микрофон и Discord) — отдельно; у слова spk: me / team."""
-    new_cache, old_cache = cache_paths(video)
     fp = fingerprint(video, dur)
+    new_cache, old_cache = cache_paths(video, fp)
+    os.makedirs(CACHE_DIR, exist_ok=True)
     if not fresh:
-        found_new, found_old = find_cache(video)        # по имени или по отпечатку (5.1)
+        found_new, found_old = find_cache(video, fp)    # по отпечатку; старый — переносится (5.13)
         new_cache = found_new or new_cache
         old_cache = found_old or old_cache
     if not fresh and os.path.exists(new_cache) and _cache_filled(new_cache):
         log("📝 Расшифровка уже есть, беру из кэша.")
+        touch_cache(new_cache)
         return read_transcript(new_cache), new_cache
     tracks = audio_tracks(video)
     plan = [(1, "me", VAD_VOICE), (2, "team", VAD_VOICE)] if tracks >= 3 else [(0, "me", VAD_MIX)]
@@ -4426,7 +4542,10 @@ def music_preview(path, ref, mcfg, out_path):
 
 
 def load_segments(proj):
-    path = proj.get("transcript", "")
+    path = resolve_cache_path(proj.get("transcript", ""))   # кэш мог переехать (5.13)
+    if path != proj.get("transcript") and os.path.isfile(path):
+        proj["transcript"] = path
+    touch_cache(path)
     if not os.path.isfile(path):
         raise AutoClipError(f"❌ Нет расшифровки: {path}\n   Нарежь запись заново.")
     return drop_hallucinations(read_transcript(path))
@@ -5167,6 +5286,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     need_ffmpeg()
     prepare_sounds()
     _warned.clear()
+    clean_cache(int(CONFIG.get("cache_days", 30)))
     if CONFIG.get("clip_length", "normal") != "normal":
         apply_length()                      # «обычно» — значения CONFIG как есть
     try:

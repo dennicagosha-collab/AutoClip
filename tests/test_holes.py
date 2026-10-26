@@ -1,5 +1,6 @@
 """ПАТЧ_4, 4.4: дослушать места, где голос есть, а Whisper слов не дал."""
 import json
+import os
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -42,6 +43,7 @@ def test_old_cache_filled_once(tmp_path, monkeypatch):
     video = tmp_path / "з.mp4"
     video.write_bytes(b"")
     new, _ = autoclip.cache_paths(str(video))
+    os.makedirs(os.path.dirname(new), exist_ok=True)
     with open(new, "w", encoding="utf-8") as f:
         json.dump({"version": 2, "segments": [_seg([{"s": 1.0, "e": 1.5, "w": "а"}])]}, f)
     calls = []

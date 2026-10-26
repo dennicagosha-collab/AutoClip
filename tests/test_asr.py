@@ -73,8 +73,10 @@ def test_old_cache_kept_and_refined(tmp_path, monkeypatch):
     monkeypatch.setattr(autoclip, "_load_whisper", lambda: (_ for _ in ()).throw(AssertionError("заново")))
     segs, cache = autoclip.transcribe(video, 8.0, str(tmp_path))
     assert segs[0]["words"][0]["s"] == 1.3                             # время уточнено по звуку
-    assert open(old, encoding="utf-8").read() == before                # старый файл не тронут
-    assert cache != old
+    moved = autoclip.find_cache(video)[1]                              # переехал в кэш-папку (5.13)
+    assert not os.path.exists(old) and open(moved, encoding="utf-8").read() == before   # содержимое то же
+    assert autoclip.resolve_cache_path(old) == moved                   # прежние нарезки его найдут
+    assert cache != moved
 
 
 def test_team_words_bleeped_but_not_subtitled(tmp_path):

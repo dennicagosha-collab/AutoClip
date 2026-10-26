@@ -35,7 +35,8 @@ def test_renamed_recording_finds_cache(tmp_path, monkeypatch):
     os.rename(v, new)
     monkeypatch.setattr(autoclip, "probe", lambda p: {"dur": 10, "w": 2, "h": 2, "fps": 30})
     found, old = autoclip.find_cache(new)
-    assert found == str(tmp_path / "старое.transcript.v2.json") and old is None
+    assert found and found.startswith(autoclip.CACHE_DIR) and old is None      # переехал в кэш-папку
+    assert not (tmp_path / "старое.transcript.v2.json").exists()
     segs, path = autoclip.transcribe(new, 10.0, str(tmp_path))
     assert path == found                                    # Whisper не запускался — взят кэш
 
