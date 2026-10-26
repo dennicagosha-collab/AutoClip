@@ -3537,6 +3537,16 @@ class WeeklyPage(QWidget):
         box.addLayout(fmt)
         row.addLayout(box)
         row.addStretch(1)
+        self.cb_used = QCheckBox("Показывать и уже использованные")
+        self.cb_used.setToolTip("Клипы, которые уже были в собранной подборке, сами в новую не попадают")
+        self.cb_used.setChecked(bool(self.s.get("weekly_show_used", False)))
+        self.cb_used.toggled.connect(lambda v: (self.s.__setitem__("weekly_show_used", bool(v)),
+                                                save_settings(self.s), self.refresh()))
+        row.addWidget(self.cb_used, 0, Qt.AlignBottom)
+        b = QPushButton("Очистить")
+        b.setToolTip("Убрать все клипы из текущей подборки (снять отметки)")
+        b.clicked.connect(self.clear_all)
+        row.addWidget(b, 0, Qt.AlignBottom)
         b = QPushButton("Обновить список")
         b.clicked.connect(self.refresh)
         row.addWidget(b, 0, Qt.AlignBottom)
@@ -3668,7 +3678,7 @@ class WeeklyPage(QWidget):
     def refresh(self):
         if self.busy:
             return
-        items = autoclip.weekly_candidates(self.days.value())
+        items = autoclip.weekly_candidates(self.days.value(), include_used=bool(self.s.get("weekly_show_used")))
         self.list.blockSignals(True)
         self.list.clear()
         for c in items:
@@ -3676,9 +3686,10 @@ class WeeklyPage(QWidget):
             it = QListWidgetItem(
                 f"★ {c['score']:.1f}   {c['title']}\n"
                 f"{c['dur']:.0f} с  ·  {autoclip.STATUSES.get(c['status'], c['status'])}"
-                f"  ·  {date}  ·  {c['source']}")
+                f"  ·  {date}  ·  {c['source']}" + ("  ·  уже был в подборке" if c.get("used") else ""))
             it.setData(Qt.UserRole, c["path"])
             it.setData(Qt.UserRole + 1, c["dur"])
+            it.setData(Qt.UserRole + 2, (c["project"], c["id"]))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
             it.setCheckState(Qt.Checked)
             self.list.addItem(it)
@@ -3693,6 +3704,18 @@ class WeeklyPage(QWidget):
         if has:
             self.list.setCurrentRow(0)
         self._summary()
+
+    def clear_all(self):
+        """«Очистить»: убрать все клипы из текущей подборки (5.16)."""
+        self.list.blockSignals(True)
+        for i in range(self.list.count()):
+            self.list.item(i).setCheckState(Qt.Unchecked)
+        self.list.blockSignals(False)
+        self._summary()
+
+    def chosen_ids(self):
+        return [self.list.item(i).data(Qt.UserRole + 2) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.Checked]
 
     def chosen(self):
         """Отмеченные клипы в нынешнем порядке: [(путь, длина)]."""
@@ -3740,6 +3763,7 @@ class WeeklyPage(QWidget):
         if not paths or self.busy:
             return
         self.busy = True
+        self._building = self.chosen_ids()
         self.btn.setEnabled(False)
         self.btn_open.setEnabled(False)
         self.btn_show.setEnabled(False)
@@ -3779,6 +3803,10 @@ class WeeklyPage(QWidget):
             self.state.setText(err)
             return
         self.last = out
+        try:                                       # эти клипы в следующую подборку сами не попадут
+            autoclip.mark_compiled([x for x in getattr(self, "_building", []) if x], out)
+        except Exception:
+            pass
         self.bar.setValue(1000)
         self.state.setText(f"Готово: {os.path.basename(out)}")
         self.btn_open.setEnabled(True)

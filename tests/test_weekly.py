@@ -159,4 +159,24 @@ def test_weekly_page(tmp_path, monkeypatch):
     v = next(s for s in info["streams"] if s["codec_type"] == "video")
     assert v["width"] == 1920
     assert [_closest(_rgb(page.last, t)) for t in (1.0, 3.0)] == ["red", "green"]
+    # 5.16: собранные клипы в следующую подборку сами не попадают; «Очистить»
+    page.refresh()
+    assert page.list.count() == 1                                    # остался только синий
+    page.cb_used.setChecked(True)
+    assert page.list.count() == 3 and "уже был в подборке" in page.list.item(0).text() + page.list.item(1).text()
+    page.clear_all()
+    assert page.chosen() == [] and not page.btn.isEnabled()
+    page.cb_used.setChecked(False)
     win.close()
+
+
+def test_used_clips_skipped_and_clear(tmp_path, monkeypatch):
+    """5.16: клипы из собранной подборки в следующую сами не попадают; «Очистить»."""
+    make_project(tmp_path, [("good", 2.0, 1, True, "red"), ("good", 3.0, 1, True, "green")])
+    items = autoclip.weekly_candidates(7)
+    assert len(items) == 2
+    autoclip.mark_compiled([(items[0]["project"], items[0]["id"])], str(tmp_path / "подборка.mp4"))
+    left = autoclip.weekly_candidates(7)
+    assert len(left) == 1 and left[0]["id"] != items[0]["id"]
+    both = autoclip.weekly_candidates(7, include_used=True)
+    assert len(both) == 2 and sum(x["used"] for x in both) == 1

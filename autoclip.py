@@ -4843,9 +4843,10 @@ def _clip_date(c):
     return max((d for d in dates if d), default="")
 
 
-def weekly_candidates(days=7, now=None):
-    """Клипы «хороший» и «выложен» за последние days дней из всех нарезок,
-    по убыванию оценки: [{"project", "id", "path", "title", "score", "dur", "date", "status"}]."""
+def weekly_candidates(days=7, now=None, include_used=False):
+    """Клипы «Выложу» и «выложен» за последние days дней из всех нарезок, по убыванию оценки:
+    [{"project", "id", "path", "title", "score", "dur", "date", "status", "used"}]. Клипы, которые уже
+    были в собранной подборке, — только с include_used (5.16)."""
     now = now or datetime.datetime.now()
     since = (now - datetime.timedelta(days=days)).isoformat(timespec="seconds")
     out = []
@@ -4858,12 +4859,15 @@ def weekly_candidates(days=7, now=None):
         for c in proj["clips"]:
             path = os.path.join(folder, c["file"])
             date = _clip_date(c)
+            if c.get("compiled") and not include_used:
+                continue
             if c["status"] in ("post", "published") and date >= since and os.path.isfile(path):
                 h = c.get("hook") or {}
                 hook = (h["end"] - h["start"]) if h.get("on") and h.get("start") is not None else 0
                 out.append({"project": proj["_path"], "id": c["id"], "path": path,
                             "title": c["title"], "score": c["score"], "status": c["status"],
                             "dur": round(c["end"] - c["start"] + hook, 2), "date": date,
+                            "used": bool(c.get("compiled")),
                             "source": os.path.basename(proj.get("source", ""))})
     return sorted(out, key=lambda x: -x["score"])
 
@@ -4896,6 +4900,23 @@ def _probe_dur(path):
         return float(p.stdout.strip())
     except ValueError:
         raise AutoClipError(f"❌ Не читается клип: {os.path.basename(path)}")
+
+
+def mark_compiled(items, out_path):
+    """Клипы попали в собранную подборку — пометка у клипа, в следующую сами не попадут (5.16).
+    items — [(project.json, id клипа)]."""
+    by_proj = {}
+    for pp, cid in items:
+        by_proj.setdefault(pp, []).append(cid)
+    for pp, ids in by_proj.items():
+        try:
+            proj = load_project(pp)
+        except (AutoClipError, OSError, ValueError):
+            continue
+        for c in proj["clips"]:
+            if c["id"] in ids:
+                c.setdefault("compiled", []).append({"date": now_iso(), "file": os.path.basename(out_path)})
+        save_project(proj)
 
 
 def build_compilation(paths, fmt="vertical", out_path=None, progress=None, cancel=None,
