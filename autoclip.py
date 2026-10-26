@@ -740,6 +740,40 @@ def _voiced_share(words, regions):
     return voiced / total
 
 
+# известные реплики героев игры (Deadlock): Whisper с language="ru" их переводит — это не речь
+# человека. Только целые фразы, чтобы не задеть свои словечки внутри русской речи.
+_GAME_LINES = re.compile(r"(?:fear is on cooldown|белый волкер в атаке|демолэшн тайм|"
+                         r"я сжимаю их борьбу|недельки почти готовы)")
+FOREIGN_P = 0.6        # язык куска не русский с такой уверенностью…
+FOREIGN_RU = 0.06      # …и русский — не больше этого: реплика игры, не Гоша
+
+
+def mark_foreign(model, audio, segments, cancel=None):
+    """Одна дорожка (голос + игра): у каждого куска речи — язык. Не русский уверенно — пометка
+    lang (в субтитры и название не идёт). Свои английские словечки внутри русской фразы не
+    трогаются: решение по всему куску. → сколько кусков помечено."""
+    n = 0
+    for seg in segments:
+        check_cancel(cancel)
+        if not seg.get("words") or seg["e"] - seg["s"] < 0.4:
+            continue
+        a, b = max(0.0, seg["s"] - 0.2), seg["e"] + 0.2
+        part = audio[int(a * 16000):int(b * 16000)]
+        if len(part) < 3200:
+            continue
+        try:
+            lang, p, allp = model.detect_language(part)
+        except Exception:
+            return n
+        ru = dict(allp).get(CONFIG["language"], 0.0)
+        if lang == "en" and p >= FOREIGN_P and ru <= FOREIGN_RU:          # герои игры — по-английски
+            seg["lang"] = lang
+            n += 1
+        else:
+            seg.pop("lang", None)
+    return n
+
+
 def drop_hallucinations(segments, regions=None):
     """Убирает то, что Whisper выдумал, а не услышал: известные фразы-«титры», слова
     неестественной длины и (если известно, где голос) куски, где голоса нет вовсе.
@@ -748,8 +782,10 @@ def drop_hallucinations(segments, regions=None):
     starts = [a for a, _ in regions or []]
     out = []
     for seg in segments:
+        if seg.get("lang") and seg["lang"] != CONFIG["language"]:
+            continue                                      # не русская речь — реплика игры (5.7)
         text = re.sub(r"[^\w\s]", "", seg["text"].lower().replace("ё", "е")).strip()
-        if text and _HALLUCINATIONS.fullmatch(text):
+        if text and (_HALLUCINATIONS.fullmatch(text) or _GAME_LINES.fullmatch(text)):
             continue
         words = seg.get("words", [])
         if regions and words:                             # голос не нашёлся вовсе — не судим
@@ -961,10 +997,11 @@ def fill_holes(model, audio, segments, spk="me", regions=None, cancel=None):
 
 
 def _cache_filled(path):
+    """Кэш готов: пропуски дослушаны (4.4) и язык кусков проверен (5.7)."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return isinstance(data, dict) and bool(data.get("filled"))
+        return isinstance(data, dict) and bool(data.get("filled")) and bool(data.get("lang_checked"))
     except (OSError, ValueError):
         return False
 
@@ -1062,8 +1099,8 @@ def read_transcript(path):
 
 def _save_transcript(path, segments, how, filled=False, fp=None):
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled, "fp": fp},
-                  f, ensure_ascii=False)
+        json.dump({"version": ASR_VERSION, "how": how, "segments": segments, "filled": filled,
+                   "lang_checked": filled, "fp": fp}, f, ensure_ascii=False)
 
 
 def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
@@ -1118,8 +1155,15 @@ def transcribe(video, dur, tmp, progress=None, cancel=None, fresh=False):
 
 
 def _fill_all(segments, plan, audios, cancel=None, model=None):
-    """Дослушать места, где голос есть, а слов нет, — по каждой дорожке."""
+    """Дослушать места, где голос есть, а слов нет, — по каждой дорожке; на одной общей дорожке
+    ещё и пометить реплики игры (5.7). На записях с дорожками микрофона и Discord общая не
+    слушается вовсе — там только люди."""
     total = 0
+    if len(plan) == 1 and plan[0][0] == 0:
+        model = model or _load_whisper()
+        n = mark_foreign(model, audios[plan[0][1]], segments, cancel)
+        if n:
+            log(f"   реплики игры (не русская речь) — не в субтитры: {n}")
     for _, spk, _ in plan:
         regions = speech_regions(audios[spk])
         if not voice_holes(segments, regions, spk):
