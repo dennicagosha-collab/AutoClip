@@ -1495,6 +1495,7 @@ COVER_W, COVER_H = 34, 60   # обложка в списке клипов
 
 class ClipsPage(QWidget):
     """Список клипов нарезки и редактор выбранного клипа."""
+    wave_ready = Signal(str, object)          # волна звука для таймлайна (id клипа, точки)
 
     def __init__(self, win):
         super().__init__()
@@ -1620,6 +1621,13 @@ class ClipsPage(QWidget):
         self.player_slot.addWidget(self.detached_note)
         rl.addLayout(self.player_slot, 1)
 
+        from PySide6.QtWidgets import QToolButton
+        self.info_line = QToolButton()                  # «Прогноз 7.5 ▾» — разбор по клику (5.18)
+        self.info_line.setObjectName("more")
+        self.info_line.setCheckable(True)
+        self.info_line.toggled.connect(self._toggle_info)
+        self.info_line.hide()
+        rl.addWidget(self.info_line)
         self.info = QLabel("")
         self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1664,32 +1672,124 @@ class ClipsPage(QWidget):
         outer.addWidget(self.ed_stack)
         page = QWidget()
         ed = QVBoxLayout(page)
-        ed.setContentsMargins(0, 0, 0, 0)
+        ed.setContentsMargins(0, 0, 6, 0)
         ed.setSpacing(10)
-        self.ed_stack.addWidget(page)
+        clip_scroll = QScrollArea()
+        clip_scroll.setWidgetResizable(True)
+        clip_scroll.setFrameShape(QFrame.NoFrame)
+        clip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        clip_scroll.setWidget(page)
+        self.ed_stack.addWidget(clip_scroll)
+        # ---- на виду (5.18): таймлайн, название, Субтитры / Мат / Хук, оценка, «Пересобрать» ----
+        from timeline import Timeline
+        self.tl = Timeline()
+        self.tl.setToolTip("Тяни красные ручки — начало и конец. Жёлтый отрезок — хук, его можно двигать. "
+                           "Клик — перемотка, потянуть по пустому месту — выделить кусок (X — вырезать). "
+                           "Метки внизу — писки (клик — убрать/вернуть). Колесо — масштаб")
+        self.tl.bounds_changed.connect(self._tl_bounds)
+        self.tl.hook_changed.connect(self._tl_hook)
+        self.tl.seek.connect(self._tl_seek)
+        self.tl.selection_changed.connect(self._tl_selection)
+        self.tl.bleep_clicked.connect(self._tl_bleep)
+        ed.addWidget(self.tl)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.e_title = QLineEdit()
+        self.e_title.setPlaceholderText("Название клипа")
+        self.e_title.textEdited.connect(self._title_edited)
+        row.addWidget(self.e_title, 1)
+        self.btn_rebuild = QPushButton("Пересобрать")
+        self.btn_rebuild.setObjectName("primary")
+        self.btn_rebuild.clicked.connect(self.rebuild)
+        row.addWidget(self.btn_rebuild)
+        ed.addLayout(row)
+
         row = QHBoxLayout()
         row.setSpacing(18)
-        self.e_hook = tri_combo("auto", "1–2 с яркой реакции из этого клипа в начале. "
-                                        "Авто — когда есть яркий момент")
-        self.e_zoom = tri_combo("auto", "Авто — только на смехе и крике, не больше 3. Вкл — на всех громких местах")
-        self.e_hook.currentIndexChanged.connect(self._changed)
-        self.e_zoom.currentIndexChanged.connect(self._changed)
-        for text, w in (("Хук", self.e_hook), ("Зум", self.e_zoom)):
-            pair = QHBoxLayout()
-            pair.setSpacing(6)
-            pair.addWidget(QLabel(text))
-            pair.addWidget(w)
-            row.addLayout(pair)
         self.e_subs = Toggle()
-        self.e_safe = Toggle(tip="Не заходить субтитрами под кнопки соцсетей")
-        self.e_nick = Toggle(tip="Ник в углу — текст и угол в «Настройках»")
-        for text, w in (("Субтитры", self.e_subs), ("Сейф-зона", self.e_safe), ("Ник", self.e_nick)):
+        self.e_bleep = Toggle(tip="Закрыть мат звуком")
+        for text, w in (("Субтитры", self.e_subs), ("Мат", self.e_bleep)):
             pair = QHBoxLayout()
             pair.setSpacing(8)
             pair.addWidget(w)
             pair.addWidget(QLabel(text))
             row.addLayout(pair)
             w.toggled.connect(self._changed)
+        self.e_hook = tri_combo("auto", "Кульминация 1,5–3 с из этого клипа в самом начале. "
+                                        "Авто — когда кульминация найдена")
+        self.e_hook.currentIndexChanged.connect(self._changed)
+        pair = QHBoxLayout()
+        pair.setSpacing(6)
+        pair.addWidget(QLabel("Хук"))
+        pair.addWidget(self.e_hook)
+        row.addLayout(pair)
+        row.addStretch(1)
+        ed.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_good = QPushButton("👍  Выложу")
+        self.btn_good.setToolTip("Момент хороший — буду выкладывать  (G)")
+        self.btn_good.setCheckable(True)
+        self.btn_good.clicked.connect(lambda: self.rate("post"))
+        self.btn_ok = QPushButton("Норм")
+        self.btn_ok.setToolTip("Момент найден правильно, но выкладывать не буду  (N)")
+        self.btn_ok.setCheckable(True)
+        self.btn_ok.clicked.connect(lambda: self.rate("ok"))
+        self.btn_trash = QPushButton("Не то")
+        self.btn_trash.setToolTip("Так больше не надо — клип в корзину Windows  (D)")
+        self.btn_trash.setObjectName("danger")
+        self.btn_trash.clicked.connect(self.to_trash)
+        for w in (self.btn_good, self.btn_ok, self.btn_trash):
+            row.addWidget(w)
+        self.state = hint("")
+        row.addWidget(self.state, 1)
+        ed.addLayout(row)
+
+        from PySide6.QtWidgets import QToolButton
+        self.btn_more = QToolButton()
+        self.btn_more.setText("Ещё настройки  ▸")
+        self.btn_more.setCheckable(True)
+        self.btn_more.setObjectName("more")
+        self.btn_more.toggled.connect(self._toggle_more)
+        ed.addWidget(self.btn_more)
+        self.more = QWidget()
+        ml = QVBoxLayout(self.more)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(10)
+        ed.addWidget(self.more)
+        self.more.hide()
+
+        def head(text):
+            lb = QLabel(text)
+            lb.setObjectName("fieldLabel")
+            return lb
+
+        # вид
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        row.addWidget(head("Вид"))
+        self.e_zoom = tri_combo("auto", "Авто — только на смехе и крике, не больше 3. Вкл — на всех громких местах")
+        self.e_zoom.currentIndexChanged.connect(self._changed)
+        pair = QHBoxLayout()
+        pair.setSpacing(6)
+        pair.addWidget(QLabel("Зум"))
+        pair.addWidget(self.e_zoom)
+        row.addLayout(pair)
+        self.e_safe = Toggle(tip="Субтитры не заходят под кнопки, ник и подпись TikTok, Shorts и Reels")
+        self.e_nick = Toggle(tip="Ник в углу — текст и угол в «Настройках»")
+        for text, w in (("Не залезать под кнопки TikTok", self.e_safe), ("Ник", self.e_nick)):
+            pair = QHBoxLayout()
+            pair.setSpacing(8)
+            pair.addWidget(w)
+            pair.addWidget(QLabel(text))
+            row.addLayout(pair)
+            w.toggled.connect(self._changed)
+        row.addStretch(1)
+        ml.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Субтитры"))
         self.e_pos = QComboBox()
         self.e_pos.addItems(list(autoclip.SUB_POSITIONS))
         self.e_pos.setToolTip("Где субтитры")
@@ -1697,24 +1797,28 @@ class ClipsPage(QWidget):
         row.addWidget(self.e_pos)
         self.e_subs.toggled.connect(self.e_pos.setEnabled)
         self.e_subs.toggled.connect(self.e_safe.setEnabled)
+        row.addWidget(QLabel("Стиль"))
+        self.e_style = QComboBox()
+        self.e_style.setMinimumWidth(150)
+        self.e_style.setToolTip("Стиль субтитров этого клипа. Свои стили — в «Настройках»")
+        self.e_style.currentIndexChanged.connect(self._changed)
+        row.addWidget(self.e_style)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
 
+        # мат
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.e_bleep = Toggle()
-        self.e_bleep.toggled.connect(self._changed)
-        row.addWidget(self.e_bleep)
-        row.addWidget(QLabel("Мат звуком"))
-        row.addSpacing(6)
+        row.addWidget(head("Мат"))
         self.e_sound = QComboBox()
         self.e_sound.setMinimumWidth(180)
+        self.e_sound.setToolTip("Звук на мат")
         self.e_sound.currentTextChanged.connect(self._changed)
         self.e_bleep.toggled.connect(self.e_sound.setEnabled)
         row.addWidget(self.e_sound)
         row.addWidget(SoundButton(self.e_sound))
-        self.btn_shuffle = QPushButton("Перемешать")
-        self.btn_shuffle.setToolTip("Случайный звук: другие звуки на мат в этом клипе")
+        self.btn_shuffle = QPushButton("Другие звуки мата")
+        self.btn_shuffle.setToolTip("Звук «Случайный»: на этом клипе — другие звуки")
         self.btn_shuffle.clicked.connect(self.shuffle_sounds)
         self.e_sound.currentTextChanged.connect(
             lambda t: self.btn_shuffle.setVisible(t == autoclip.RANDOM_SOUND))
@@ -1723,108 +1827,81 @@ class ClipsPage(QWidget):
         self.e_censor.setToolTip("Частичная: «е*ать». TikTok может распознать полузапиканный мат и урезать охват")
         self.e_censor.currentIndexChanged.connect(self._changed)
         row.addWidget(self.e_censor)
-        row.addSpacing(12)
-        row.addWidget(QLabel("Стиль"))
-        self.e_style = QComboBox()
-        self.e_style.setMinimumWidth(150)
-        self.e_style.setToolTip("Стиль субтитров этого клипа. Свои стили — в «Настройках»")
-        self.e_style.currentIndexChanged.connect(self._changed)
-        row.addWidget(self.e_style)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
         row = QHBoxLayout()
         row.setSpacing(6)
-        row.addWidget(QLabel("Писк"))
+        row.addWidget(QLabel("Мат найден автоматически"))
         self.e_bleeps = QComboBox()
-        self.e_bleeps.setMinimumWidth(260)
+        self.e_bleeps.setMinimumWidth(160)
         self.e_bleeps.setToolTip("Где в клипе закрыт мат. «Убрать писк» — если запикано зря")
         row.addWidget(self.e_bleeps, 1)
         b = QPushButton("Запикать здесь")
-        b.setToolTip("Закрыть звуком полсекунды на месте просмотра — для слова, которого нет в субтитрах")
+        b.setToolTip("Закрыть звуком полсекунды на месте просмотра — для слова, которого нет в субтитрах  (B)")
         b.clicked.connect(self.bleep_here)
         row.addWidget(b)
         b = QPushButton("Убрать писк")
         b.setObjectName("ghost")
         b.clicked.connect(self.bleep_toggle)
         row.addWidget(b)
-        ed.addLayout(row)
+        ml.addLayout(row)
         self.b_add, self.b_rem = [], []
+
+        # хук
         row = QHBoxLayout()
         row.setSpacing(6)
-        row.addWidget(QLabel("Хук"))
+        row.addWidget(head("Хук"))
         self.h_label = hint("")
         self.h_label.setMinimumWidth(150)
-        self.hook_btns = []
-        for text, side, d in (("−0,25", 0, -0.25), ("+0,25", 0, 0.25)):
-            b = QPushButton(f"начало {text}")
-            b.clicked.connect(lambda _, side=side, d=d: self.hook_shift(side, d))
-            row.addWidget(b)
-            self.hook_btns.append(b)
         row.addWidget(self.h_label)
-        for text, side, d in (("−0,25", 1, -0.25), ("+0,25", 1, 0.25)):
-            b = QPushButton(f"конец {text}")
-            b.clicked.connect(lambda _, side=side, d=d: self.hook_shift(side, d))
-            row.addWidget(b)
-            self.hook_btns.append(b)
-        b = QPushButton("Другой момент")
-        b.setToolTip("Хук — с того места, где сейчас просмотр (кликни по шкале клипа)")
+        b = QPushButton("Хук отсюда")
+        b.setToolTip("Хук — целая фраза у места просмотра  (H). Жёлтый отрезок на таймлайне можно двигать")
         b.clicked.connect(self.hook_here)
         row.addWidget(b)
         b = QPushButton("Просмотр хука")
         b.clicked.connect(self.hook_preview)
         row.addWidget(b)
-        self.hook_btns += [b]
+        self.hook_btns = [b]
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
         self.hook_at = None
-        ed.addWidget(separator())
 
+        # точное время
         row = QHBoxLayout()
         row.setSpacing(6)
+        row.addWidget(head("Время"))
         self.e_start = QLineEdit()
         self.e_end = QLineEdit()
         for label, edit in (("Начало", self.e_start), ("Конец", self.e_end)):
-            lbl = QLabel(label)
-            lbl.setObjectName("fieldLabel")
-            row.addWidget(lbl)
-            minus = QPushButton(f"−{SHIFT:g} с")
-            plus = QPushButton(f"+{SHIFT:g} с")
-            minus.clicked.connect(lambda _, e=edit: self.shift(e, -SHIFT))
-            plus.clicked.connect(lambda _, e=edit: self.shift(e, SHIFT))
+            row.addWidget(QLabel(label))
             edit.setFixedWidth(96)
             edit.setAlignment(Qt.AlignCenter)
-            edit.setToolTip("Время в записи: 1:18 или 0:01:18.5")
+            edit.setToolTip("Время в записи: 1:18 или 0:01:18.5 (или тяни ручки на таймлайне, I / O)")
             edit.textChanged.connect(self._changed)
-            row.addWidget(minus)
             row.addWidget(edit)
-            row.addWidget(plus)
-            row.addSpacing(14)
+            row.addSpacing(10)
         self.e_len = hint("")
         row.addWidget(self.e_len)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
 
-        # --- вырезки: кусок, паузы, разбить ---
+        # вырезки
         row = QHBoxLayout()
         row.setSpacing(6)
-        lbl = QLabel("Вырезать")
-        lbl.setObjectName("fieldLabel")
-        row.addWidget(lbl)
-        self.btn_cut_from = QPushButton("Отсюда")
-        self.btn_cut_from.setToolTip("Начало куска — место просмотра (кликни по шкале клипа)")
-        self.btn_cut_from.clicked.connect(lambda: self.cut_mark(0))
-        self.btn_cut_to = QPushButton("Досюда")
-        self.btn_cut_to.setToolTip("Конец куска — место просмотра")
-        self.btn_cut_to.clicked.connect(lambda: self.cut_mark(1))
-        self.btn_cut = QPushButton("Вырезать")
-        self.btn_cut.setToolTip("Убрать кусок из клипа — склейка без щелчка")
+        row.addWidget(head("Вырезки"))
+        self.btn_cut = QPushButton("Вырезать выделенное")
+        self.btn_cut.setToolTip("Выдели кусок на таймлайне (потяни мышкой) и вырежи  (X)")
         self.btn_cut.clicked.connect(self.cut_piece)
+        row.addWidget(self.btn_cut)
         self.cut_info = hint("")
         self.cut_info.setMinimumWidth(170)
-        for w in (self.btn_cut_from, self.btn_cut_to, self.btn_cut, self.cut_info):
-            row.addWidget(w)
+        row.addWidget(self.cut_info)
+        self.btn_cuts_reset = QPushButton("Сбросить вырезки")
+        self.btn_cuts_reset.setObjectName("ghost")
+        self.btn_cuts_reset.clicked.connect(self.cuts_reset)
+        row.addWidget(self.btn_cuts_reset)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
         row = QHBoxLayout()
         row.setSpacing(6)
         from PySide6.QtWidgets import QDoubleSpinBox
@@ -1845,50 +1922,28 @@ class ClipsPage(QWidget):
         self.pause_info = hint("")
         row.addWidget(self.pause_info)
         row.addSpacing(10)
-        self.btn_cuts_reset = QPushButton("Сбросить вырезки")
-        self.btn_cuts_reset.setObjectName("ghost")
-        self.btn_cuts_reset.clicked.connect(self.cuts_reset)
-        row.addWidget(self.btn_cuts_reset)
-        self.btn_split = QPushButton("Разбить здесь")
+        self.btn_split = QPushButton("Разделить на 2 клипа")
         self.btn_split.setToolTip("Два клипа: до места просмотра и после (граница — в паузе между словами)")
         self.btn_split.clicked.connect(self.split_here)
         row.addWidget(self.btn_split)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
         self.cuts, self.cut_ab, self._voice = [], [None, None], {}
         self.bleep_seed = None
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_rebuild = QPushButton("Пересобрать")
-        self.btn_rebuild.setObjectName("primary")
-        self.btn_rebuild.clicked.connect(self.rebuild)
-        row.addWidget(self.btn_rebuild)
-        self.state = hint("")
-        row.addWidget(self.state, 1)
-        ed.addLayout(row)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        self.btn_good = QPushButton("👍  Выложу")
-        self.btn_good.setToolTip("Момент хороший — буду выкладывать")
-        self.btn_good.setCheckable(True)
-        self.btn_good.clicked.connect(lambda: self.rate("post"))
-        self.btn_ok = QPushButton("Норм")
-        self.btn_ok.setToolTip("Момент найден правильно, но выкладывать не буду")
-        self.btn_ok.setCheckable(True)
-        self.btn_ok.clicked.connect(lambda: self.rate("ok"))
-        self.btn_trash = QPushButton("Не то")
-        self.btn_trash.setToolTip("Так больше не надо — клип в корзину Windows")
-        self.btn_trash.setObjectName("danger")
-        self.btn_trash.clicked.connect(self.to_trash)
         self.btn_save = QPushButton("Сохранить как…")
         self.btn_save.clicked.connect(self.save_as)
         self.btn_show = QPushButton("Показать в папке")
         self.btn_show.clicked.connect(self.show_file)
-        for w in (self.btn_good, self.btn_ok, self.btn_trash, self.btn_save, self.btn_show):
-            row.addWidget(w)
+        row.addWidget(self.btn_save)
+        row.addWidget(self.btn_show)
         row.addStretch(1)
-        ed.addLayout(row)
+        ml.addLayout(row)
+        ed.addStretch(1)
+        self._undo = []
+        self._shortcuts()
         # --- описание для площадок ---
         page = QWidget()
         dl = QVBoxLayout(page)
@@ -2312,6 +2367,8 @@ class ClipsPage(QWidget):
             self.btn_build.setVisible(not k.get("deleted"))
             self.btn_cand_play.setEnabled(os.path.isfile(src))
             self.btn_cand_del.setText("Вернуть" if k.get("deleted") else "Удалить кандидата")
+            self.info_line.hide()
+            self.info.show()
             self.info.setText(
                 f"<b>{escape(k['title'])}</b> <span style='color:{MUTED}'>· кандидат, без видео</span><br>"
                 f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}, оценка {k['score']:.1f}"
@@ -2321,6 +2378,7 @@ class ClipsPage(QWidget):
         if not c:
             self.player.clear()
             self.info.setText("")
+            self.info_line.hide()
             self.base = {}
             return
         path = self.clip_path(c)
@@ -2330,8 +2388,9 @@ class ClipsPage(QWidget):
             self.player.clear()
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c.get("score_parts", {}).items()
                           if abs(v) >= 0.05)
-        lines = [f"<b>{c['title']}</b>"]
+        lines = []
         feats = c.get("features") or self.features(c)
+        fc = None
         if feats:
             fc = c.get("forecast") or forecast.predict(feats, c.get("score", 0),
                                                        forecast.load_model())
@@ -2354,6 +2413,10 @@ class ClipsPage(QWidget):
         if c.get("reason"):
             lines.append(f"Почему: {c['reason']}")
         self.info.setText("<br>".join(lines))
+        self.info_line.setText((f"Прогноз {fc['value']:.1f}" if fc else "Подробнее") +
+                               ("  ▴" if self.info_line.isChecked() else "  ▾"))
+        self.info_line.show()
+        self.info.setVisible(self.info_line.isChecked())
         self.fill_editor(c)
 
     def segments(self):
@@ -2727,9 +2790,10 @@ class ClipsPage(QWidget):
             n = len(self.cuts)
             self.cut_info.setText(f"вырезано кусков: {n}")
         else:
-            self.cut_info.setText("отметь начало и конец куска")
+            self.cut_info.setText("выдели кусок на таймлайне")
         self.btn_cut.setEnabled(a is not None and b is not None and b - a >= 0.1)
         self.btn_cuts_reset.setEnabled(bool(self.cuts))
+        self.tl_refresh()
 
     def cut_mark(self, side):
         c = self.current_clip()
@@ -3176,6 +3240,10 @@ class ClipsPage(QWidget):
         self.w_add = [list(x) for x in self.base["words_add"]]
         self.m_words = list(self.base["mat_words"])
         self.t_title.setText(self.base["title"])
+        self.e_title.setText(self.base["title"])
+        self._undo = []
+        self.tl.set_clip(c["start"], c["end"], (self.proj.get("source_info") or {}).get("dur", c["end"] + 30))
+        self.load_wave(c)
         self.fill_words(c)
         self.refresh_bleeps()
         self.fill_tracks()
@@ -3220,6 +3288,182 @@ class ClipsPage(QWidget):
         now = self.edited()
         return {k: v for k, v in now.items() if v != self.base.get(k)}
 
+    # ---------- таймлайн (5.17) ----------
+    def tl_refresh(self):
+        """Слои таймлайна по нынешнему (ещё не пересобранному) состоянию редактора."""
+        c = self.current_clip()
+        if not c or not hasattr(self, "tl"):
+            return
+        now = self.edited()
+        if now["start"] is not None and now["end"] is not None:
+            self.tl.set_bounds(now["start"], now["end"])
+        segs = self.segments() or []
+        words = [w for seg in segs for w in seg.get("words", [])
+                 if self.tl.view[0] <= w["s"] <= self.tl.view[1]]
+        bleeps = []
+        for w in words:
+            if autoclip.is_profane(w["w"]):
+                off = any(abs(w["s"] - t) < 0.06 for t in self.b_rem)
+                bleeps.append((w["s"], w["e"], off))
+        bleeps += [(a, b, False) for a, b in self.b_add]
+        bleeps += [(a, b, False) for a, b, t in self.w_add if autoclip.is_profane(t)]
+        try:
+            zooms = autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[0]
+        except Exception:
+            zooms = []
+        self.tl.set_layers(hook=self.hook_at, bleeps=bleeps, cuts=self.cuts, marks=c.get("marks") or [],
+                           zooms=zooms, words=[(w["s"], w["e"], w["w"]) for w in words])
+
+    def load_wave(self, c):
+        """Волна звука записи вокруг клипа — в фоне (ffmpeg), чтобы окно не подвисало."""
+        src = self.proj.get("source", "")
+        if not os.path.isfile(src):
+            self.tl.set_wave([])
+            return
+        a = max(0.0, c["start"] - 30.0)
+        b = c["end"] + 30.0
+        cid = c["id"]
+
+        def work():
+            try:
+                import numpy as np
+                p = autoclip.run(["ffmpeg", "-v", "error", "-ss", f"{a:.2f}", "-t", f"{b - a:.2f}", "-i", src,
+                                  "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"], binary=True)
+                x = np.frombuffer(p.stdout, dtype=np.int16).astype(np.float32) / 32768
+                from timeline import wave_of
+                self.wave_ready.emit(cid, wave_of(x, a))
+            except Exception:
+                self.wave_ready.emit(cid, [])
+        threading.Thread(target=work, daemon=True).start()
+
+    def _wave_ready(self, cid, wave):
+        c = self.current_clip()
+        if c and c["id"] == cid:
+            self.tl.set_wave(wave)
+
+    def _snapshot(self):
+        return {"start": self.e_start.text(), "end": self.e_end.text(),
+                "hook_at": list(self.hook_at) if self.hook_at else None,
+                "cuts": [list(x) for x in self.cuts], "b_add": [list(x) for x in self.b_add],
+                "b_rem": list(self.b_rem), "w_add": [list(x) for x in self.w_add]}
+
+    def push_undo(self):
+        self._undo.append(self._snapshot())
+        del self._undo[:-50]
+
+    def undo(self):
+        """Ctrl+Z — отменить последнюю правку на таймлайне (до «Пересобрать»)."""
+        if not self._undo:
+            return
+        st = self._undo.pop()
+        self.e_start.setText(st["start"])
+        self.e_end.setText(st["end"])
+        self.hook_at = st["hook_at"]
+        self.cuts, self.b_add, self.b_rem, self.w_add = st["cuts"], st["b_add"], st["b_rem"], st["w_add"]
+        self.show_hook()
+        self.show_cuts()
+        self.refresh_bleeps()
+        self._changed()
+
+    def _tl_bounds(self, s, e):
+        self.push_undo()
+        self.e_start.setText(autoclip.fmt_time_exact(s))
+        self.e_end.setText(autoclip.fmt_time_exact(e))
+
+    def _tl_hook(self, hs, he):
+        self.push_undo()
+        self._set_hook(hs, he)
+        self.tl_refresh()
+
+    def _tl_seek(self, t):
+        """Клик по таймлайну — перемотка просмотра на это место записи."""
+        c = self.current_clip()
+        if not c:
+            return
+        tl = autoclip.rendered_timeline(c)
+        out = autoclip.rec_to_out(t, tl)
+        if out is None:                                    # вырезано или вне клипа — ближайший край
+            out = 0.0 if t < c["start"] else autoclip.timeline_len(tl)
+            for a, b, o, part in tl:
+                if part and t < a:
+                    out = o
+                    break
+        self.player.player.setPosition(int(out * 1000))
+        self.tl.set_playhead(t)
+
+    def _tl_playhead(self, ms):
+        c = self.current_clip()
+        if c and hasattr(self, "tl"):
+            try:
+                self.tl.set_playhead(autoclip.out_to_rec(ms / 1000, autoclip.rendered_timeline(c)))
+            except Exception:
+                pass
+
+    def _tl_selection(self, a, b):
+        self.cut_ab = [None, None] if a < 0 else [a, b]
+        self.show_cuts()
+
+    def _tl_bleep(self, t):
+        """Клик по писку на таймлайне: автоматический — убрать/вернуть, ручной — убрать."""
+        self.push_undo()
+        for i, (a, b) in enumerate(self.b_add):
+            if a - 0.05 <= t <= b + 0.05:
+                self.b_add.pop(i)
+                break
+        else:
+            if any(abs(x - t) < 0.06 for x in self.b_rem):
+                self.b_rem = [x for x in self.b_rem if abs(x - t) >= 0.06]
+            else:
+                self.b_rem.append(round(t, 2))
+        self.refresh_bleeps()
+        self._changed()
+        self.tl_refresh()
+
+    def _title_edited(self, text):
+        self.t_title.setText(text)
+        self._changed()
+
+    def _toggle_info(self, on):
+        self.info.setVisible(on)
+        t = self.info_line.text().rstrip(" ▾▴")
+        self.info_line.setText(t + ("  ▴" if on else "  ▾"))
+
+    def _toggle_more(self, on):
+        self.more.setVisible(on)
+        self.btn_more.setText("Ещё настройки  ▾" if on else "Ещё настройки  ▸")
+
+    def _shortcuts(self):
+        """Горячие клавиши редактора (5.17)."""
+        keys = (("I", lambda: self._key_bound(0)), ("O", lambda: self._key_bound(1)),
+                ("X", self._key_cut), ("H", self.hook_here), ("B", self.bleep_here),
+                ("W", self.add_word_here), ("G", lambda: self.rate("post")), ("N", lambda: self.rate("ok")),
+                ("D", self.to_trash), ("Ctrl+Z", self.undo))
+        for key, fn in keys:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda fn=fn: None if self._typing() else fn())
+        self.player.player.positionChanged.connect(self._tl_playhead)
+        self.wave_ready.connect(self._wave_ready)
+
+    def _typing(self):
+        """В поле ввода буквы — это текст, а не команды."""
+        w = QApplication.focusWidget()
+        return isinstance(w, (QLineEdit, QPlainTextEdit)) or type(w).__name__ in ("QTableWidget",)
+
+    def _key_bound(self, side):
+        c = self.current_clip()
+        if not c:
+            return
+        self.push_undo()
+        t = self.rec_at_player(c) if self.tl.playhead is None else self.tl.playhead
+        (self.e_start if side == 0 else self.e_end).setText(autoclip.fmt_time_exact(t))
+
+    def _key_cut(self):
+        if self.cut_ab[0] is not None and self.cut_ab[1] is not None:
+            self.push_undo()
+            self.cut_piece()
+            self.tl.clear_selection()
+
     def _changed(self, *_):
         now = self.edited()
         bad = now["start"] is None or now["end"] is None
@@ -3233,6 +3477,7 @@ class ClipsPage(QWidget):
         if self.busy:
             return
         p = self.pending()
+        self.tl_refresh()
         if bad:
             self.state.setText("Время не понял — пиши как 1:18 или 0:01:18.5")
         elif p:
