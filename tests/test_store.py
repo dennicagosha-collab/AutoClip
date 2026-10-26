@@ -63,3 +63,17 @@ def test_removed_without_rating_forgotten(tmp_path, fake_trash):
     assert len(store.load()["items"]) == 1
     autoclip.remove_clip(proj["_path"], "c01")
     assert store.load()["items"] == {}
+
+
+def test_broken_store_is_not_overwritten(tmp_path):
+    import pytest
+    with open(store.PATH, "w", encoding="utf-8") as f:
+        f.write('{"items": {"a": 1')                      # испорченный файл
+    with pytest.raises(store.StoreError):
+        store.load()
+    proj = {"_path": str(tmp_path / "p" / "project.json"), "source": "", "clips": [
+        {"id": "c01", "start": 1, "end": 2, "peak": 1.5, "status": "post", "rating": "post", "features": {}}]}
+    with pytest.raises(store.StoreError):
+        store.sync_project(proj)
+    with open(store.PATH, encoding="utf-8") as f:
+        assert f.read() == '{"items": {"a": 1'           # не перезаписали

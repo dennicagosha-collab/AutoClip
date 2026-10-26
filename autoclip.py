@@ -3652,6 +3652,107 @@ def place_clip(proj, clip):
     return True
 
 
+SERVICE_FILES = (PROJECT_FILE, "отчёт.txt", "clips.json")
+
+
+def plan_old_cuts(roots, base):
+    """Что куда переносить (5.12): старые нарезки (без .autoclip) → «Клипы ДД.ММ.ГГГГ[ N]» в base
+    по дате нарезки. [(старая папка, новая папка, дата)] по порядку."""
+    import datetime
+    olds = []
+    for pp in find_cuts(roots):
+        if os.path.basename(os.path.dirname(pp)) == SERVICE_DIR:
+            continue
+        try:
+            with open(pp, encoding="utf-8") as f:
+                created = json.load(f).get("created") or ""
+            when = datetime.datetime.fromisoformat(created)
+        except (OSError, ValueError, TypeError):
+            when = datetime.datetime.fromtimestamp(os.path.getmtime(pp))
+        olds.append((when, os.path.dirname(pp)))
+    plan, taken = [], set()
+    for when, d in sorted(olds):
+        name = f"Клипы {when:%d.%m.%Y}"
+        target, k = os.path.join(base, name), 2
+        while os.path.exists(target) or target in taken:
+            target, k = os.path.join(base, f"{name} {k}"), k + 1
+        taken.add(target)
+        plan.append((d, target, when))
+    return plan
+
+
+def move_old_cut(old, new):
+    """Перенести старую нарезку в новый вид: папка → new (тот же диск — перенос, не копия), служебное —
+    в скрытую .autoclip, клипы — в подпапки статусов. Ничего не удаляется. → путь к project.json."""
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    os.rename(old, new)                              # занята — PermissionError, пусть решает вызывающий
+    pp_old = os.path.join(new, PROJECT_FILE)
+    with open(pp_old, encoding="utf-8") as f:
+        proj = json.load(f)
+    import uuid
+    proj.setdefault("cut_id", uuid.uuid4().hex)
+    sdir = make_service_dir(new, proj["cut_id"])
+    for name in SERVICE_FILES:
+        if os.path.isfile(os.path.join(new, name)):
+            os.replace(os.path.join(new, name), os.path.join(sdir, name))
+    proj["_path"] = os.path.join(sdir, PROJECT_FILE)
+    proj["layout"] = 2
+    for c in proj.get("clips", []):
+        normalize_clip(c)
+        try:
+            place_clip(proj, c)
+        except OSError:
+            pass                                       # файл занят — останется в корне, клип цел
+    save_project(proj)
+    return proj["_path"]
+
+
+def repoint_paths(mapping):
+    """Старые пути project.json → новые: в списке нарезок, хранилище оценок, правках границ."""
+    def fix(p):
+        return mapping.get(os.path.normcase(os.path.abspath(p)), p) if isinstance(p, str) else p
+    items = known_projects()
+    if items:
+        tmp = PROJECTS_INDEX + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump([fix(p) for p in items], f, ensure_ascii=False, indent=1)
+        os.replace(tmp, PROJECTS_INDEX)
+    try:
+        import store
+        data = store.load()
+        for r in data["items"].values():
+            r["project"] = fix(r.get("project"))
+        store.save(data)
+    except Exception:
+        pass
+    try:
+        import boundaries
+        items = boundaries.load()
+        for x in items:
+            x["project"] = fix(x.get("project"))
+        boundaries._save(items)
+    except Exception:
+        pass
+
+
+def move_old_cuts(roots, base, log_fn=None):
+    """Перенос всех старых нарезок (5.12). → (перенесено [(старая, новая)], пропущено [(папка, почему)])."""
+    done, skipped, mapping = [], [], {}
+    for old, new, _ in plan_old_cuts(roots, base):
+        try:
+            pp = move_old_cut(old, new)
+        except OSError as e:
+            skipped.append((old, f"занята: {e.strerror or e}"))
+            continue
+        mapping[os.path.normcase(os.path.abspath(os.path.join(old, PROJECT_FILE)))] = pp
+        done.append((old, new))
+        if log_fn:
+            log_fn(f"   {os.path.basename(old)} → {new}")
+    if mapping:
+        repoint_paths(mapping)
+    return done, skipped
+
+
 def clip_dirs(video):
     """Папки нарезок записи по порядку: «<запись>_clips», «<запись>_clips_2», …"""
     base = os.path.splitext(os.path.abspath(video))[0] + "_clips"

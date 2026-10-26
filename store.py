@@ -23,21 +23,50 @@ RATINGS = {"post": "Выложу", "ok": "Норм", "bad": "Не то"}
 OLD_STATUS_RATING = {"good": "post", "published": "post", "rejected": "bad", "post": "post", "ok": "ok"}
 
 
+class StoreError(Exception):
+    """Хранилище не прочиталось — писать в него нельзя, иначе пропадут оценки."""
+
+
 def load():
-    try:
-        with open(PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and isinstance(data.get("items"), dict):
-            return data
-    except (OSError, ValueError):
-        pass
-    return {"version": VERSION, "items": {}, "migrated": False}
+    """Хранилище оценок. Нет файла — пустое. Файл занят другим процессом — подождать и прочитать
+    снова. Файл испорчен — ошибка (а не «пусто»: запись поверх стёрла бы все оценки)."""
+    import time
+    for attempt in range(40):
+        try:
+            with open(PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("items"), dict):
+                return data
+            raise StoreError("неверный формат")
+        except FileNotFoundError:
+            return {"version": VERSION, "items": {}, "migrated": False}
+        except PermissionError:
+            time.sleep(0.025)
+        except ValueError as e:
+            if attempt >= 4:
+                raise StoreError(f"файл испорчен: {e}")
+            time.sleep(0.05)                               # дописывается — ещё раз
+    raise StoreError("файл занят")
 
 
 def save(data):
+    """Запись через временный файл; прежняя версия — в оценки.json.bak (на всякий случай)."""
+    import shutil
+    import time
     tmp = PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
+    if os.path.isfile(PATH):
+        try:
+            shutil.copyfile(PATH, PATH + ".bak")
+        except OSError:
+            pass
+    for attempt in range(40):
+        try:
+            os.replace(tmp, PATH)
+            return
+        except PermissionError:
+            time.sleep(0.025)
     os.replace(tmp, PATH)
 
 
