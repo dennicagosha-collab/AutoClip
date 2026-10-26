@@ -105,12 +105,23 @@ def http_api(token, method, params=None, files=None, timeout=35):
 # ---------------- состояние ----------------
 
 def load_state():
-    try:
-        with open(STATE_PATH, encoding="utf-8") as f:
-            st = json.load(f)
-        return st if isinstance(st, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    """Состояние бота. Пока другой поток заменяет файл, Windows не даёт его открыть —
+    подождать и прочитать снова, а не считать «не подключён» (из-за этого терялись сообщения)."""
+    import time
+    for attempt in range(40):
+        try:
+            with open(STATE_PATH, encoding="utf-8") as f:
+                st = json.load(f)
+            return st if isinstance(st, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            time.sleep(0.025)
+        except (OSError, ValueError):
+            if attempt >= 3:
+                return {}
+            time.sleep(0.025)                          # файл дописывается — ещё раз
+    return {}
 
 
 def save_state(st):

@@ -30,7 +30,7 @@ def test_renamed_recording_finds_cache(tmp_path, monkeypatch):
     v = _file(tmp_path / "старое.mp4")
     fp = autoclip.fingerprint(v, dur=10)
     with open(tmp_path / "старое.transcript.v2.json", "w", encoding="utf-8") as f:
-        json.dump({"version": 2, "segments": [], "filled": True, "fp": fp}, f)
+        json.dump({"version": 2, "segments": [], "filled": True, "lang_checked": True, "fp": fp}, f)
     new = str(tmp_path / "новое.mp4")
     os.rename(v, new)
     monkeypatch.setattr(autoclip, "probe", lambda p: {"dur": 10, "w": 2, "h": 2, "fps": 30})
