@@ -306,3 +306,29 @@ def test_light_plan_keeps_full_hd():
     w, h, fps, k = autoclip.light_plan(100)
     assert (w, h, fps) == (1080, 1920, 30) and k < autoclip.FULL_HD_MIN_K                # сначала 30 к/с
     assert autoclip.light_plan(400)[:3] == (720, 1280, 30)                               # потом 720p
+
+
+def test_send_video_reports_progress_and_speed(tmp_path, monkeypatch):
+    """Отправка клипа: ход в процентах и скорость; в лог — сколько ушло и за сколько."""
+    clip = tmp_path / "клип.mp4"
+    clip.write_bytes(b"x" * 3_000_000)
+    seen = {}
+
+    def fake_http(token, method, params=None, files=None, timeout=35, on_progress=None):
+        body = tg._Upload(b"y" * 1_000_000, on_progress)
+        while body.read(65536):
+            pass
+        seen["method"] = method
+        return {}
+    monkeypatch.setattr(tg, "http_api", fake_http)
+    logs = []
+    monkeypatch.setattr(autoclip, "log", logs.append)
+    bot = tg.Bot(log=logs.append)
+    bot.st = {"token": TOKEN, "chat_id": ME}
+    t = [0.0]
+    bot._clock = lambda: t.__setitem__(0, t[0] + 0.5) or t[0]
+    states = []
+    assert bot.send_clip(str(clip), "подпись", on_state=states.append) is False
+    assert seen["method"] == "sendVideo"
+    assert any(s.startswith("Отправляю… ") and "Мбит/с" in s for s in states)
+    assert any("клип ушёл" in x and "МБ за" in x for x in logs)

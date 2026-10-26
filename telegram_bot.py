@@ -60,8 +60,24 @@ class TelegramError(AutoClipError):
     pass
 
 
-def http_api(token, method, params=None, files=None, timeout=35):
-    """Один запрос к Bot API. files — {поле: путь} для отправки картинки."""
+class _Upload:
+    """Тело запроса, которое сообщает, сколько уже ушло (ход отправки клипа)."""
+
+    def __init__(self, data, on_progress):
+        self.data, self.pos, self.on_progress = data, 0, on_progress
+
+    def read(self, n=-1):
+        n = len(self.data) - self.pos if n is None or n < 0 else min(n, 256 * 1024)
+        chunk = self.data[self.pos:self.pos + n]
+        self.pos += len(chunk)
+        if chunk and self.on_progress:
+            self.on_progress(self.pos, len(self.data))
+        return chunk
+
+
+def http_api(token, method, params=None, files=None, timeout=35, on_progress=None):
+    """Один запрос к Bot API. files — {поле: путь} для отправки картинки или видео;
+    on_progress(отправлено, всего) — ход отправки."""
     url = API.format(token=token, method=method)
     data, headers = None, {}
     if files:
@@ -79,6 +95,9 @@ def http_api(token, method, params=None, files=None, timeout=35):
                      ).encode("utf-8") + raw + b"\r\n"
         data = body + f"--{boundary}--\r\n".encode()
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        if on_progress:
+            headers["Content-Length"] = str(len(data))
+            data = _Upload(data, on_progress)
     elif params:
         data = urllib.parse.urlencode({k: (json.dumps(v, ensure_ascii=False)
                                           if isinstance(v, (dict, list)) else v)
@@ -171,13 +190,32 @@ class Bot:
         self._clock = time.time
 
     # --- запросы ---
-    def call(self, method, params=None, files=None, timeout=35):
+    def call(self, method, params=None, files=None, timeout=35, on_progress=None):
         token = self.st.get("token")
         if not token:
             raise TelegramError("❌ Telegram не подключён.")
         if self._api:
             return self._api(method, params or {}, files)
+        if on_progress:
+            return http_api(token, method, params, files, timeout, on_progress=on_progress)
         return http_api(token, method, params, files, timeout)
+
+    def _send_video(self, path, params, say):
+        """Видео в Telegram с ходом отправки; в лог — сколько ушло и с какой скоростью (видно, где долго)."""
+        size = os.path.getsize(path)
+        t0 = self._clock()
+        last = [0.0]
+
+        def progress(done, total):
+            now = self._clock()
+            if now - last[0] < 0.25 and done < total:
+                return
+            last[0] = now
+            dt = max(0.1, now - t0)
+            say(f"Отправляю… {done * 100 // max(1, total)}% · {done * 8 / dt / 1e6:.0f} Мбит/с")
+        self.call("sendVideo", params, files={"video": path}, timeout=600, on_progress=progress)
+        dt = max(0.1, self._clock() - t0)
+        autoclip.log(f"✅ Telegram: клип ушёл — {size / 2**20:.0f} МБ за {dt:.0f} с ({size * 8 / dt / 1e6:.0f} Мбит/с)")
 
     def save(self):
         save_state(self.st)
@@ -238,16 +276,16 @@ class Bot:
         caption = caption[:1000]                         # подпись в Telegram — до 1024 знаков
         if os.path.getsize(path) <= limit * 1024 * 1024:
             say("Отправляю…")
-            self.call("sendVideo", {"chat_id": self.st["chat_id"], "caption": caption,
-                                    "supports_streaming": "true"}, files={"video": path}, timeout=600)
+            self._send_video(path, {"chat_id": self.st["chat_id"], "caption": caption,
+                                    "supports_streaming": "true"}, say)
             return False
         with tempfile.TemporaryDirectory(prefix="autoclip_tg_") as tmp:
             small = os.path.join(tmp, "клип.mp4")
             autoclip.light_copy(path, small, limit, on_frac=lambda f: say(f"Делаю облегчённую копию… {f:.0%}"))
             say("Отправляю облегчённую копию…")
             note = "облегчённая версия, полный файл — на ПК"
-            self.call("sendVideo", {"chat_id": self.st["chat_id"], "caption": f"{caption[:950]}\n\n({note})",
-                                    "supports_streaming": "true"}, files={"video": small}, timeout=600)
+            self._send_video(small, {"chat_id": self.st["chat_id"], "caption": f"{caption[:950]}\n\n({note})",
+                                     "supports_streaming": "true"}, say)
         return True
 
     def test(self):

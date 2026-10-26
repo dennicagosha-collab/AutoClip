@@ -543,7 +543,7 @@ class TelegramLink:
                 except Exception as e:
                     self._log(f"⚠️  Telegram: {e} Работаю без него.")
             try:
-                actions = bot.poll(timeout=5)
+                actions = bot.poll(timeout=2)       # коротко: отправка клипа не ждёт долго своей очереди
             except OSError as e:                     # например, файл состояния занят — не падаем
                 self._log(f"⚠️  Telegram: {e}")
                 self.stop.wait(1)

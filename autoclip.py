@@ -4371,10 +4371,19 @@ def light_plan(dur, limit_mb=TG_LIMIT_MB):
 
 
 def light_copy(src, dst, limit_mb=TG_LIMIT_MB, on_frac=None, cancel=None):
-    """Облегчённая копия клипа для Telegram: 1080×1920, H.264 в два прохода (preset slow)
-    под ~48 МБ, звук AAC 128 кбит/с. Не влезает — 30 к/с, потом 720×1280."""
+    """Облегчённая копия клипа для Telegram под ~48 МБ: сначала на видеокарте (NVENC, пара секунд),
+    не вышло или не влезла — H.264 на процессоре в два прохода (preset slow). Звук AAC 128 кбит/с."""
     dur = _probe_dur(src)
     w, h, fps, video_k = light_plan(dur, limit_mb)
+    nv = ["-vf", f"scale={w}:{h}:flags=lanczos,fps={fps}", "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+          "-multipass", "fullres", "-rc", "vbr", "-b:v", f"{int(video_k * 0.94)}k",
+          "-maxrate", f"{int(video_k * 1.2)}k", "-bufsize", f"{video_k * 2}k", "-profile:v", "high"]
+    p = run(["ffmpeg", "-y", "-v", "error", "-i", src] + nv +
+            ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst],
+            cancel=cancel, on_time=(lambda t: on_frac(min(1.0, t / dur))) if on_frac else None)
+    if p.returncode == 0 and os.path.isfile(dst) and os.path.getsize(dst) <= limit_mb * 1024 * 1024:
+        return dst
+    check_cancel(cancel)
     work = os.path.dirname(os.path.abspath(dst))
     log_base = os.path.join(work, "x264pass")
     vf = f"scale={w}:{h}:flags=lanczos,fps={fps}"
