@@ -71,6 +71,7 @@ DEFAULTS = {
     "music_dir": "", "weekly_music": "", "bleep_rel_db": 0, "subs_team": False,
     "censor": "partial", "clip_length": "normal", "bleep_pool": [],
     "backup_remind": True, "backup_since": "", "backup_told": "",
+    "clips_dir": autoclip.CONFIG["clips_dir"],
 }
 
 TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
@@ -307,7 +308,7 @@ def latest_cover():
             continue
         for c in reversed(clips):
             cv = (c.get("cover") or {}).get("file")
-            path = os.path.join(os.path.dirname(pp), cv) if cv else ""
+            path = autoclip.cover_path_for(autoclip.cut_root({"_path": pp}), c["file"]) if cv else ""
             if cv and os.path.isfile(path):
                 return path
     return None
@@ -1377,6 +1378,7 @@ class CutPage(QWidget):
         c["bleep_pool"] = list(s.get("bleep_pool") or [])
         c["bleep_rel_db"] = float(s.get("bleep_rel_db", 0))
         c["censor"] = "full" if s.get("censor") == "full" else "partial"
+        c["clips_dir"] = s.get("clips_dir", DEFAULTS["clips_dir"]) or ""
         c["clip_length"] = s.get("clip_length") if s.get("clip_length") in autoclip.LENGTHS else "normal"
         autoclip.apply_length(c)
         c["subs_team"] = bool(s.get("subs_team", False))
@@ -2085,7 +2087,7 @@ class ClipsPage(QWidget):
         self.win.settings["recent"] = recent
         self.projects.clear()
         for p in recent:
-            label = os.path.basename(os.path.dirname(p))
+            label = os.path.basename(autoclip.cut_root({"_path": p}))
             try:
                 with open(p, encoding="utf-8") as f:
                     run = json.load(f).get("run", {}).get("date", "")
@@ -2226,7 +2228,7 @@ class ClipsPage(QWidget):
         from PySide6.QtGui import QIcon
         if not c.get("cover"):
             return None
-        path = os.path.join(os.path.dirname(self.proj["_path"]), c["cover"]["file"])
+        path = autoclip.cover_path_for(autoclip.cut_root(self.proj), c["file"])
         try:
             mtime = os.path.getmtime(path)
         except OSError:
@@ -2244,7 +2246,7 @@ class ClipsPage(QWidget):
         return icon
 
     def clip_path(self, c):
-        return os.path.join(os.path.dirname(self.proj["_path"]), c["file"])
+        return os.path.join(autoclip.cut_root(self.proj), c["file"])
 
     def _row_changed(self, row):
         if row == self._row:
@@ -4058,6 +4060,19 @@ class SettingsPage(QWidget):
                                "Окно — по значку AutoClip в трее"))
         lay.addWidget(box)
 
+        box, v = card("Папка для клипов", "Каждая нарезка — папка «Клипы ДД.ММ.ГГГГ» с подпапками Новые, "
+                                          "Выложу, Норм, Выложенные. Записи остаются в своей папке.")
+        row = QHBoxLayout()
+        self.clips_dir = QLineEdit(self.s.get("clips_dir", ""))
+        self.clips_dir.setPlaceholderText("пусто — рядом с записью")
+        self.clips_dir.textChanged.connect(lambda t: self._set("clips_dir", t.strip()))
+        row.addWidget(self.clips_dir, 1)
+        b = QPushButton("Выбрать…")
+        b.clicked.connect(self.pick_clips_dir)
+        row.addWidget(b)
+        v.addLayout(row)
+        lay.addWidget(box)
+
         box, v = card("OBS", "Новая запись в этой папке — AutoClip предложит её нарезать. "
                              "Пока слежка включена, крестик сворачивает программу в трей.")
         obs = QHBoxLayout()
@@ -4598,6 +4613,11 @@ class SettingsPage(QWidget):
             self.cb_autostart.blockSignals(True)
             self.cb_autostart.setChecked(autostart.is_enabled())
             self.cb_autostart.blockSignals(False)
+
+    def pick_clips_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Папка для клипов", self.clips_dir.text())
+        if d:
+            self.clips_dir.setText(os.path.normpath(d))
 
     def find_obs(self):
         d = autoclip.find_obs_record_dir()

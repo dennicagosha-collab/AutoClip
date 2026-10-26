@@ -254,7 +254,7 @@ class Bot:
                 + (f", ещё кандидатов: {cands}" if cands else "")
                 + f"\nЛучший: «{autoclip.clip_title(best)}», оценка {best.get('score', 0):.1f}")
         cover = (best.get("cover") or {}).get("file")
-        path = os.path.join(os.path.dirname(proj["_path"]), cover) if cover else ""
+        path = autoclip.cover_path_for(autoclip.cut_root(proj), best["file"]) if cover else ""
         if cover and os.path.isfile(path):
             return self.send_photo(path, text)
         return self.send(text)

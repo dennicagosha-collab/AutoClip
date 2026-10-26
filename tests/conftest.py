@@ -15,6 +15,7 @@ import autoclip  # noqa: E402
 def clean_config(monkeypatch, tmp_path):
     """Каждый тест видит исходный CONFIG, свой список нарезок и свою папку подборок."""
     monkeypatch.setattr(autoclip, "CONFIG", dict(autoclip.CONFIG))
+    autoclip.CONFIG["clips_dir"] = ""                   # старые тесты: нарезка рядом с записью
     monkeypatch.setattr(autoclip, "PROJECTS_INDEX", str(tmp_path / "нарезки.json"))
     monkeypatch.setattr(autoclip, "WEEKLY_DIR", str(tmp_path / "подборки"))
     monkeypatch.setattr(autoclip, "RECORDINGS_LOG", str(tmp_path / "записи.json"))

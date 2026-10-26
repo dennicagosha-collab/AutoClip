@@ -138,6 +138,7 @@ CONFIG = {
     # --- экспорт ---
     "preset": "TikTok 1080p60",   # имя пресета из load_presets()
     "clip_length": "normal",      # длина клипов: short / normal / long (LENGTHS)
+    "clips_dir": r"D:\Клипы",    # куда класть нарезки (5.11); пусто — рядом с записью, как до 1.5.0
 }
 # ======================================================
 
@@ -3532,6 +3533,125 @@ RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone"
                "hashtags", "platform_tags")
 
 
+# ---------- папки нарезок (5.11) ----------
+SERVICE_DIR = ".autoclip"            # служебные файлы нарезки (project.json, отчёт) — скрыто
+MARKER = "autoclip.marker"           # «это нарезка AutoClip» — узнаём папку, даже если её переименовали
+STATUS_DIRS = {"new": "Новые", "post": "Выложу", "ok": "Норм", "published": "Выложенные"}
+
+
+def cut_root(proj):
+    """Папка нарезки, где лежат клипы (project.json — в ней или в её .autoclip)."""
+    d = os.path.dirname(proj["_path"])
+    return os.path.dirname(d) if os.path.basename(d) == SERVICE_DIR else d
+
+
+def clips_base_dir():
+    """Куда класть новые нарезки: «Настройки» → «Папка для клипов». Нет диска — None (рядом с записью)."""
+    d = str(CONFIG.get("clips_dir") or "").strip()
+    if not d:
+        return None
+    drive = os.path.splitdrive(d)[0]
+    if drive and not os.path.exists(drive + os.sep):
+        return None
+    return d
+
+
+def new_cut_dir(base, when=None):
+    """«Клипы ДД.ММ.ГГГГ», вторая за день — «… 2», третья — «… 3»."""
+    import datetime
+    when = when or datetime.datetime.now()
+    name = f"Клипы {when:%d.%m.%Y}"
+    path = os.path.join(base, name)
+    k = 2
+    while os.path.exists(path):
+        path = os.path.join(base, f"{name} {k}")
+        k += 1
+    return path
+
+
+def _hide(path):
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02)     # скрытая
+        except Exception:
+            pass
+
+
+def make_service_dir(root, cut_id):
+    """Скрытая .autoclip с маркером нарезки."""
+    d = os.path.join(root, SERVICE_DIR)
+    os.makedirs(d, exist_ok=True)
+    _hide(d)
+    with open(os.path.join(d, MARKER), "w", encoding="utf-8") as f:
+        json.dump({"app": "AutoClip", "cut_id": cut_id, "created": now_iso()}, f, ensure_ascii=False)
+    return d
+
+
+def is_cut_dir(path):
+    return os.path.isfile(os.path.join(path, SERVICE_DIR, PROJECT_FILE)) or \
+        os.path.isfile(os.path.join(path, PROJECT_FILE))
+
+
+def find_cuts(roots):
+    """Все нарезки AutoClip в папках (по маркеру и project.json): пути к project.json."""
+    out = []
+    for r in roots:
+        try:
+            names = sorted(os.listdir(r))
+        except OSError:
+            continue
+        for n in names:
+            d = os.path.join(r, n)
+            if os.path.isfile(os.path.join(d, SERVICE_DIR, PROJECT_FILE)):
+                out.append(os.path.join(d, SERVICE_DIR, PROJECT_FILE))
+            elif os.path.isfile(os.path.join(d, PROJECT_FILE)):
+                out.append(os.path.join(d, PROJECT_FILE))
+    return out
+
+
+def find_cut_by_id(cut_id, roots):
+    """Нарезку переименовали или перенесли — найти по маркеру."""
+    for pp in find_cuts(roots):
+        mk = os.path.join(os.path.dirname(pp), MARKER)
+        try:
+            with open(mk, encoding="utf-8") as f:
+                if json.load(f).get("cut_id") == cut_id:
+                    return pp
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def clip_rel(proj, status, name):
+    """Где лежит файл клипа внутри нарезки: в подпапке статуса (новый вид) или в корне (старые)."""
+    if proj.get("layout") != 2:
+        return os.path.basename(name)
+    sub = STATUS_DIRS.get(status, STATUS_DIRS["new"])
+    return f"{sub}/{os.path.basename(name)}"
+
+
+def place_clip(proj, clip):
+    """Положить файл клипа и обложку в подпапку его статуса (5.11). Файла нет — только запись."""
+    if proj.get("layout") != 2 or clip.get("status") == "rejected":
+        return False
+    want = clip_rel(proj, clip["status"], clip["file"])
+    if want == clip["file"]:
+        return False
+    root = cut_root(proj)
+    src, dst = os.path.join(root, clip["file"]), os.path.join(root, want)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.isfile(src):
+        os.replace(src, dst)
+    csrc, cdst = cover_path_for(root, clip["file"]), cover_path_for(root, want)
+    if os.path.isfile(csrc):
+        os.replace(csrc, cdst)
+    clip["file"] = want
+    if clip.get("cover"):
+        clip["cover"]["file"] = os.path.splitext(want)[0] + ".jpg"
+    return True
+
+
 def clip_dirs(video):
     """Папки нарезок записи по порядку: «<запись>_clips», «<запись>_clips_2», …"""
     base = os.path.splitext(os.path.abspath(video))[0] + "_clips"
@@ -3565,6 +3685,9 @@ def project_path(path):
     """Запись (её последняя нарезка), папка нарезки или сам project.json → project.json."""
     path = os.path.abspath(path)
     if os.path.isdir(path):
+        if os.path.basename(path) != SERVICE_DIR and not os.path.isfile(os.path.join(path, PROJECT_FILE)) and \
+                os.path.isdir(os.path.join(path, SERVICE_DIR)):
+            return os.path.join(path, SERVICE_DIR, PROJECT_FILE)
         return os.path.join(path, PROJECT_FILE)
     if path.lower().endswith(".json"):
         return path
@@ -3595,8 +3718,8 @@ def relocate_source(proj):
     src = proj.get("source") or ""
     if not src or os.path.isfile(src):
         return False
-    folders = [os.path.dirname(src), os.path.dirname(os.path.dirname(proj["_path"])),
-               os.path.dirname(proj["_path"])]
+    folders = [os.path.dirname(src), os.path.dirname(cut_root(proj)),
+               cut_root(proj)]
     found = None
     if proj.get("source_fp"):
         found = find_recording(proj["source_fp"], folders)
@@ -3645,8 +3768,11 @@ def save_project(proj):
         warn_once(f"   ⚠️  оценки не записались в общее хранилище: {e}")
 
 
-def new_project(video, vinfo, out_dir, transcript):
-    return {"_path": os.path.join(out_dir, PROJECT_FILE), "version": PROJECT_VERSION,
+def new_project(video, vinfo, out_dir, transcript, layout=1):
+    """layout 2 (5.11): служебное — в скрытой .autoclip, клипы — в подпапках статусов."""
+    import uuid
+    pp = os.path.join(out_dir, SERVICE_DIR, PROJECT_FILE) if layout == 2 else os.path.join(out_dir, PROJECT_FILE)
+    return {"_path": pp, "version": PROJECT_VERSION, "layout": layout, "cut_id": uuid.uuid4().hex,
             "source": os.path.abspath(video), "source_info": vinfo,
             "source_fp": fingerprint(video, vinfo.get("dur")) if os.path.isfile(video) else None,
             "transcript": os.path.abspath(transcript), "created": now_iso(),
@@ -3746,7 +3872,7 @@ def set_status(path, ref, status):
     if clip["status"] == "rejected":
         raise AutoClipError("❌ Клип уже в корзине.")
     if status == "rejected":
-        folder = os.path.dirname(proj["_path"])
+        folder = cut_root(proj)
         trash(os.path.join(folder, clip["file"]))
         trash(cover_path_for(folder, clip["file"]))
     if status == "rejected":
@@ -3759,6 +3885,7 @@ def set_status(path, ref, status):
         status = "published"                              # выложенный остаётся выложенным (5.4)
     clip["status"] = status
     clip["status_date"] = now_iso()
+    place_clip(proj, clip)                                # файл — в подпапку статуса (5.11)
     save_project(proj)
     write_report(proj)
     return clip
@@ -3769,7 +3896,7 @@ def remove_clip(path, ref):
     На обучение не влияет (дубли, технический брак)."""
     proj = load_project(path)
     clip = find_clip(proj, ref)
-    folder = os.path.dirname(proj["_path"])
+    folder = cut_root(proj)
     trash(os.path.join(folder, clip["file"]))
     trash(cover_path_for(folder, clip["file"]))
     try:
@@ -3829,7 +3956,7 @@ def save_clip_as(path, ref, dest):
     """Копия готового клипа в другое место. Файл с тем же именем там уходит в корзину."""
     proj = load_project(path)
     clip = find_clip(proj, ref)
-    src = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    src = os.path.join(cut_root(proj), clip["file"])
     if not os.path.isfile(src):
         raise AutoClipError("❌ Файла клипа нет.")
     if os.path.abspath(dest) == os.path.abspath(src):
@@ -3852,7 +3979,7 @@ def add_forecast(clip, segments):
 
 
 def write_report(proj):
-    out_dir = os.path.dirname(proj["_path"])
+    out_dir = os.path.dirname(proj["_path"])          # рядом с project.json (в .autoclip у новых)
     vi = proj["source_info"]
     rep = [f"Источник: {proj['source']}", ""]
     clips = sorted((c for c in proj["clips"] if c["status"] != "rejected"),
@@ -4098,14 +4225,15 @@ def add_clip(path, c, origin, progress=None, cancel=None):
     if not os.path.isfile(src):
         raise AutoClipError(f"❌ Не найдена исходная запись: {src}")
     segments = load_segments(proj)
-    out_dir = os.path.dirname(proj["_path"])
+    out_dir = cut_root(proj)
     if not c.get("hook"):
         c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments, voice=clip_voice(src, c["s"], c["e"]),
                                 peak=c.get("peak"),
                                 threshold=proj.get("hook_threshold"),
                                 cfg=dict(CONFIG, **proj.get("settings", {})))
     num = next_clip_num(proj)
-    name = f"{num:02d}_{safe_name(c['title'])}.mp4"
+    name = clip_rel(proj, "new", f"{num:02d}_{safe_name(c['title'])}.mp4")
+    os.makedirs(os.path.dirname(os.path.join(out_dir, name)), exist_ok=True)
     rec = make_clip_record(c, num, name)
     rec["origin"] = origin
     rec["overrides"].update({k: v for k, v in (c.get("overrides") or {}).items() if k in OVERRIDE_KEYS})
@@ -4170,7 +4298,7 @@ def music_preview(path, ref, mcfg, out_path):
     """Готовый клип + выбранная музыка с текущей громкостью — быстро, без пережатия видео."""
     proj = load_project(path)
     clip = find_clip(proj, ref)
-    src = os.path.join(os.path.dirname(proj["_path"]), clip["file"])
+    src = os.path.join(cut_root(proj), clip["file"])
     music = check_music(mcfg)
     if not (music and os.path.isfile(src)):
         raise AutoClipError("❌ Нет клипа или трека для прослушивания.")
@@ -4364,11 +4492,11 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         clip["hook"] = dict(clip.get("hook") or {}, start=round(float(at[0]), 2),
                             end=round(float(at[1]), 2), auto=True, why="выбран вручную")
     span = hook_span(dict(clip, start=s, end=e), cfg)
-    folder = os.path.dirname(proj["_path"])
+    folder = cut_root(proj)
     old_file = clip["file"]
     title = str(clip.get("overrides", {}).get("title") or "").strip()
     if title and title != clip["title"]:
-        clip["file"] = f"{clip['num']:02d}_{safe_name(title)}.mp4"      # новое название — новое имя
+        clip["file"] = clip_rel(proj, clip["status"], f"{clip['num']:02d}_{safe_name(title)}.mp4")   # новое имя
     out = os.path.join(folder, clip["file"])
     log(f"🔁 Пересобираю {clip['file']} ({fmt_time(s)}–{fmt_time(e)})")
     if progress:
@@ -4403,7 +4531,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         if clip.get("meta"):
             clip["meta"]["title"] = title
     clip["cover"] = make_cover(src, proj["source_info"], clip, proj.get("reaction") or [],
-                               cover_path_for(os.path.dirname(proj["_path"]), clip["file"]),
+                               cover_path_for(cut_root(proj), clip["file"]),
                                cfg, cancel)
     clip["hook"]["on"] = span is not None
     add_forecast(clip, segments)
@@ -4465,7 +4593,7 @@ def weekly_candidates(days=7, now=None):
             proj = load_project(pp)
         except (AutoClipError, OSError, ValueError):
             continue
-        folder = os.path.dirname(proj["_path"])
+        folder = cut_root(proj)
         for c in proj["clips"]:
             path = os.path.join(folder, c["file"])
             date = _clip_date(c)
@@ -4697,6 +4825,7 @@ def mark_published(path, ref, platform, on=True, url=""):
     elif not pub and clip["status"] == "published":
         back = clip.get("rating") if clip.get("rating") in ("post", "ok") else "new"
         clip["status"], clip["status_date"] = back, now_iso()
+    place_clip(proj, clip)
     save_project(proj)
     write_report(proj)
     return clip
@@ -4957,7 +5086,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         log(f"⚠️  В записи {vinfo['fps']:g} кадров/с, клипы будут {preset['fps']}. Плавнее от "
             f"этого не станет — лучше сразу писать в OBS {preset['fps']} кадров/с.")
 
-    out_dir = new_clip_dir(video)                # каждая нарезка — в свою папку
+    base = clips_base_dir()                      # «Папка для клипов» (5.11)
+    layout = 2 if base else 1
+    out_dir = new_cut_dir(base) if base else new_clip_dir(video)   # каждая нарезка — в свою папку
 
     timings = []
 
@@ -5011,7 +5142,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     t = mark("языковая модель", t)
 
     prog("поиск", 0)
-    proj = new_project(video, vinfo, out_dir, cache)
+    proj = new_project(video, vinfo, out_dir, cache, layout)
     proj["marks"] = marks
 
     # речь и восклицания — по голосу Гоши (если есть его дорожка), громкость — по общему звуку
@@ -5083,7 +5214,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         return out_dir
 
     os.makedirs(out_dir, exist_ok=True)
-    log(f"📁 Клипы будут в папке {os.path.basename(out_dir)}")
+    if layout == 2:
+        make_service_dir(out_dir, proj["cut_id"])
+    log(f"📁 Клипы будут в папке {out_dir if layout == 2 else os.path.basename(out_dir)}")
     proj["settings"] = {k: CONFIG[k] for k in RENDER_KEYS if k in CONFIG}
     proj["settings"]["preset"] = preset          # сам пресет: пересборка не зависит от списка
     proj["run"] = {"date": now_iso(), "timings": timings}
@@ -5106,7 +5239,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         """Один клип: рендер, тихое начало, обложка, прогноз. Своя временная папка —
         клипы можно собирать одновременно."""
         check_cancel(cancel)
-        name = f"{num:02d}_{safe_name(c['title'])}.mp4"
+        name = clip_rel(proj, "new", f"{num:02d}_{safe_name(c['title'])}.mp4")
+        os.makedirs(os.path.dirname(os.path.join(out_dir, name)), exist_ok=True)
         log(f"   [{num}/{len(clips)}] {name}")
         rec = make_clip_record(c, num, name)
         cfg = clip_config(proj, rec)
