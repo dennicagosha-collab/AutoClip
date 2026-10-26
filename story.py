@@ -15,6 +15,7 @@
 границы считаются правилами, а модель остаётся для поиска моментов и названий (см. ОТЧЁТ_ПАТЧ_4)."""
 
 import math
+import re
 
 import autoclip as A
 
@@ -222,3 +223,102 @@ def refine(clips, words, voice, loud_z, burst, dead, dur, length="normal"):
         c["s"], c["e"], c["bounds_why"] = s, e, why
         done += 1
     return done
+
+
+# ---------------- хук = кульминация истории (5.9) ----------------
+
+HOOK_MIN, HOOK_MAX = 1.5, 3.0     # длина хука
+HOOK_NEAR = 6.0                   # кульминация — не дальше этого от пика момента
+HOOK_SKIP = 3.0                   # в первых секундах клипа хук не нужен — клип и так с неё начинается
+_CLAUSE_END = re.compile(r"[,.!?…;:]$")
+_SENT_END = re.compile(r"[.!?…]$")
+
+
+def clauses(words):
+    """Слова → куски фраз до запятой/точки или паузы: [(начало, конец, слова, конец_предложения)]."""
+    out, cur = [], []
+    ws = sorted(words, key=lambda w: w["s"])
+    for k, w in enumerate(ws):
+        cur.append(w)
+        nxt = ws[k + 1] if k + 1 < len(ws) else None
+        text = str(w["w"]).strip()
+        gap = (nxt["s"] - w["e"]) if nxt else 9.0
+        if _CLAUSE_END.search(text) or gap >= 0.35:
+            out.append((cur[0]["s"], cur[-1]["e"], cur, bool(_SENT_END.search(text)) or gap >= 0.6))
+            cur = []
+    if cur:
+        out.append((cur[0]["s"], cur[-1]["e"], cur, True))
+    return out
+
+
+def culmination_hook(s, e, peak, words, voice, reaction, at=None):
+    """Хук — кульминация истории: целая ключевая фраза или реакция (1,5–3 с) у самого яркого места
+    речи рядом с пиком. Никаких вздохов, обрывков и звука игры без реакции: не нашлась — None.
+    → (начало, конец, что) во времени записи; слово не режется."""
+    ws = sorted((w for w in words if w["s"] >= s - 0.01 and w["e"] <= e + 0.01 and str(w["w"]).strip()),
+                key=lambda w: w["s"])
+    if not ws:
+        return None
+    if reaction is None or not len(reaction):
+        reaction = [1.0] * (int(e) + 2)
+    n = len(reaction)
+    talk = [False] * n
+    for w in ws:
+        for i in range(max(0, int(w["s"])), min(n, int(math.ceil(w["e"])))):
+            talk[i] = True
+    for a, b in voice or ():
+        for i in range(max(0, int(a)), min(n, int(math.ceil(b)))):
+            talk[i] = True
+    if at is not None:                                   # «Хук отсюда»: у этого места
+        lo, hi = int(at) - 1, int(at) + 1
+    else:
+        lo, hi = int(math.ceil(max(s + HOOK_SKIP, peak - HOOK_NEAR))), int(min(e - 0.5, peak + HOOK_NEAR))
+    secs = [i for i in range(max(0, lo), min(n, hi + 1)) if talk[i]]
+    if not secs:
+        return None
+    worded = set()
+    for w in ws:
+        worded.update(range(max(0, int(w["s"])), min(n, int(math.ceil(w["e"])))))
+    # самое яркое место речи; голос без слов (смех, крик) — реакция, ему чуть больше веса
+    c = (min(secs, key=lambda i: abs(i + 0.5 - at)) if at is not None else
+         max(secs, key=lambda i: reaction[i] + (0.3 if i not in worded else 0.0)))
+    cl = clauses(ws)
+    best = None
+    for i in range(len(cl)):
+        for j in range(i, len(cl)):
+            a, b = cl[i][0], cl[j][1]
+            if j > i and cl[j][0] - cl[j - 1][1] > 0.8:
+                break                                       # между кусками долгая пауза — не одна фраза
+            if b - a > HOOK_MAX + 0.01:
+                break
+            ext = b
+            if b - a < HOOK_MIN:
+                # коротко — добавить смех/крик сразу после (голос без слов)
+                nxt_w = next((w["s"] for w in ws if w["s"] >= b - 0.01 and w["e"] > b + 0.05), math.inf)
+                for va, vb in sorted(voice or ()):
+                    if va <= ext + 0.4 and vb > ext:            # голос тянется дальше слов — смех, крик
+                        ext = min(vb, a + HOOK_MAX, nxt_w - 0.05)
+                if ext - a < HOOK_MIN:
+                    continue
+            if not (a <= c + 1 and ext >= c):
+                continue                                    # должна быть кульминация
+            speech = sum(w["e"] - w["s"] for k in range(i, j + 1) for w in cl[k][2])
+            nwords = sum(len(cl[k][2]) for k in range(i, j + 1))
+            if speech < 0.5 or nwords < 2:
+                continue                                    # вздох, кашель, обрывок — нет
+            seconds = range(max(0, int(a)), min(n, int(math.ceil(ext))))
+            score = sum(reaction[k] for k in seconds) / max(1, len(seconds))
+            score += 0.5 * (i == 0 or cl[i - 1][3])         # начинается с начала предложения
+            score += 0.5 * cl[j][3]                          # и кончается его концом
+            score -= 0.1 * abs((a + ext) / 2 - (c + 0.5))
+            if best is None or score > best[0]:
+                best = (score, a, ext, i, j)
+    if not best:
+        return None
+    _, a, b, i, j = best
+    prev = cl[i - 1][2][-1] if i else None
+    nxt = next((w for w in ws if w["s"] >= b - 0.01 and w not in cl[j][2]), None)
+    hs = max(s, A.pad_before(cl[i][2][0], prev))
+    he = min(e, A.pad_after(cl[j][2][-1], nxt) if b <= cl[j][1] + 0.01 else b + 0.1)
+    text = " ".join(str(w["w"]).strip() for k in range(i, j + 1) for w in cl[k][2])
+    return round(hs, 2), round(he, 2), text

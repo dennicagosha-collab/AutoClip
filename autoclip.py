@@ -1670,48 +1670,33 @@ def _voice_hook_window(i, s, e, voice):
     return best[1], best[2]
 
 
-def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None, voice=None):
-    """Решение про хук для клипа [s, e]. Хук всегда берётся из этого же клипа.
-    Возвращает {"on", "auto", "start", "end", "why"}: auto — совет ставить хук,
-    start/end — лучший момент (есть, даже если совет «не ставить»), on заполняет рендер."""
+def decide_hook(s, e, reaction, segments, parts=None, threshold=None, cfg=None, voice=None, peak=None):
+    """Хук (5.9) — кульминация истории: целая ключевая фраза или реакция 1,5–3 с у самого яркого
+    места речи рядом с пиком. Хук всегда из этого же клипа и не режет слово. Нет явной кульминации —
+    без хука (лучше без, чем вздох или обрывок).
+    Возвращает {"on", "auto", "start", "end", "why", "text"}: auto — совет ставить хук."""
     import numpy as np
-    cfg = cfg or CONFIG
-    rec = {"on": False, "auto": False, "start": None, "end": None, "why": ""}
+    import story
+    rec = {"on": False, "auto": False, "start": None, "end": None, "why": "", "text": ""}
     reaction = np.asarray(reaction, dtype=float)
     a, b = int(math.ceil(s)), min(len(reaction), int(math.floor(e)))
-    lo, hi = int(math.ceil(s + HOOK_SKIP_START)), b - 1
-    if hi <= lo:
+    if b - a < HOOK_SKIP_START + 2:
         rec["why"] = "клип слишком короткий для хука"
         return rec
-    i = lo + int(np.argmax(reaction[lo:hi]))
-    peak = float(reaction[i])
-    start_level = float(reaction[a:min(b, a + 2)].max())
+    if peak is None:
+        peak = a + int(np.argmax(reaction[a:b]))
     words = [w for seg in segments if seg["e"] > s and seg["s"] < e for w in seg["words"]]
-    if threshold is None:
-        threshold = hook_threshold(reaction, cfg)
-    rec["start"], rec["end"] = _hook_window(i, s, e, words)
-    if rec["start"] is None:
-        # у самого яркого места слова идут сплошняком — пробуем другие яркие секунды клипа
-        # (короткая фраза целиком или реакция без слов), слово по-прежнему не режем
-        for j in sorted(range(lo, hi), key=lambda j: -reaction[j]):
-            if j == i or reaction[j] < max(threshold, 0.7 * peak):
-                continue
-            hs, he = _hook_window(j, s, e, words)
-            if hs is not None:
-                i, rec["start"], rec["end"] = j, hs, he
-                peak = float(reaction[j])
-                break
-    if rec["start"] is None and voice:
-        rec["start"], rec["end"] = _voice_hook_window(i, s, e, voice)   # настоящие паузы в голосе
-    if rec["start"] is None:
-        rec["why"] = "нет места для хука без разреза слова"
-    elif peak < threshold:
-        rec["why"] = "нет яркой реакции в клипе"
-    elif start_level >= 0.7 * peak:
-        rec["why"] = "клип и так начинается с сильного момента"
-    else:
-        rec["auto"] = True
-        rec["why"] = f"{_what_reaction(i, parts)} на {int(i - s)}-й секунде клипа"
+    h = story.culmination_hook(s, e, peak, words, voice, reaction)
+    if not h:
+        rec["why"] = "нет явной кульминации (ключевой фразы или реакции)"
+        return rec
+    rec["start"], rec["end"], rec["text"] = h
+    if rec["start"] - s < HOOK_SKIP_START:
+        rec["why"] = "клип и так начинается с кульминации"
+        return rec
+    rec["auto"] = True
+    shown = " ".join(censor_word(w) for w in h[2].split())
+    rec["why"] = f"кульминация «{shown[:60]}» на {int(rec['start'] - s)}-й секунде клипа"
     return rec
 
 
@@ -1748,10 +1733,15 @@ def text_between(segments, s, e):
                     for w in seg["words"] if s - 0.05 <= w["s"] and w["e"] <= e + 0.05)
 
 
-def hook_window_at(segments, s, e, t):
-    """«Выбрать другой момент»: хук 1–2 с вокруг места t клипа [s, e], без разреза слов."""
+def hook_window_at(segments, s, e, t, voice=None):
+    """«Хук отсюда»: целая фраза или реакция 1,5–3 с у места t клипа [s, e], слово не режется."""
+    import story
     words = [w for seg in segments if seg["e"] > s and seg["s"] < e for w in seg["words"]]
-    return _hook_window(min(max(t, s), e) + 0.5, s, e, words)
+    t = min(max(t, s), e)
+    h = story.culmination_hook(s, e, t, words, voice, None, at=t)
+    if h:
+        return h[0], h[1]
+    return _hook_window(t + 0.5, s, e, words)
 
 
 MIN_PIECE = 0.2        # кусок клипа короче этого между вырезками не оставляем
@@ -4111,6 +4101,7 @@ def add_clip(path, c, origin, progress=None, cancel=None):
     out_dir = os.path.dirname(proj["_path"])
     if not c.get("hook"):
         c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments, voice=clip_voice(src, c["s"], c["e"]),
+                                peak=c.get("peak"),
                                 threshold=proj.get("hook_threshold"),
                                 cfg=dict(CONFIG, **proj.get("settings", {})))
     num = next_clip_num(proj)
@@ -4360,7 +4351,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
                     react[i] = 0.0
             clip["hook"] = decide_hook(s, e, react, segments,
                                        threshold=proj.get("hook_threshold"), cfg=cfg,
-                                       voice=clip_voice(src, s, e))
+                                       voice=clip_voice(src, s, e), peak=clip.get("peak"))
             if clip["hook"].get("start") is not None and \
                     in_cuts(clip["hook"]["start"], clip["hook"]["end"], cuts):
                 clip["hook"].update(auto=False, why="момент хука вырезан")
@@ -5065,16 +5056,11 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj["hook_threshold"] = round(thr, 2)
     for i, c in enumerate(clips, 1):
         check_cancel(cancel)
-        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice)
+        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice, peak=c["peak"])
         c["zoom_auto"] = auto_zooms(c["s"], c["e"], reaction, parts, thr)
         h = c["hook"]
-        if h["auto"] and mode != "none" and tri(CONFIG["hook"]) != "off":
-            prog("поиск", i / len(clips) * 100, "проверяю хуки моделью")
-            spoils, why = llm_hook_spoils(text_between(segments, c["s"], c["e"]),
-                                          text_between(segments, h["start"], h["end"]), mode)
-            if spoils:
-                h.update(auto=False, why="модель: тизер раскроет развязку" +
-                         (f" — {why}" if why else ""))
+        # хук теперь сам кульминация (5.9) — проверка моделью «тизер раскроет развязку» снята:
+        # она отклоняла почти каждую кульминацию, а Гоша хочет её в начале
         if mode != "none":
             prog("поиск", i / len(clips) * 100, "название и хэштеги")
             text = text_between(segments, c["s"], c["e"])
@@ -5087,7 +5073,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     t = mark("поиск моментов", t)
 
     if analyze_only:
-        process.last = {"clips": clips, "candidates": cands, "segments": segments, "dead": dead}
+        process.last = {"clips": clips, "candidates": cands, "segments": segments, "dead": dead,
+                        "reaction": reaction, "voice": voice}
         for i, c in enumerate(clips, 1):
             log(f"   {i:02d}. {fmt_time(c['s'])}–{fmt_time(c['e'])} ({c['e'] - c['s']:.0f} с), "
                 f"оценка {c['score']:.1f} — {c['title']}")

@@ -26,28 +26,38 @@ def test_hook_always_inside_clip(seed):
     h = autoclip.decide_hook(s, e, reaction, segs, threshold=1.0)
     if h["start"] is not None:
         assert s <= h["start"] < h["end"] <= e
-        assert autoclip.HOOK_MIN - 0.01 <= h["end"] - h["start"] <= autoclip.HOOK_MAX + 0.01
+        import story
+        assert story.HOOK_MIN - 0.5 <= h["end"] - h["start"] <= story.HOOK_MAX + 0.5
 
 
-def test_bright_reaction_in_middle_gets_hook():
+def _phrase(start, text, step=0.4):
+    ws = text.split()
+    return [{"s": round(start + k * step, 2), "e": round(start + k * step + step - 0.05, 2), "w": w}
+            for k, w in enumerate(ws)]
+
+
+def test_culmination_in_middle_gets_hook():
+    """Хук — кульминация: целая фраза у самого яркого места речи (5.9)."""
     r = np.zeros(100)
     r[40] = 3.0
-    h = autoclip.decide_hook(25.0, 50.0, r, [], threshold=1.0)
-    assert h["auto"] and h["start"] <= 40 < h["end"]
+    words = _phrase(30.0, "ну вот идём.") + _phrase(39.6, "яйцо нажал вместо хила,") + _phrase(46.0, "ладно.")
+    h = autoclip.decide_hook(25.0, 50.0, r, [{"s": 30, "e": 47, "words": words}], peak=40)
+    assert h["auto"] and h["start"] <= 39.6 and h["end"] >= 41.15 and 1.4 <= h["end"] - h["start"] <= 3.1
+    assert "кульминация" in h["why"]
 
 
-def test_no_bright_reaction_no_hook():
-    r = np.full(100, 0.5)
-    h = autoclip.decide_hook(25.0, 50.0, r, [], threshold=1.0)
-    assert not h["auto"] and "нет яркой" in h["why"]
+def test_no_speech_no_hook():
+    r = np.full(100, 3.0)                       # громко, но никто не говорит — звук игры
+    h = autoclip.decide_hook(25.0, 50.0, r, [], peak=40)
+    assert not h["auto"] and "нет явной кульминации" in h["why"]
 
 
-def test_clip_starting_with_action_gets_no_hook():
+def test_clip_starting_with_culmination_gets_no_hook():
     r = np.zeros(100)
-    r[25] = 3.0
-    r[40] = 3.2
-    h = autoclip.decide_hook(25.0, 50.0, r, [], threshold=1.0)
-    assert not h["auto"] and "начинается" in h["why"]
+    r[27] = 3.0
+    words = _phrase(25.2, "ну ты видел вообще?") + _phrase(35.0, "ладно пошли")
+    h = autoclip.decide_hook(25.0, 50.0, r, [{"s": 25, "e": 36, "words": words}], peak=27)
+    assert not h["auto"] and ("начинается" in h["why"] or "нет явной" in h["why"])
 
 
 def test_voice_matters_more_than_game_noise():

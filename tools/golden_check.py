@@ -68,6 +68,15 @@ def judge(m, clips, cands):
     a, b = m.get("must") or (None, None)
     if a is not None and not (c["s"] <= a + 0.3 and c["e"] >= b - 0.3):
         bad.append("нет нужного куска")
+    hk = m.get("hook")
+    if hk:
+        h = c.get("_hook") or c.get("hook") or {}
+        hs, he = h.get("start"), h.get("end")
+        if hs is None:
+            bad.append("нет хука")
+        elif not (hs <= hk["must"][0] + 0.3 and he >= hk["must"][1] - 0.3
+                  and hk["within"][0] - 0.01 <= hs and he <= hk["within"][1] + 0.01):
+            bad.append(f"хук {hs:.1f}–{he:.1f}")
     return c, kind, bad
 
 
@@ -95,6 +104,10 @@ def run_once(video, moments, llm=None):
         autoclip.CONFIG["llm"] = llm
     autoclip.process(video, analyze_only=True)
     last = autoclip.process.last
+    for c in last["clips"] + last["candidates"]:            # хук считается и у кандидатов (5.9)
+        reaction = last.get("reaction")
+        c["_hook"] = autoclip.decide_hook(c["s"], c["e"], [] if reaction is None else reaction, last["segments"],
+                                          voice=last.get("voice"), peak=c["peak"])
     rows = [(m, *judge(m, last["clips"], last["candidates"])) for m in moments]
     words = autoclip.all_words(last["segments"])
     return rows, summary(last["clips"], words, last.get("dead"))
@@ -110,13 +123,15 @@ def rng(r):
 
 
 def print_run(rows, summ, out=print):
-    out("| момент | эталон начало | эталон конец | получилось | вид | итог |")
-    out("|---|---|---|---|---|---|")
+    out("| момент | эталон начало | эталон конец | получилось | хук | вид | итог |")
+    out("|---|---|---|---|---|---|---|")
     ok = 0
     for m, c, kind, bad in rows:
         got = f"{c['s']:.1f}–{c['e']:.1f} ({c['e'] - c['s']:.0f} с)" if c else "—"
+        h = (c or {}).get("_hook") or {}
+        hook = f"{h['start']:.1f}–{h['end']:.1f} «{h.get('text', '')[:30]}»" if h.get("start") is not None else "—"
         ok += not bad
-        out(f"| {m['name']} | {rng(m['start'])} | {rng(m['end'])} | {got} | {kind} | "
+        out(f"| {m['name']} | {rng(m['start'])} | {rng(m['end'])} | {got} | {hook} | {kind} | "
             f"{'ок' if not bad else 'НЕТ: ' + ', '.join(bad)} |")
     out(f"\nИтог: **{ok} из {len(rows)}**.")
     if summ.get("n"):

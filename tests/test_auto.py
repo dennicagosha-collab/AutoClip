@@ -1,4 +1,6 @@
 """Патч 3Б.5: «Вкл / Выкл / Авто» для хука и зума."""
+import numpy as np
+
 import autoclip
 
 
@@ -65,34 +67,6 @@ def test_hook_modes():
     assert autoclip.clip_config({"settings": {"hook": True}}, {"overrides": {}})["hook"] == "auto"
 
 
-def test_hook_on_wordless_reaction():
-    # слова сплошняком вокруг пика нет: смех на 20-й секунде в паузе 18–23 с
-    words = [{"s": 10 + k * 0.3, "e": 10 + k * 0.3 + 0.3, "w": "бла"} for k in range(27)]   # 10–18,1
-    words += [{"s": 23 + k * 0.3, "e": 23 + k * 0.3 + 0.3, "w": "бла"} for k in range(20)]  # 23–29
-    hs, he = autoclip._hook_window(20, 10, 30, words)
-    assert hs is not None and 18.1 <= hs < he <= 23.0
-    assert 1.0 <= he - hs <= 2.0
-    for w in words:
-        assert not (w["s"] < hs < w["e"]) and not (w["s"] < he < w["e"])
-
-
-def test_hook_tries_other_bright_moment():
-    # самое яркое место — посреди сплошной речи, второе по яркости — короткая фраза с паузами
-    words = [{"s": 10 + k * 0.3, "e": 10 + k * 0.3 + 0.3, "w": "бла"} for k in range(34)]   # 10–20,2
-    words += [{"s": 22.0, "e": 22.4, "w": "да"}, {"s": 22.5, "e": 23.0, "w": "ну"}]
-    words += [{"s": 25 + k * 0.3, "e": 25 + k * 0.3 + 0.3, "w": "бла"} for k in range(16)]  # 25–30
-    segs = [{"s": 10, "e": 30, "words": words}]
-    reaction = [0.0] * 40
-    reaction[15] = 5.0
-    reaction[22] = 4.5
-    h = autoclip.decide_hook(10, 30, reaction, segs, threshold=2.0)
-    assert h["auto"] and h["start"] is not None
-    assert 20.2 <= h["start"] and h["end"] <= 25.0
-    for w in words:
-        assert not (w["s"] + 0.01 < h["start"] < w["e"] - 0.01)
-        assert not (w["s"] + 0.01 < h["end"] < w["e"] - 0.01)
-
-
 def test_settings_tri_and_old_bool(tmp_path, monkeypatch):
     import json
     import sys
@@ -115,13 +89,21 @@ def test_settings_tri_and_old_bool(tmp_path, monkeypatch):
     win.close()
 
 
-def test_hook_by_voice_pauses_when_words_glued():
-    # Whisper поставил слова встык, а в голосе есть паузы 14,9–15,2 и 16,6–16,9
-    words = [{"s": 10 + k * 0.4, "e": 10 + (k + 1) * 0.4, "w": "бла"} for k in range(50)]
-    segs = [{"s": 10, "e": 30, "words": words}]
-    voice = [(10.0, 14.9), (15.2, 16.6), (16.9, 30.0)]
-    reaction = [0.0] * 40
-    reaction[16] = 5.0
-    assert autoclip.decide_hook(10, 30, reaction, segs, threshold=2.0)["start"] is None
-    h = autoclip.decide_hook(10, 30, reaction, segs, threshold=2.0, voice=voice)
-    assert h["auto"] and (h["start"], h["end"]) == (15.05, 16.75)
+def test_hook_never_a_sigh():
+    """Вздох, кашель, обрывок короче 0,5 с — не хук (5.9)."""
+    r = np.zeros(60)
+    r[30] = 4.0
+    words = [{"s": 30.1, "e": 30.4, "w": "кхм"}]
+    h = autoclip.decide_hook(10, 50, r, [{"s": 30, "e": 31, "words": words}], peak=30)
+    assert h["start"] is None and not h["auto"]
+
+
+def test_hook_phrase_plus_laugh():
+    """Короткая фраза + смех сразу после неё (голос без слов) — хук целиком."""
+    r = np.zeros(60)
+    r[31] = 3.0
+    words = [{"s": 29.8, "e": 30.1, "w": "а"}, {"s": 30.1, "e": 30.9, "w": "блядь"}]
+    h = autoclip.decide_hook(10, 50, r, [{"s": 29.8, "e": 31, "words": words}], peak=31,
+                             voice=[(29.7, 31.0), (31.2, 32.2)])
+    assert h["start"] <= 29.8 and 31.9 <= h["end"] <= 32.4
+
