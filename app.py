@@ -1949,13 +1949,9 @@ class ClipsPage(QWidget):
             mark = QPushButton()
             mark.clicked.connect(lambda _, k=key: self.toggle_published(k))
             row.addWidget(mark)
-            link = QLineEdit()
-            link.setPlaceholderText("ссылка на пост — по желанию")
-            link.editingFinished.connect(lambda k=key: self.save_link(k))
-            row.addWidget(link, 1)
-            row.addStretch(0)
+            row.addStretch(1)
             pl.addLayout(row)
-            self.pub_rows[key] = (state, link, mark)
+            self.pub_rows[key] = (state, None, mark)      # ссылки на пост больше нет (5.5)
         pl.addWidget(hint("Instagram в браузере: нажми «Создать» (+) в меню слева."))
         self.pub_state = hint("")
         pl.addWidget(self.pub_state)
@@ -3185,12 +3181,7 @@ class ClipsPage(QWidget):
             if p and isinstance(p.get("views"), (int, float)):
                 text += f"\n{int(p['views']):,} просм.".replace(",", " ")
             state.setText(text)
-            link.blockSignals(True)
-            link.setText((p or {}).get("url", ""))
-            link.blockSignals(False)
-            link.setVisible(bool(p))                 # ссылка нужна, только когда выложил
-            link.setEnabled(bool(p))
-            mark.setText("Снять отметку" if p else "Выложил")
+            mark.setText("Снять отметку" if p else f"Выложил на {autoclip.PLATFORMS[key]}")
 
     def publish(self, platform, rect=None):
         """Описание — в буфер, страница загрузки — отдельным окном. Публикует сам Гоша."""
@@ -3225,22 +3216,14 @@ class ClipsPage(QWidget):
         if not c:
             return
         on = platform not in (c.get("published") or {})
-        url = self.pub_rows[platform][1].text()
         try:
-            autoclip.mark_published(self.proj["_path"], c["id"], platform, on, url)
+            autoclip.mark_published(self.proj["_path"], c["id"], platform, on)
         except autoclip.AutoClipError as e:
             QMessageBox.warning(self, "AutoClip", str(e))
             return
         self.base = {}
         self.reload(c["id"])
         self.show_tab(3)                          # «Публикация»
-
-    def save_link(self, platform):
-        c = self.current_clip()
-        if c and platform in (c.get("published") or {}):
-            autoclip.mark_published(self.proj["_path"], c["id"], platform, True,
-                                    self.pub_rows[platform][1].text())
-            self.proj = autoclip.load_project(self.proj["_path"])
 
     # ---------- действия ----------
     def rebuild(self):

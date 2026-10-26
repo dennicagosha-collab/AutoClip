@@ -116,14 +116,13 @@ def test_publish_tab_and_drag(tmp_path, monkeypatch):
     assert "#shorts" not in QApplication.clipboard().text()                   # в буфере — TikTok
 
     state, link, mark = page.pub_rows["tiktok"]
-    assert state.text() == "не выложен" and not link.isEnabled()
+    assert state.text() == "не выложен" and link is None                      # ссылки на пост нет (5.5)
+    assert mark.text() == "Выложил на TikTok"
     page.toggle_published("tiktok")
     state, link, mark = page.pub_rows["tiktok"]
-    assert state.text().startswith("выложен") and link.isEnabled() and mark.text() == "Снять отметку"
-    link.setText("https://tiktok.com/@x/video/2")
-    page.save_link("tiktok")
+    assert state.text().startswith("выложен") and mark.text() == "Снять отметку"
     c = autoclip.find_clip(autoclip.load_project(path), cid)
-    assert c["status"] == "published" and c["published"]["tiktok"]["url"].endswith("/2")
+    assert c["status"] == "published" and c["published"]["tiktok"]["date"]
     page.set_filter(4)                                                        # «Выложены»
     assert page.list.count() == 1
     win.close()
