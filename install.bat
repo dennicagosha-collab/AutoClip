@@ -1,6 +1,8 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
+set "NOPAUSE="
+if /i "%~1"=="--no-pause" set "NOPAUSE=1"
 echo === Установка AutoClip ===
 echo.
 
@@ -34,8 +36,8 @@ echo [!] Python не найден.
 echo     Скачай Python 3.13 с python.org, при установке поставь галочку "Add python.exe to PATH",
 echo     потом запусти этот файл ещё раз.
 start https://www.python.org/downloads/windows/
-pause
-exit /b
+if not defined NOPAUSE pause
+exit /b 1
 
 :badpython
 echo.
@@ -46,28 +48,28 @@ echo     2. Скачай Python 3.13 "Windows installer 64-bit" со стран�
 echo     3. При установке поставь галочку "Add python.exe to PATH".
 echo     4. Запусти этот файл ещё раз.
 start https://www.python.org/downloads/windows/
-pause
-exit /b
+if not defined NOPAUSE pause
+exit /b 1
 
 :pipfail
 echo.
 echo [!] Библиотеки не установились. Сделай скрин этого окна целиком и отправь в чат.
-pause
-exit /b
+if not defined NOPAUSE pause
+exit /b 1
 
 :noffmpeg
 echo [!] Не найден ffmpeg.
 echo     Скачай ffmpeg-release-essentials.zip, открой архив, папку bin,
 echo     и скопируй ffmpeg.exe и ffprobe.exe в эту папку:  %~dp0
 start https://www.gyan.dev/ffmpeg/builds/
-pause
-exit /b
+if not defined NOPAUSE pause
+exit /b 1
 
 :ok
 echo.
-echo === Всё готово! Запускай AutoClip.bat ===
-pause
-exit /b
+echo === Всё готово. Запускай AutoClip.bat ===
+if not defined NOPAUSE pause
+exit /b 0
 
 :findpy
 set "PY="
@@ -77,6 +79,7 @@ for %%V in (3.13 3.12 3.14 3.11) do (
     if not errorlevel 1 set "PY=py -%%V"
   )
 )
+if not defined PY if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY="%LOCALAPPDATA%\Programs\Python\Python313\python.exe""
 if not defined PY (
   python -c "import sys" >nul 2>nul
   if not errorlevel 1 set "PY=python"

@@ -69,6 +69,7 @@ CONFIG = {
 
     # --- Whisper ---
     "whisper_model": "large-v3",   # large-v3 / medium / small
+    "whisper_device": "auto",      # auto — видеокарта, если есть; cpu — только процессор (мастер, P4)
     "retranscribe": False,    # расшифровать заново, даже если кэш есть
     "subs_team": False,       # субтитры и для тиммейтов (дорожка Discord)
     "language": "ru",
@@ -926,12 +927,15 @@ def _load_whisper():
         raise AutoClipError("❌ Не установлен faster-whisper. Запусти install.bat.")
     global WHISPER_DEVICE
     name = CONFIG["whisper_model"]
-    for device, ctype in (("cuda", "float16"), ("cpu", "int8")):
+    devices = (("cuda", "float16"), ("cpu", "int8"))
+    if CONFIG.get("whisper_device") == "cpu":
+        devices = devices[1:]
+    for device, ctype in devices:
         try:
             log(f"🧠 Загружаю Whisper {name} ({device})... первый раз скачается ~3 ГБ")
             model = WhisperModel(name, device=device, compute_type=ctype)
             WHISPER_DEVICE = f"{device} {ctype}"
-            if device == "cpu":
+            if device == "cpu" and CONFIG.get("whisper_device") != "cpu":
                 log("⚠️  Видеокарта не подхватилась, считаю на процессоре — будет в разы медленнее.")
             return model
         except Exception as e:

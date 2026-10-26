@@ -38,6 +38,17 @@ def gpu():
         return None
 
 
+def gpu_name():
+    """Название видеокарты NVIDIA («NVIDIA GeForce RTX 5080») или None — карты нет или нет драйвера."""
+    try:
+        p = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
+                           text=True, timeout=10, creationflags=_flags())
+        name = p.stdout.strip().splitlines()[0].strip()
+        return name or None
+    except Exception:
+        return None
+
+
 def ram():
     """Память: {"free", "total"} в МБ или None."""
     if os.name != "nt":

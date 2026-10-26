@@ -62,7 +62,7 @@ DEFAULTS = {
     "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
     "nick_opacity": autoclip.CONFIG["nick_opacity"],
     "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
-    "nick_text": "Final_KFC_Boss", "hashtags": "", "obs_dir": "", "recent": [],
+    "nick_text": "", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
     "views_days": 3, "check_updates": True, "skip_version": "", "seen_version": "",
@@ -72,6 +72,7 @@ DEFAULTS = {
     "censor": "partial", "clip_length": "normal", "bleep_pool": [],
     "backup_remind": True, "backup_since": "", "backup_told": "",
     "clips_dir": autoclip.CONFIG["clips_dir"], "cache_days": 30,
+    "whisper_device": "auto", "whisper_model": autoclip.CONFIG["whisper_model"], "setup_done": False,
 }
 
 TRI_NAMES = {"Авто": "auto", "Вкл": "on", "Выкл": "off"}
@@ -1496,6 +1497,9 @@ class CutPage(QWidget):
         c["preset"] = s["preset"]
         c["llm"] = s["llm"]
         c["ollama_model"] = s["ollama_model"] or DEFAULTS["ollama_model"]
+        c["whisper_device"] = "cpu" if s.get("whisper_device") == "cpu" else "auto"
+        if s.get("whisper_model") in ("large-v3", "medium", "small"):
+            c["whisper_model"] = s["whisper_model"]
 
     def start_or_stop(self):
         if self.win.busy:
@@ -4793,6 +4797,10 @@ class SettingsPage(QWidget):
         v.addWidget(option_row("Напоминать раз в месяц", self.cb_backup_remind,
                                "Тихо, в трее или в Telegram: «Давно не сохранял копию настроек»"))
         self.show_backup_state()
+        b = QPushButton("Мастер первого запуска…")
+        b.setToolTip("Ник, папки записей и клипов, видеокарта — по шагам, как при первом запуске")
+        b.clicked.connect(self.win.show_setup)
+        v.addWidget(b, 0, Qt.AlignLeft)
         lay.addWidget(box)
 
         box, v = card("Состояние системы", "Всё, от чего зависит нарезка: ffmpeg, видеокарта, Whisper, "
@@ -5179,22 +5187,22 @@ class SettingsPage(QWidget):
                                               os.path.join(os.path.expanduser("~"), "Documents"),
                                               "Копия AutoClip (*.zip)")
         if not path:
-            return
+            return False
         try:
             m = backup.read_manifest(path)
         except autoclip.AutoClipError as e:
             QMessageBox.warning(self, "AutoClip", str(e))
-            return
+            return False
         when = str(m.get("date", ""))[:16].replace("T", " ")
         if ask_choice(self, f"Восстановить копию от {when} (версия {m.get('version', '?')})? Нынешние "
                             "настройки и данные уйдут в корзину Windows, AutoClip перезапустится.",
                       [("yes", "Восстановить"), ("no", "Отмена")]) != "yes":
-            return
+            return False
         try:
             res = backup.restore_backup(path)
         except (OSError, autoclip.AutoClipError) as e:
             QMessageBox.warning(self, "AutoClip", f"Восстановить не получилось: {e}")
-            return
+            return False
         self.win.settings.clear()
         self.win.settings.update(load_settings())       # при закрытии сохранятся уже восстановленные
         self.s = self.win.settings
@@ -5203,6 +5211,7 @@ class SettingsPage(QWidget):
         if getattr(self.win, "standalone", False):
             update.restart(False)
             self.win.quit_app()
+        return True
 
     def set_autostart(self, on):
         import autostart
@@ -5499,6 +5508,149 @@ class NewRecordingDialog(QDialog):
         lay.addLayout(row)
 
 
+def default_clips_dir():
+    """Куда класть клипы на новом компьютере: D:\\Клипы, если есть диск D, иначе «Видео\\AutoClip клипы»."""
+    if os.name == "nt" and os.path.isdir("D:\\"):
+        return r"D:\Клипы"
+    return os.path.join(os.path.expanduser("~"), "Videos", "AutoClip клипы")
+
+
+class SetupDialog(QDialog):
+    """Мастер первого запуска (P4): ник, папки записей и клипов, видеокарта, восстановить из копии.
+    Одно окно, всё видно сразу; «Пропустить» — оставить как есть."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        import health
+        self.win = win
+        s = win.settings
+        self.setWindowTitle("AutoClip — первый запуск")
+        self.setMinimumWidth(620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 18)
+        lay.setSpacing(8)
+        t = QLabel("Настроим AutoClip")
+        t.setObjectName("cardTitle")
+        lay.addWidget(t)
+        lay.addWidget(hint("Четыре шага. Всё можно поменять потом в «Настройках»."))
+
+        row = QHBoxLayout()
+        self.btn_restore = QPushButton("Восстановить из копии…")
+        self.btn_restore.setToolTip("Есть файл копии со старого компьютера — вернуть все настройки из него")
+        self.btn_restore.clicked.connect(self.restore)
+        row.addWidget(self.btn_restore)
+        row.addWidget(hint("если переносишь AutoClip со старого компьютера"), 1)
+        lay.addLayout(row)
+        lay.addWidget(separator())
+
+        lay.addWidget(self._title("1. Ник"))
+        self.nick = QLineEdit(s.get("nick_text", ""))
+        self.nick.setPlaceholderText("твой ник — пишется в углу клипа, если включить «Ник в углу»")
+        lay.addWidget(self.nick)
+
+        lay.addWidget(self._title("2. Папка записей OBS"))
+        obs = s.get("obs_dir") or autoclip.find_obs_record_dir() or ""
+        self.obs = QLineEdit(obs)
+        self.obs.setPlaceholderText("где OBS сохраняет записи")
+        lay.addLayout(self._pick_row(self.obs, "Папка записей OBS"))
+        if obs and not s.get("obs_dir"):
+            lay.addWidget(hint("Нашёл в настройках OBS."))
+
+        lay.addWidget(self._title("3. Папка для клипов"))
+        clips = s.get("clips_dir") or ""
+        if not clips or not os.path.isdir(os.path.splitdrive(clips)[0] + os.sep):
+            clips = default_clips_dir()
+        self.clips = QLineEdit(clips)
+        lay.addLayout(self._pick_row(self.clips, "Папка для клипов"))
+
+        lay.addWidget(self._title("4. Видеокарта"))
+        self.gpu = health.gpu_name()
+        self.dev = QComboBox()
+        self.dev.addItem("Видеокарта — быстро", "auto")
+        self.dev.addItem("Процессор — медленно, но работает везде", "cpu")
+        if self.gpu:
+            note = f"Нашёл {self.gpu}. Расшифровка речи пойдёт на ней."
+        else:
+            note = ("Видеокарту NVIDIA не нашёл — расшифровка пойдёт на процессоре, модель поменьше "
+                    "(medium): медленнее и чуть хуже, но работает.")
+        self.dev.setCurrentIndex(0 if self.gpu else 1)
+        if s.get("setup_done"):
+            self.dev.setCurrentIndex(1 if s.get("whisper_device") == "cpu" else 0)
+        lay.addWidget(self.dev)
+        self.gpu_note = hint(note)
+        lay.addWidget(self.gpu_note)
+
+        lay.addSpacing(6)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        skip = QPushButton("Пропустить")
+        skip.clicked.connect(self.skip)
+        ok = QPushButton("Готово")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.done_ok)
+        row.addWidget(skip)
+        row.addWidget(ok)
+        lay.addLayout(row)
+
+    def _title(self, text):
+        t = QLabel(text)
+        t.setObjectName("rowLabel")
+        return t
+
+    def _pick_row(self, edit, caption):
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        b = QPushButton("Выбрать…")
+        b.clicked.connect(lambda: self._pick(edit, caption))
+        row.addWidget(b)
+        return row
+
+    def _pick(self, edit, caption):
+        d = QFileDialog.getExistingDirectory(self, caption, edit.text())
+        if d:
+            edit.setText(os.path.normpath(d))
+
+    def restore(self):
+        if self.win.settings_page.restore_backup():   # восстановили — там свои настройки
+            self.accept()
+
+    def skip(self):
+        self.win.settings["setup_done"] = True
+        save_settings(self.win.settings)
+        self.reject()
+
+    def done_ok(self):
+        s = self.win.settings
+        s["nick_text"] = self.nick.text().strip()
+        s["obs_dir"] = os.path.normpath(self.obs.text().strip()) if self.obs.text().strip() else ""
+        clips = self.clips.text().strip()
+        if clips:
+            clips = os.path.normpath(clips)
+            try:
+                os.makedirs(clips, exist_ok=True)
+            except OSError as e:
+                QMessageBox.warning(self, "AutoClip", f"Не получилось создать папку для клипов: {e}")
+                return
+        s["clips_dir"] = clips
+        cpu = self.dev.currentData() == "cpu"
+        s["whisper_device"] = "cpu" if cpu else "auto"
+        s["whisper_model"] = "medium" if cpu else "large-v3"
+        s["setup_done"] = True
+        save_settings(s)
+        st = self.win.settings_page
+        for w, val in ((st.nick, s["nick_text"]), (st.obs, s["obs_dir"]), (st.clips_dir, s["clips_dir"])):
+            w.blockSignals(True)
+            w.setText(val)
+            w.blockSignals(False)
+        self.accept()
+
+
+def need_setup(settings, settings_existed):
+    """Мастер — только на новом компьютере: файла настроек ещё не было и мастер не проходили."""
+    return not settings_existed and not settings.get("setup_done")
+
+
 # ---------------- главное окно ----------------
 
 
@@ -5695,6 +5847,11 @@ class MainWindow(QMainWindow):
         dlg.show()
 
     # --- отчёт об ошибке ---
+    def show_setup(self):
+        dlg = SetupDialog(self)
+        dlg.exec()
+        return dlg
+
     def make_report(self):
         st = self.settings_page
         if not st.report_btn.isEnabled():
@@ -6296,6 +6453,7 @@ def install_error_hook(win):
 
 def main():
     autoclip.migrate_user_data()
+    settings_existed = os.path.isfile(autoclip.SETTINGS_PATH)
     try:
         import autostart
         autostart.refresh()                     # автозапуск включён — команда на эту папку программы
@@ -6328,7 +6486,9 @@ def main():
     instance = InstanceServer(lambda m: win.show_window() if "show" in m else None)
     app.aboutToQuit.connect(instance.close)
     install_error_hook(win)
-    start_window(win, sys.argv)
+    shown = start_window(win, sys.argv)
+    if shown and need_setup(win.settings, settings_existed):
+        QTimer.singleShot(400, win.show_setup)       # новый компьютер — мастер первого запуска (P4)
     videos = [a for a in sys.argv[1:] if a.lower().endswith(VIDEO_EXT) and os.path.isfile(a)]
     if videos:
         win.cut.set_files(videos)
