@@ -87,3 +87,13 @@ def test_cpu_only_skips_cuda(monkeypatch):
     monkeypatch.setitem(autoclip.CONFIG, "whisper_device", "cpu")
     autoclip._load_whisper()
     assert tried == ["cpu"]
+
+
+def test_download_note_only_when_model_missing(tmp_path, monkeypatch):
+    """«Первый раз скачается ~3 ГБ» — только если модели ещё нет на диске."""
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    assert not autoclip.whisper_cached("large-v3")
+    snap = tmp_path / "models--Systran--faster-whisper-large-v3" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "model.bin").write_bytes(b"x")
+    assert autoclip.whisper_cached("large-v3") and not autoclip.whisper_cached("medium")

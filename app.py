@@ -231,6 +231,12 @@ QPushButton:checked {{ background: {theme.ACCENT_DEEP}; border-color: {ACCENT}; 
           border-left: 3px solid {ACCENT}; border-radius: 12px; padding: 12px 18px; }}
 #scissors {{ background: transparent; }}
 #plane {{ color: #7ec8ff; font-size: 17px; background: transparent; }}
+#feedBody {{ background: transparent; }}
+#feedRow {{ background: transparent; border-radius: 12px; border-left: 3px solid transparent; }}
+#feedRow:hover {{ background: #1a1b22; }}
+#feedRow[fresh="true"] {{ background: #22161c; border-left: 3px solid {ACCENT}; }}
+#feedText {{ color: {FG}; font-size: 13px; }}
+#feedTime {{ color: {theme.DIM}; font-size: 11px; padding-top: 2px; }}
 #pill {{ border-radius: 9px; padding: 2px 9px; font-size: 11px; font-weight: 600; }}
 #playerBox {{ background: #08090b; border: 1px solid {BORDER}; border-radius: 16px; }}
 QMenu {{ background: {SURFACE2}; border: 1px solid {theme.BORDER_HI}; border-radius: 10px; padding: 6px; }}
@@ -549,7 +555,7 @@ class TelegramLink:
                     self.bus.tg_action.emit(kind, arg)
                 except RuntimeError:
                     return
-            if bot._offline_logged:
+            if bot._offline_since is not None:
                 self.stop.wait(10)                   # нет связи — не долбим Telegram
 
 
@@ -745,6 +751,150 @@ class GlowButton(QObject):
 def glow_button(button, radius=22, alpha=90):
     button._glow = GlowButton(button, radius, alpha)
     return button
+
+
+class CenterNotice(QWidget):
+    """Крупное сообщение по центру окна (2.3.1): «Отправляю в Telegram…» с крутящимся кольцом,
+    «Отправлено» — самолётик улетает, на его месте галочка; «Не отправилось» — красным. Само гаснет."""
+    COLORS = {"busy": "#2aabee", "ok": "#2aabee", "error": "#ff6b84"}
+
+    def __init__(self, parent):
+        # своё прозрачное окошко поверх окна программы: видео в окне — отдельное «окно» и закрыло бы
+        # обычный виджет; фокус не забирает, мышь пропускает
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.resize(440, 200)
+        self.kind, self.title, self.sub = "ok", "", ""
+        self.t = 1.0                     # 0..1 — самолётик улетает
+        self.spin = 0.0
+        self.hide()
+        self.fly = QVariantAnimation(self)
+        self.fly.setDuration(900)
+        self.fly.setStartValue(0.0)
+        self.fly.setEndValue(1.0)
+        self.fly.valueChanged.connect(self._set_t)
+        self.fade = QVariantAnimation(self)
+        self.fade.setDuration(220)
+        self.fade.valueChanged.connect(lambda v: self.setWindowOpacity(float(v)))
+        self.fade.finished.connect(self._faded)
+        self.spinner = QTimer(self)
+        self.spinner.setInterval(30)
+        self.spinner.timeout.connect(self._spin)
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.dismiss)
+
+    def _set_t(self, v):
+        self.t = float(v)
+        self.update()
+
+    def _spin(self):
+        self.spin = (self.spin + 9) % 360
+        self.update()
+
+    def show_notice(self, kind, title, sub="", ms=2600):
+        was = self.isVisible() and self.windowOpacity() > 0.5
+        self.kind, self.title, self.sub = kind, title, sub
+        p = self.parent()
+        c = p.mapToGlobal(p.rect().center())
+        self.move(c.x() - self.width() // 2, c.y() - self.height() // 2)
+        self.show()
+        self.raise_()
+        anim = animations_ok(self)
+        self.fade.stop()
+        if anim and not was:
+            self.fade.setStartValue(0.0)
+            self.fade.setEndValue(1.0)
+            self.fade.start()
+        else:
+            self.setWindowOpacity(1.0)
+        if kind == "busy":
+            self.t = 0.0
+            if anim:
+                self.spinner.start()
+        else:
+            self.spinner.stop()
+            if kind == "ok" and anim:
+                self.fly.stop()
+                self.fly.start()
+            else:
+                self.t = 1.0
+        self.hide_timer.start(ms if kind != "busy" else 120000)
+        self.update()
+
+    def dismiss(self):
+        self.spinner.stop()
+        if not self.isVisible():
+            return
+        if animations_ok(self):
+            self.fade.stop()
+            self.fade.setStartValue(self.windowOpacity())
+            self.fade.setEndValue(0.0)
+            self.fade.start()
+        else:
+            self.hide()
+
+    def _faded(self):
+        if self.windowOpacity() < 0.05:
+            self.hide()
+
+    def paintEvent(self, e):
+        from PySide6.QtGui import QFontMetrics
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(10, 10, -10, -10)
+        for k in range(10, 0, -2):                     # мягкая тень
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 14))
+            p.drawRoundedRect(r.adjusted(-k, -k + 6, k, k + 6), 22 + k, 22 + k)
+        p.setBrush(QColor("#1b1c23"))
+        p.setPen(QPen(QColor("#33364a"), 1))
+        p.drawRoundedRect(r, 22, 22)
+        color = QColor(self.COLORS.get(self.kind, ACCENT))
+        cx, cy, rad = r.center().x(), r.top() + 54, 30
+        glow = QColor(color)
+        glow.setAlpha(40)
+        p.setPen(Qt.NoPen)
+        p.setBrush(glow)
+        p.drawEllipse(QPointF(cx, cy), rad + 8, rad + 8)
+        p.setBrush(QColor(color.red(), color.green(), color.blue(), 70))
+        p.drawEllipse(QPointF(cx, cy), rad, rad)
+        if self.kind == "busy":                        # крутится кольцо
+            pen = QPen(color, 3)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawArc(QRectF(cx - rad - 8, cy - rad - 8, 2 * rad + 16, 2 * rad + 16),
+                      int(-self.spin * 16), 100 * 16)
+        if self.kind == "error":
+            p.drawPixmap(int(cx - 14), int(cy - 14), theme.pixmap("x", "#ffffff", 28))
+        else:
+            fly = self.t if self.kind == "ok" else 0.0
+            if fly < 1.0:                              # самолётик улетает вверх-вправо и тает
+                p.setOpacity(1.0 - fly)
+                p.drawPixmap(int(cx - 13 + 70 * fly), int(cy - 13 - 46 * fly), theme.pixmap("send", "#ffffff", 26))
+                p.setOpacity(1.0)
+            if self.kind == "ok" and fly > 0.45:      # на его месте — галочка
+                p.setOpacity(min(1.0, (fly - 0.45) / 0.4))
+                p.drawPixmap(int(cx - 14), int(cy - 14), theme.pixmap("check", "#ffffff", 28))
+                p.setOpacity(1.0)
+        f = QFont(theme.FAMILY or "Segoe UI")
+        f.setPixelSize(18)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(QRectF(r.left() + 16, cy + rad + 14, r.width() - 32, 26), Qt.AlignCenter, self.title)
+        if self.sub:
+            f2 = QFont(f)
+            f2.setPixelSize(13)
+            f2.setWeight(QFont.Normal)
+            p.setFont(f2)
+            p.setPen(QColor(MUTED))
+            sub = QFontMetrics(f2).elidedText(self.sub, Qt.ElideMiddle, int(r.width() - 40))
+            p.drawText(QRectF(r.left() + 16, cy + rad + 42, r.width() - 32, 20), Qt.AlignCenter, sub)
+        p.end()
 
 
 class Toast(QLabel):
@@ -1449,6 +1599,255 @@ class DropZone(QFrame):
                 self.files.emit(paths)
 
 
+class StageBar(QWidget):
+    """Полоса нарезки (2.3.1): внутри — текущий этап («Расшифровка») и его процент от 0 до 100,
+    сбоку — «этап 2 из 5». По заполненной части бежит блик, пока идёт работа."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(52)
+        self.setMinimumWidth(320)
+        self.name, self.pct, self.index, self.count = "", 0.0, 0, len(autoclip.STAGES)
+        self.state = "idle"                       # idle / busy / done
+        self.text = "Готов к нарезке"
+        self.shine = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+
+    def set_stage(self, name, pct, index, count):
+        self.name, self.pct, self.index, self.count = name, max(0.0, min(100.0, float(pct))), index, count
+        self.state = "busy"
+        if not self._timer.isActive():
+            self._timer.start()
+        self.update()
+
+    def set_idle(self, text="Готов к нарезке"):
+        self.state, self.text, self.pct = "idle", text, 0.0
+        self._timer.stop()
+        self.update()
+
+    def set_done(self, text="Готово"):
+        self.state, self.text, self.pct = "done", text, 100.0
+        self._timer.stop()
+        self.update()
+
+    def fraction(self):
+        return self.pct / 100.0
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._timer.stop()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.state == "busy":
+            self._timer.start()
+
+    def _tick(self):
+        if not animations_ok(self):
+            return
+        self.shine = (self.shine + 0.012) % 1.0
+        self.update()
+
+    def paintEvent(self, e):
+        from PySide6.QtGui import QLinearGradient, QFontMetrics
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.setBrush(QColor("#111217"))
+        p.drawRoundedRect(r, 14, 14)
+        if self.pct > 0:
+            fw = max(28.0, r.width() * self.pct / 100)
+            fill = QRectF(r.left(), r.top(), fw, r.height())
+            g = QLinearGradient(fill.left(), 0, fill.right(), 0)
+            if self.state == "done":
+                g.setColorAt(0, QColor("#1f7a4a"))
+                g.setColorAt(1, QColor("#36c47a"))
+            else:
+                g.setColorAt(0, QColor("#a8223c"))
+                g.setColorAt(1, QColor("#ff6680"))
+            p.setPen(Qt.NoPen)
+            p.setBrush(g)
+            p.drawRoundedRect(fill, 14, 14)
+            if self.state == "busy":                   # блик бежит по заполненной части
+                x = fill.left() + (fill.width() + 120) * self.shine - 60
+                sh = QLinearGradient(x - 60, 0, x + 60, 0)
+                sh.setColorAt(0, QColor(255, 255, 255, 0))
+                sh.setColorAt(0.5, QColor(255, 255, 255, 46))
+                sh.setColorAt(1, QColor(255, 255, 255, 0))
+                p.save()
+                p.setClipPath(_rounded(fill, 14))
+                p.fillRect(fill, sh)
+                p.restore()
+        f = QFont(theme.FAMILY or "Segoe UI")
+        f.setPixelSize(15)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        tr = r.adjusted(18, 0, -18, 0)
+        if self.state == "busy":
+            p.drawText(tr, Qt.AlignVCenter | Qt.AlignLeft, self.name)
+            p.drawText(tr, Qt.AlignVCenter | Qt.AlignRight, f"{self.pct:.0f}%")
+            nw = QFontMetrics(f).horizontalAdvance(self.name)
+            f2 = QFont(f)
+            f2.setPixelSize(12)
+            f2.setWeight(QFont.Medium)
+            p.setFont(f2)
+            p.setPen(QColor(255, 255, 255, 170))
+            p.drawText(tr.adjusted(nw + 12, 1, 0, 0), Qt.AlignVCenter | Qt.AlignLeft,
+                       f"этап {self.index + 1} из {self.count}")
+        else:
+            p.setPen(QColor("#ffffff" if self.state == "done" else MUTED))
+            p.drawText(tr, Qt.AlignCenter, self.text)
+        p.end()
+
+
+FEED_KINDS = (       # значок строки лога → (значок Lucide, цвет)
+    ("✅", "circle-check", "#5fd38d"), ("⚠️", "circle-alert", "#f5c451"), ("❌", "circle-x", "#ff6b84"),
+    ("⛔", "circle-x", "#ff6b84"), ("🎬", "clapperboard", ACCENT), ("🔊", "volume-2", "#6aa8ff"),
+    ("🧠", "cpu", "#b48cff"), ("📝", "captions", "#6aa8ff"), ("🤖", "bot", "#b48cff"),
+    ("✂️", "scissors", ACCENT), ("📍", "flag", ACCENT), ("📁", "folder", "#8b8f9a"), ("🎙", "mic", "#6aa8ff"),
+    ("⚙️", "settings", "#8b8f9a"), ("ℹ️", "info", "#6aa8ff"), ("🔁", "refresh-cw", "#6aa8ff"),
+    ("➕", "plus", "#5fd38d"), ("😕", "circle-alert", "#f5c451"), ("🎞", "film", ACCENT),
+)
+
+
+def feed_item(line):
+    """Строка лога → (значок, цвет, текст) для ленты — или None, если строка служебная."""
+    line = str(line).rstrip()
+    if not line or line[0].isspace() or line.startswith("Traceback"):
+        return None
+    first = line.split("\n", 1)[0]
+    for mark, ic, color in FEED_KINDS:
+        if first.startswith(mark):
+            text = first[len(mark):].lstrip("\ufe0f ").strip()
+            for m, _, _ in FEED_KINDS:                 # значки внутри текста — лишние, цвет и так есть
+                text = text.replace(m + " ", "").replace(m, "")
+            text = " ".join(text.split())
+            return (ic, color, text) if text else None
+    return None
+
+
+class ActivityFeed(QFrame):
+    """Лента «Что происходит» (2.3.1): только важное — со значками, временем и плавным появлением.
+    Весь лог — по кнопке «Весь лог»."""
+    MAX = 60
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("card")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 14)
+        lay.setSpacing(10)
+        self.head = QHBoxLayout()
+        self.head.setSpacing(12)
+        self.head.addWidget(icon_label("activity"))
+        t = QLabel("Что происходит")
+        t.setObjectName("cardTitle")
+        self.head.addWidget(t)
+        self.head.addStretch(1)
+        lay.addLayout(self.head)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("feedBody")
+        self.rows = QVBoxLayout(body)
+        self.rows.setContentsMargins(0, 0, 6, 0)
+        self.rows.setSpacing(2)
+        self.empty = QLabel("Здесь появится ход нарезки: что программа сделала и что нашла.")
+        self.empty.setObjectName("hint")
+        self.empty.setAlignment(Qt.AlignCenter)
+        self.rows.addWidget(self.empty)
+        self.rows.addStretch(1)
+        self.scroll.setWidget(body)
+        lay.addWidget(self.scroll, 1)
+        self.items = []
+        # новые строки — внизу; лента сама держится у последней, пока её не прокрутили вверх
+        self.scroll.verticalScrollBar().rangeChanged.connect(self._stick)
+
+    def add(self, line):
+        """Добавить строку, если она важная. → True, если добавлена."""
+        got = feed_item(line)
+        if not got:
+            return False
+        ic, color, text = got
+        self.empty.hide()
+        row = QFrame()
+        row.setObjectName("feedRow")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 8, 10, 8)
+        h.setSpacing(12)
+        dot = QLabel()
+        dot.setObjectName("feedDot")
+        dot.setFixedSize(30, 30)
+        dot.setAlignment(Qt.AlignCenter)
+        c = QColor(color)
+        dot.setStyleSheet(f"background: rgba({c.red()},{c.green()},{c.blue()},38); border-radius: 15px;")
+        dot.setPixmap(theme.pixmap(ic, color, 16))
+        h.addWidget(dot, 0, Qt.AlignTop)
+        lb = QLabel(text)
+        lb.setObjectName("feedText")
+        lb.setWordWrap(True)
+        lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        h.addWidget(lb, 1)
+        tm = QLabel(time.strftime("%H:%M"))
+        tm.setObjectName("feedTime")
+        h.addWidget(tm, 0, Qt.AlignTop)
+        self.rows.insertWidget(self.rows.count() - 1, row)
+        self.items.append(row)
+        while len(self.items) > self.MAX:
+            old = self.items.pop(0)
+            old.setParent(None)
+            old.deleteLater()
+        self._appear(row)
+        return True
+
+    def _stick(self, _lo, hi):
+        sb = self.scroll.verticalScrollBar()
+        if not sb.isSliderDown():
+            sb.setValue(hi)
+
+    def _appear(self, row):
+        """Новая строка плавно проявляется и выезжает снизу, красная подсветка гаснет (≈250 мс)."""
+        row.setProperty("fresh", True)
+        row.style().unpolish(row)
+        row.style().polish(row)
+
+        def calm():
+            try:
+                row.setProperty("fresh", False)
+                row.style().unpolish(row)
+                row.style().polish(row)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(1600, calm)
+        if not animations_ok(self):
+            return
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        h = row.sizeHint().height()
+        row.setMaximumHeight(0)
+        a = QPropertyAnimation(row, b"maximumHeight", row)
+        a.setDuration(240)
+        a.setStartValue(0)
+        a.setEndValue(h + 4)
+        a.setEasingCurve(QEasingCurve.OutCubic)
+        a.finished.connect(lambda: row.setMaximumHeight(16777215))
+        a.start()
+        row._anim = a
+        fade_in(row, 240)
+
+    def clear(self):
+        for r in self.items:
+            r.setParent(None)
+            r.deleteLater()
+        self.items = []
+        self.empty.show()
+
+
 # ---------------- раздел «Нарезка» ----------------
 
 class CutPage(QWidget):
@@ -1516,31 +1915,11 @@ class CutPage(QWidget):
         ht.setObjectName("cardTitle")
         head.addWidget(ht)
         head.addStretch(1)
-        steps = QHBoxLayout()
-        steps.setSpacing(6)
-        self.step_labels = []
-        for k, st in enumerate(autoclip.STAGES):       # «Звук → Расшифровка → Модель → Поиск → Рендер» (5.19)
-            if k:
-                arrow = QLabel()
-                arrow.setPixmap(theme.pixmap("chevron-right", theme.DIM, 14))
-                arrow.setObjectName("stepArrow")
-                steps.addWidget(arrow)
-            lb = QLabel(stage_name(st))
-            lb.setObjectName("step")
-            steps.addWidget(lb)
-            self.step_labels.append(lb)
-        steps.addStretch(1)
-        self.total = QLabel("")
+        self.total = QLabel("")                         # «Всего 38% · осталось ~4 мин»
         self.total.setObjectName("stepTotal")
         head.addWidget(self.total)
         pc.addLayout(head)
-        pc.addLayout(steps)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        self.bar.setFixedHeight(24)
-        self.bar.setTextVisible(True)
-        self.bar.setFormat("")
-        self.bar.setAlignment(Qt.AlignCenter)
+        self.bar = StageBar()                           # этап и его 0–100% — прямо в полосе (2.3.1)
         pc.addWidget(self.bar)
         lay.addWidget(self.prog_card)
         self.eta = None
@@ -1558,20 +1937,21 @@ class CutPage(QWidget):
         self.resume_path = None
         lay.addWidget(self.resume_bar)
         from PySide6.QtWidgets import QToolButton
-        self.btn_log = QToolButton()                # лог — свёрнут в «Подробности ▸» (D.1)
+        self.feed = ActivityFeed()                  # только важное, красиво (2.3.1)
+        self.btn_log = QToolButton()                # весь лог — по кнопке
         self.btn_log.setObjectName("more")
-        self.btn_log.setText("Подробности")
+        self.btn_log.setText("Весь лог")
         self.btn_log.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        theme.set_icon(self.btn_log, "chevron-right", MUTED, 14)
+        theme.set_icon(self.btn_log, "list", MUTED, 14)
         self.btn_log.setCheckable(True)
+        self.btn_log.setToolTip("Все строки, как раньше — для разбора ошибок")
         self.btn_log.toggled.connect(self._toggle_log)
-        lay.addWidget(self.btn_log, 0, Qt.AlignLeft)
+        self.feed.head.addWidget(self.btn_log)
+        lay.addWidget(self.feed, 1)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.hide()
         lay.addWidget(self.log, 1)
-        self.log_spacer = QWidget()
-        lay.addWidget(self.log_spacer, 1)
 
         row = QHBoxLayout()
         self.btn_folder = QPushButton("Открыть папку с клипами")
@@ -1718,10 +2098,9 @@ class CutPage(QWidget):
         self._busy_style(True)
         self.btn_folder.setEnabled(False)
         self.btn_clips.setEnabled(False)
-        self.bar.setValue(0)
-        for lb, st in zip(self.step_labels, autoclip.STAGES):
-            self._step_state(lb, stage_name(st), "")
+        self.bar.set_stage(stage_name(autoclip.STAGES[0]), 0, 0, len(autoclip.STAGES))
         self.total.setText("")
+        self.feed.clear()
 
     def _move_scissors(self, frac):
         """Ножницы едут по полосе нарезки вместе с прогрессом (5.20)."""
@@ -1734,9 +2113,9 @@ class CutPage(QWidget):
             self.scissors.hide()
             return
         self.scissors.adjustSize()
-        x = int(self.bar.width() * frac) - self.scissors.width() // 2
+        x = int(self.bar.width() * frac) - self.scissors.width() - 4      # у края заполненной части
         self.scissors.move(max(0, min(self.bar.width() - self.scissors.width(), x)),
-                           (self.bar.height() - self.scissors.height()) // 2)
+                           self.bar.height() - self.scissors.height() - 4)
         self.scissors.show()
 
     def show_unfinished(self):
@@ -1756,8 +2135,10 @@ class CutPage(QWidget):
 
     def _toggle_log(self, on):
         self.log.setVisible(on)
-        self.log_spacer.setVisible(not on)
-        theme.set_icon(self.btn_log, "chevron-down" if on else "chevron-right", MUTED, 14)
+        self.feed.scroll.setVisible(not on)
+        self.feed.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum if on else QSizePolicy.Expanding)
+        if on:
+            fade_in(self.log, 180)
 
     def _busy_style(self, on):
         theme.set_icon(self.btn, "square" if on else "scissors", "#ffb3c0" if on else "#ffffff", 20 if not on else 16)
@@ -1765,34 +2146,26 @@ class CutPage(QWidget):
         self.btn.style().unpolish(self.btn)
         self.btn.style().polish(self.btn)
 
-    def _step_state(self, lb, text, state):
-        lb.setText(text)
-        lb.setProperty("state", state)
-        lb.style().unpolish(lb)
-        lb.style().polish(lb)
-
     def show_progress(self, stage, pct, msg):
         stages = autoclip.STAGES
         if stage not in stages:
             return
         i = stages.index(stage)
         frac = stage_fraction(stage, pct)
-        self.bar.setValue(int(frac * 1000))
-        self._move_scissors(frac)
+        self.bar.set_stage(stage_name(stage), pct, i, len(stages))       # в полосе — этап и его 0–100%
+        self._move_scissors(self.bar.fraction())
         left = self.eta.update(frac) if self.eta else None
-        self.bar.setFormat(f"{frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
         self.total.setText(f"Всего {frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
-        for j, (lb, st) in enumerate(zip(self.step_labels, stages)):
-            if j < i or (j == i and pct >= 100):
-                self._step_state(lb, "✓ " + stage_name(st), "done")
-            elif j == i:
-                self._step_state(lb, f"{stage_name(st)}  {pct:.0f}%", "active")
 
     def finished(self, out):
         self.eta = None
         if getattr(self, "scissors", None) is not None:
             self.scissors.hide()
-        self.bar.setFormat("готово" if out else "")
+        if out:
+            self.bar.set_done("Готово — клипы в папке")
+            self.total.setText("Всего 100%")
+        else:
+            self.bar.set_idle()
         self.btn.setText("Нарезать")
         self.btn.setEnabled(True)
         self._busy_style(False)
@@ -1800,10 +2173,9 @@ class CutPage(QWidget):
             self.last_out = out
             self.btn_folder.setEnabled(True)
             self.btn_clips.setEnabled(True)
-        else:
-            self.bar.setValue(0)
 
     def write(self, msg):
+        self.feed.add(msg)
         self.log.appendPlainText(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -1854,7 +2226,11 @@ class ClipCards(QObject):
         self.preview_timer.setSingleShot(True)
         self.preview_timer.setInterval(450)
         self.preview_timer.timeout.connect(self._start_preview)
-        self.preview = None             # (виджет видео, проигрыватель)
+        self._pp = None                 # проигрыватель превью (создаётся при первом наведении)
+        self._sink = None
+        self.preview_row = -1           # на какой карточке сейчас играет превью
+        self.preview_pm = None          # последний кадр превью
+        self._last_frame = 0.0
         from PySide6.QtWidgets import QStyledItemDelegate
 
         cards = self
@@ -2004,7 +2380,8 @@ class ClipCards(QObject):
         return QRectF(rect.x() + 8, rect.y() + 8, h * 9 / 16, h)
 
     def _start_preview(self):
-        """Превью клипа без звука прямо на обложке."""
+        """Превью клипа без звука прямо на обложке. Кадры рисуются на карточке сами — без второго
+        окна видео (оно гасило основной плеер: серый экран со звуком)."""
         from PySide6.QtGui import QGuiApplication
         row = self.hover_row
         if row < 0 or not animations_ok(self.view) or QGuiApplication.platformName() == "offscreen":
@@ -2013,28 +2390,47 @@ class ClipCards(QObject):
         path = it.data(CLIP_PATH) if it else None
         if not path or not os.path.isfile(path):
             return
-        rect = self.view.visualItemRect(it)
-        cr = self._cover_rect(rect).toRect().adjusted(0, -3, 0, -3)
-        video = QVideoWidget(self.view.viewport())
-        video.setAttribute(Qt.WA_TransparentForMouseEvents)
-        video.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
-        video.setGeometry(cr)
-        player = QMediaPlayer(video)
-        player.setVideoOutput(video)
-        player.setLoops(QMediaPlayer.Infinite)
-        player.setSource(QUrl.fromLocalFile(path))     # без QAudioOutput — звука нет
-        video.show()
-        player.play()
-        self.preview = (video, player)
+        if self._pp is None:                          # один проигрыватель на весь список
+            from PySide6.QtMultimedia import QVideoSink
+            self._pp = QMediaPlayer(self)             # без QAudioOutput — звука нет
+            self._sink = QVideoSink(self)
+            self._pp.setVideoSink(self._sink)
+            self._pp.setLoops(QMediaPlayer.Infinite)
+            self._sink.videoFrameChanged.connect(self._frame)
+        self.preview_row = row
+        self.preview_pm = None
+        self._last_frame = 0.0
+        self._pp.setSource(QUrl.fromLocalFile(path))
+        self._pp.play()
+
+    def _frame(self, frame):
+        import time as _time
+        if self.preview_row < 0:
+            return
+        now = _time.monotonic()
+        if now - self._last_frame < 1 / 20:            # 20 кадров в секунду — хватает и не грузит
+            return
+        self._last_frame = now
+        img = frame.toImage()
+        if img.isNull():
+            return
+        self.preview_pm = QPixmap.fromImage(img.scaledToHeight(self.GRID_COVER * 2, Qt.FastTransformation))
+        it = self.view.item(self.preview_row)
+        if it is not None:
+            self.view.viewport().update(self.view.visualItemRect(it))
 
     def stop_preview(self):
         self.preview_timer.stop()
-        if self.preview:
-            video, player = self.preview
-            self.preview = None
-            player.stop()
-            video.hide()
-            video.deleteLater()
+        if self.preview_row >= 0:
+            row = self.preview_row
+            self.preview_row = -1
+            self.preview_pm = None
+            if self._pp is not None:
+                self._pp.stop()
+                self._pp.setSource(QUrl())
+            it = self.view.item(row)
+            if it is not None:
+                self.view.viewport().update(self.view.visualItemRect(it))
 
     # --- рисование ---
     def paint(self, p, opt, index):
@@ -2062,6 +2458,8 @@ class ClipCards(QObject):
         cand = d["kind"] != "clip"
         cr = self._cover_rect(rect.toRect())
         pm = None if cand else self.cover(d.get("cover"))
+        if index.row() == self.preview_row and self.preview_pm is not None:
+            pm = self.preview_pm                       # превью при наведении — кадр клипа
         p.save()
         p.setClipPath(_rounded(cr, 10))
         if pm:
@@ -2920,28 +3318,20 @@ class ClipsPage(QWidget):
         self.refresh_recent()
 
     def _send_state(self, text):
+        """Ход отправки в Telegram — крупно по центру окна (2.3.1), строкой — у кнопок."""
         self.state.setText(text)
+        text = str(text).replace(" ✓", "")
         if text.startswith("Отправлено в Telegram"):
-            self.fly_plane()
-
-    def fly_plane(self):
-        """Самолётик улетает, когда клип ушёл в Telegram (5.20)."""
-        if not animations_ok(self):
-            return
-        from PySide6.QtCore import QPoint, QPropertyAnimation
-        plane = QLabel("✈", self.editor)
-        plane.setObjectName("plane")
-        plane.adjustSize()
-        y = max(0, self.editor.height() - 60)
-        plane.move(10, y)
-        plane.show()
-        anim = QPropertyAnimation(plane, b"pos", plane)
-        anim.setDuration(900)
-        anim.setStartValue(QPoint(10, y))
-        anim.setEndValue(QPoint(self.editor.width() - 30, max(0, y - 40)))
-        anim.finished.connect(plane.deleteLater)
-        anim.start()
-        plane._anim = anim
+            c = self.current_clip()
+            extra = text[len("Отправлено в Telegram"):].strip(" :")
+            sub = extra or (c["title"] if c else "")
+            self.win.notice("ok", "Отправлено в Telegram", sub)
+        elif "не отправил" in text.lower():
+            reason = text.split(":", 1)[1].strip() if ":" in text else text
+            self.win.notice("error", "Не отправилось", reason, 5000)
+        elif text.startswith("Telegram"):
+            what = text.split(":", 1)[1].strip() if ":" in text else ""
+            self.win.notice("busy", "Отправляю в Telegram", what)
 
     # ---------- нарезки ----------
     def refresh_recent(self):
@@ -6850,7 +7240,8 @@ class MainWindow(QMainWindow):
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
-        fade_in(self.stack.currentWidget())               # плавный переход раздела
+        if self.PAGES[i][0] != "clips":                   # у «Клипов» — видео: оно не проявляется плавно
+            fade_in(self.stack.currentWidget())           # плавный переход раздела
         if self.PAGES[i][0] == "weekly":
             self.weekly.refresh()
         if self.PAGES[i][0] != "clips" and not self.detached:
@@ -6863,6 +7254,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_toast", None) is None:
             self._toast = Toast(self)
         self._toast.show_text(text, ms)
+
+    def notice(self, kind, title, sub="", ms=2600):
+        """Крупное сообщение по центру окна: busy / ok / error."""
+        if getattr(self, "_notice", None) is None:
+            self._notice = CenterNotice(self)
+        self._notice.show_notice(kind, title, sub, ms)
 
     def resume_cut(self, pp):
         if self.busy or not pp:
@@ -7036,8 +7433,10 @@ ICON = os.path.join(HERE, "icon", "autoclip.ico")
 INSTANCE = "FinalKFCBoss.AutoClip"     # имя «канала» единственной копии программы
 
 
-def ping_running(name=INSTANCE, message=b"show", wait_ms=800):
-    """Уже запущена копия? Тогда передать ей message («показать окно») и вернуть True."""
+def ping_running(name=INSTANCE, message=b"show", wait_ms=800, ack_ms=3000):
+    """Уже запущена копия? Тогда передать ей message («показать окно») и вернуть True.
+    Отключаемся, только когда первая копия ответила «ok»: иначе Windows теряет сообщение, если первая
+    не успела принять соединение (окно не всплывало). Старая копия не отвечает — ждём ack_ms и уходим."""
     from PySide6.QtNetwork import QLocalSocket
     sock = QLocalSocket()
     sock.connectToServer(name)
@@ -7046,6 +7445,8 @@ def ping_running(name=INSTANCE, message=b"show", wait_ms=800):
     sock.write(message)
     sock.flush()
     sock.waitForBytesWritten(wait_ms)
+    if message:
+        sock.waitForReadyRead(ack_ms)
     sock.disconnectFromServer()
     return True
 
@@ -7072,8 +7473,24 @@ class InstanceServer:
     def _new(self):
         while self.server.hasPendingConnections():
             c = self.server.nextPendingConnection()
-            c.readyRead.connect(lambda c=c: self.on_message(bytes(c.readAll()).decode("utf-8", "replace")))
-            c.disconnected.connect(c.deleteLater)
+            # вторая копия пишет «show» и сразу отключается: под нагрузкой данные приходят раньше, чем
+            # мы подписались на readyRead, — дочитываем и сразу, и при отключении (иначе окно не всплывёт)
+            c.readyRead.connect(lambda c=c: self._read(c))
+            c.disconnected.connect(lambda c=c: (self._read(c), c.deleteLater()))
+            self._read(c)
+
+    def _read(self, c):
+        try:
+            data = bytes(c.readAll()).decode("utf-8", "replace")
+        except RuntimeError:                         # сокет уже удалён
+            return
+        if data:
+            try:
+                c.write(b"ok")                           # вторая копия ждёт ответа, прежде чем уйти
+                c.flush()
+            except RuntimeError:
+                pass
+            self.on_message(data)
 
     def close(self):
         self.server.close()

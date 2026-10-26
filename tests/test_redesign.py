@@ -114,3 +114,62 @@ def test_dash_timer_only_while_visible(A):
     win.close()
     pump(50)
     assert not drop._dash_timer.isActive()
+
+
+def test_feed_shows_only_important(A):
+    """«Что происходит»: важные строки со значками, служебные (с отступом, трассировки) — только в «Весь лог»."""
+    assert A.feed_item("✅ Готово за 3.1 мин → D:\Клипы")[0] == "circle-check"
+    assert A.feed_item("⚠️  Telegram: ❌ Нет связи с Telegram. Работаю без него.")[2].startswith("Telegram")
+    assert A.feed_item("   [3/10] 03_клип.mp4") is None
+    assert A.feed_item("Выбери запись и нажми «Нарезать».") is None
+    assert A.feed_item("❌ Неожиданная ошибка:\nTraceback ...")[2] == "Неожиданная ошибка:"
+    win = A.MainWindow()
+    cut = win.cut
+    assert cut.feed.isVisibleTo(win) and not cut.log.isVisibleTo(win)     # лента на виду, лог — по кнопке
+    cut.write("🔊 Достаю звук...")
+    cut.write("   служебная строка")
+    assert len(cut.feed.items) == 1 and "служебная" in cut.log.toPlainText()
+    cut.btn_log.setChecked(True)
+    assert cut.log.isVisibleTo(win)
+    win.close()
+
+
+def test_hover_preview_paints_frames(A):
+    """Превью при наведении — кадры рисуются на карточке, без второго окна видео."""
+    from PySide6.QtGui import QImage, QColor
+    win = A.MainWindow()
+    cards = win.clips.cards
+    win.clips.list.addItem("x")
+    cards.preview_row = 0
+
+    class Frame:
+        def toImage(self):
+            img = QImage(108, 192, QImage.Format_RGB32)
+            img.fill(QColor("red"))
+            return img
+    cards._frame(Frame())
+    assert cards.preview_pm is not None and cards.preview_pm.height() == cards.GRID_COVER * 2
+    cards.stop_preview()
+    assert cards.preview_row == -1 and cards.preview_pm is None
+    from PySide6.QtMultimediaWidgets import QVideoWidget
+    assert not win.clips.list.viewport().findChildren(QVideoWidget)
+    win.close()
+
+
+def test_telegram_send_shows_center_notice(A):
+    """Отправка в Telegram — крупно по центру: «Отправляю…» → «Отправлено», ошибка — красным."""
+    win = A.MainWindow()
+    win.resize(1200, 800)
+    win.show()
+    page = win.clips
+    page._send_state("Telegram: готовлю…")
+    n = win._notice
+    assert n.isVisible() and n.kind == "busy" and n.title == "Отправляю в Telegram" and n.sub == "готовлю…"
+    centre = win.mapToGlobal(win.rect().center())
+    assert abs(n.geometry().center().x() - centre.x()) < 4 and abs(n.geometry().center().y() - centre.y()) < 4
+    assert n.isWindow()                                                   # своё окошко — видео его не закроет
+    page._send_state("Отправлено в Telegram ✓")
+    assert n.kind == "ok" and n.title == "Отправлено в Telegram"
+    page._send_state("Не отправилось: файл слишком большой")
+    assert n.kind == "error" and "слишком большой" in n.sub
+    win.close()

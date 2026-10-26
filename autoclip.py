@@ -919,6 +919,20 @@ def refine_words(words, regions, max_shift=0.8):
     return out
 
 
+WHISPER_SIZES = {"large-v3": "~3 ГБ", "medium": "~1,5 ГБ", "small": "~0,5 ГБ"}
+
+
+def whisper_cached(name):
+    """Модель Whisper уже скачана (кэш Hugging Face) — тогда про скачивание не пишем."""
+    hub = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface"), "hub")
+    snaps = os.path.join(hub, f"models--Systran--faster-whisper-{name}", "snapshots")
+    try:
+        return any(os.listdir(os.path.join(snaps, d)) for d in os.listdir(snaps))
+    except OSError:
+        return False
+
+
 def _load_whisper():
     _windows_cuda_dlls()
     try:
@@ -932,7 +946,8 @@ def _load_whisper():
         devices = devices[1:]
     for device, ctype in devices:
         try:
-            log(f"🧠 Загружаю Whisper {name} ({device})... первый раз скачается ~3 ГБ")
+            first = "" if whisper_cached(name) else f" — первый раз скачается {WHISPER_SIZES.get(name, '')}".rstrip()
+            log(f"🧠 Загружаю Whisper {name} ({device})...{first}")
             model = WhisperModel(name, device=device, compute_type=ctype)
             WHISPER_DEVICE = f"{device} {ctype}"
             if device == "cpu" and CONFIG.get("whisper_device") != "cpu":

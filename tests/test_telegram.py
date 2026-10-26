@@ -195,8 +195,16 @@ def test_offline_logged_once(tmp_path):
         raise tg.TelegramError("❌ Нет связи с Telegram.")
     bot = tg.Bot(api=down, log=logs.append)
     bot.st = {"token": TOKEN, "chat_id": ME}
+    now = [1000.0]
+    bot._clock = lambda: now[0]
+    assert bot.poll(0) == [] and bot.poll(0) == []
+    assert logs == []                                   # короткий сбой — молчим
+    now[0] += tg.OFFLINE_WARN_S
     assert bot.poll(0) == [] and bot.poll(0) == []
     assert len(logs) == 1 and "Работаю без него" in logs[0]
+    bot._api = lambda method, params, files=None: []      # связь вернулась
+    bot.poll(0)
+    assert len(logs) == 2 and "снова на связи" in logs[1]
 
 
 # ---------- окно ----------

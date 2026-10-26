@@ -85,7 +85,7 @@ def test_detached_player_from_missing_monitor(app_module):
 
 
 def test_stage_strip_shows_current_and_total(monkeypatch):
-    """5.19: полоса «Звук → Расшифровка → Модель → Поиск → Рендер», текущий этап, общий процент."""
+    """2.3.1: этап и его процент — прямо в полосе («Модель», 50%, этап 3 из 5), общий процент — рядом."""
     import sys
     import pytest
     pytest.importorskip("PySide6")
@@ -98,12 +98,16 @@ def test_stage_strip_shows_current_and_total(monkeypatch):
     app.dark_palette(QApplication.instance() or QApplication([]))
     win = app.MainWindow()
     cut = win.cut
-    assert [lb.text() for lb in cut.step_labels] == ["Звук", "Расшифровка", "Модель", "Поиск", "Рендер"]
+    assert cut.bar.state == "idle"
     cut.eta = autoclip.Eta()
     cut.show_progress("модель", 50, "")
-    texts = [lb.text() for lb in cut.step_labels]
-    assert texts[0] == "✓ Звук" and texts[1] == "✓ Расшифровка" and texts[2] == "Модель  50%"
-    assert cut.step_labels[2].property("state") == "active" and cut.total.text().startswith("Всего ")
+    bar = cut.bar
+    assert (bar.state, bar.name, round(bar.pct), bar.index + 1, bar.count) == ("busy", "Модель", 50, 3, 5)
+    assert cut.total.text().startswith("Всего ")
+    cut.show_progress("рендер", 10, "")
+    assert (bar.name, round(bar.pct)) == ("Рендер", 10)                 # новый этап — снова с нуля
+    cut.finished("D:/папка")
+    assert bar.state == "done"
     win.close()
 
 

@@ -102,6 +102,9 @@ def http_api(token, method, params=None, files=None, timeout=35):
     return out.get("result")
 
 
+OFFLINE_WARN_S = 60          # сколько секунд без связи, прежде чем написать «нет связи»
+
+
 # ---------------- состояние ----------------
 
 def load_state():
@@ -164,6 +167,8 @@ class Bot:
         self._api = api
         self.log = log or autoclip.log
         self._offline_logged = False
+        self._offline_since = None      # с какого времени нет связи (короткий сбой — не пугаем)
+        self._clock = time.time
 
     # --- запросы ---
     def call(self, method, params=None, files=None, timeout=35):
@@ -322,9 +327,16 @@ class Bot:
             ups = self.call("getUpdates", {"timeout": timeout, "offset": self.st.get("offset", 0),
                                            "allowed_updates": ["message", "callback_query"]},
                             timeout=timeout + 10)
+            if self._offline_logged:
+                self.log("✅ Telegram снова на связи.")
             self._offline_logged = False
+            self._offline_since = None
         except TelegramError as e:
-            if not self._offline_logged:
+            # один оборвавшийся запрос — обычное дело; предупреждаем, только если связи нет дольше минуты
+            now = self._clock()
+            if self._offline_since is None:
+                self._offline_since = now
+            if not self._offline_logged and now - self._offline_since >= OFFLINE_WARN_S:
                 self.log(f"⚠️  Telegram: {e} Работаю без него.")
                 self._offline_logged = True
             return []

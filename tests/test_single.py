@@ -34,3 +34,30 @@ def test_second_copy_hands_over_and_exits():
     finally:
         server.close()
     assert not A.ping_running(name)                               # закрылась — места свободно
+
+
+
+def test_second_copy_waits_for_answer_even_if_first_is_busy():
+    """Первая копия занята 2 с и не принимает соединение — вторая дожидается ответа «ok»,
+    и сообщение доходит (раньше в такой момент терялось, и окно не всплывало)."""
+    import time
+    from PySide6.QtWidgets import QApplication
+    from qtwait import pump
+    import app as A
+    qapp = QApplication.instance() or QApplication([])  # noqa: F841
+    name = "AutoClipTest-" + uuid.uuid4().hex[:8]
+    got = []
+    server = A.InstanceServer(got.append, name)
+    try:
+        code = ("import sys; sys.path.insert(0, r'%s'); import os; os.environ['QT_QPA_PLATFORM']='offscreen';"
+                "from PySide6.QtWidgets import QApplication; q=QApplication([]); import app;"
+                "sys.exit(0 if app.ping_running(%r) else 3)") % (HERE, name)
+        p = subprocess.Popen([sys.executable, "-c", code])
+        time.sleep(2.5)                               # первая «занята»: цикл событий стоит
+        for _ in range(100):
+            pump(50)
+            if got and p.poll() is not None:
+                break
+        assert p.wait(10) == 0 and got == ["show"]
+    finally:
+        server.close()
