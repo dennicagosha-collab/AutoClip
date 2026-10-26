@@ -172,6 +172,8 @@ QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
         background: {SURFACE}; border: 1px solid {BORDER}; }}
 #step[state="active"] {{ color: white; border-color: {ACCENT}; }}
 #step[state="done"] {{ color: #9fe3b4; border-color: #2c4a37; background: #17221b; }}
+#stepArrow {{ color: {MUTED}; font-size: 9pt; }}
+#stepTotal {{ color: {FG}; font-size: 9pt; font-weight: 600; }}
 #clipList {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
     outline: none; padding: 6px; }}
 #clipList::item {{ padding: 8px 10px; border-radius: 8px; margin: 1px 0; }}
@@ -599,6 +601,10 @@ class WaveView(QWidget):
 
 # сколько времени обычно занимает этап нарезки (доли): так полоса идёт ровнее, чем «поровну»
 STAGE_WEIGHTS = {"звук": 0.05, "расшифровка": 0.35, "модель": 0.2, "поиск": 0.05, "рендер": 0.35}
+
+
+def stage_name(st):
+    return st[:1].upper() + st[1:]
 
 
 def stage_fraction(stage, pct):
@@ -1249,12 +1255,19 @@ class CutPage(QWidget):
         steps = QHBoxLayout()
         steps.setSpacing(6)
         self.step_labels = []
-        for st in autoclip.STAGES:
-            lb = QLabel(st)
+        for k, st in enumerate(autoclip.STAGES):       # «Звук → Расшифровка → Модель → Поиск → Рендер» (5.19)
+            if k:
+                arrow = QLabel("→")
+                arrow.setObjectName("stepArrow")
+                steps.addWidget(arrow)
+            lb = QLabel(stage_name(st))
             lb.setObjectName("step")
             steps.addWidget(lb)
             self.step_labels.append(lb)
         steps.addStretch(1)
+        self.total = QLabel("")
+        self.total.setObjectName("stepTotal")
+        steps.addWidget(self.total)
         lay.addLayout(steps)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
@@ -1407,7 +1420,8 @@ class CutPage(QWidget):
         self.btn_clips.setEnabled(False)
         self.bar.setValue(0)
         for lb, st in zip(self.step_labels, autoclip.STAGES):
-            self._step_state(lb, st, "")
+            self._step_state(lb, stage_name(st), "")
+        self.total.setText("")
 
     def _busy_style(self, on):
         self.btn.setProperty("busy", on)
@@ -1429,11 +1443,12 @@ class CutPage(QWidget):
         self.bar.setValue(int(frac * 1000))
         left = self.eta.update(frac) if self.eta else None
         self.bar.setFormat(f"{frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
+        self.total.setText(f"Всего {frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
         for j, (lb, st) in enumerate(zip(self.step_labels, stages)):
             if j < i or (j == i and pct >= 100):
-                self._step_state(lb, "✓ " + st, "done")
+                self._step_state(lb, "✓ " + stage_name(st), "done")
             elif j == i:
-                self._step_state(lb, f"{st}  {pct:.0f}%", "active")
+                self._step_state(lb, f"{stage_name(st)}  {pct:.0f}%", "active")
 
     def finished(self, out):
         self.eta = None

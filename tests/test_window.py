@@ -82,3 +82,26 @@ def test_detached_player_from_missing_monitor(app_module):
         w.toggle_detach()
     finally:
         w.close()
+
+
+def test_stage_strip_shows_current_and_total(monkeypatch):
+    """5.19: полоса «Звук → Расшифровка → Модель → Поиск → Рендер», текущий этап, общий процент."""
+    import sys
+    import pytest
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    import autoclip
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    monkeypatch.setattr(autoclip, "log", autoclip.log)
+    import app
+    app.dark_palette(QApplication.instance() or QApplication([]))
+    win = app.MainWindow()
+    cut = win.cut
+    assert [lb.text() for lb in cut.step_labels] == ["Звук", "Расшифровка", "Модель", "Поиск", "Рендер"]
+    cut.eta = autoclip.Eta()
+    cut.show_progress("модель", 50, "")
+    texts = [lb.text() for lb in cut.step_labels]
+    assert texts[0] == "✓ Звук" and texts[1] == "✓ Расшифровка" and texts[2] == "Модель  50%"
+    assert cut.step_labels[2].property("state") == "active" and cut.total.text().startswith("Всего ")
+    win.close()
