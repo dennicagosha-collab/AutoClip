@@ -1,0 +1,116 @@
+"""Редизайн 2.3.0: шрифт и значки из папки программы, карточки клипов, «список / сетка», без символов-квадратиков."""
+import os
+import re
+import sys
+
+import pytest
+
+pytest.importorskip("PySide6")
+from PySide6.QtWidgets import QApplication, QPushButton, QToolButton  # noqa: E402
+
+import autoclip  # noqa: E402
+import theme  # noqa: E402
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@pytest.fixture
+def A(tmp_path, monkeypatch):
+    monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
+    monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    monkeypatch.setattr(autoclip, "log", autoclip.log)
+    import app
+    qapp = QApplication.instance() or QApplication([])
+    app.dark_palette(qapp)
+    return app
+
+
+def test_font_and_licenses_in_program(A):
+    assert theme.FAMILY == "Inter"
+    assert os.path.isfile(os.path.join(HERE, "fonts", "LICENSE-Inter.txt"))
+    assert os.path.isfile(os.path.join(HERE, "icon", "lucide", "LICENSE"))
+
+
+def test_every_icon_used_in_code_exists():
+    src = open(os.path.join(HERE, "app.py"), encoding="utf-8").read()
+    names = set(re.findall(r'(?:set_icon\([^,]+,|theme\.icon\(|theme\.pixmap\(|icon_label\()\s*"([a-z0-9-]+)"', src))
+    names |= set(re.findall(r'"([a-z0-9-]+)"', src[src.index("CARD_ICONS = {"):src.index("def icon_label")]))
+    import app as _app  # noqa: F401
+    names |= {p[2] for p in _app.MainWindow.PAGES}
+    missing = sorted(n for n in names if not theme.has_icon(n))
+    assert not missing, missing
+
+
+def test_icon_draws_something(A):
+    pm = theme.pixmap("scissors", "#ff4f6d", 24)
+    img = pm.toImage()
+    assert any(img.pixelColor(x, y).alpha() > 0 for x in range(0, img.width(), 2) for y in range(0, img.height(), 2))
+    assert theme.pixmap("нет-такого", "#fff", 24).toImage().pixelColor(5, 5).alpha() == 0   # не квадратик
+
+
+def test_no_unicode_symbol_buttons(A):
+    win = A.MainWindow()
+    bad = "✂▶■❚👍🎞↑↓→▸▾▴✈"
+    for b in win.findChildren(QPushButton) + win.findChildren(QToolButton):
+        assert not any(ch in b.text() for ch in bad), b.text()
+    win.close()
+
+
+def test_view_toggle_remembered(A):
+    win = A.MainWindow()
+    page = win.clips
+    page.set_view("list")
+    assert not page.cards.grid and A.load_settings()["clips_view"] == "list"
+    page.set_view("grid")
+    assert page.cards.grid and A.load_settings()["clips_view"] == "grid"
+    assert page.view_btns["grid"].isChecked() and not page.view_btns["list"].isChecked()
+    win.close()
+
+
+def test_cards_have_data_and_status(A, tmp_path):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import test_cuts
+    autoclip.log = lambda m: None
+    folder = test_cuts._project(tmp_path)
+    win = A.MainWindow()
+    win.clips.load(folder)
+    d = win.clips.list.item(0).data(A.CARD)
+    assert d["kind"] == "clip" and d["status"] == "new" and d["title"]
+    assert A.STATUS_NAMES[d["status"]] == "Новый"
+    cards = win.clips.cards
+    if d.get("cover"):
+        cards.cover(d["cover"])
+        cards.load_all_now()
+        assert cards.cover(d["cover"])                   # обложка загружена — не скелет
+    cards.set_grid(True)
+    w, h = cards.size_hint().width(), cards.size_hint().height()
+    assert h > w                                         # вертикальная карточка
+    win.close()
+
+
+def test_glow_and_dash_respect_animations(A, monkeypatch):
+    win = A.MainWindow()
+    win.show()
+    monkeypatch.setattr(A, "animations_ok", lambda w=None: False)    # трей / игра — без анимаций
+    d0 = win.cut.drop._dash
+    win.cut.drop._tick()
+    assert win.cut.drop._dash == d0
+    win.cut.btn._glow._to(1.0)                           # без анимации — сразу
+    assert win.cut.btn._glow.eff.blurRadius() > 26
+    win.close()
+
+
+def test_dash_timer_only_while_visible(A):
+    """Рамка «бежит», только пока её видно: у закрытого окна таймер стоит (не грузит ПК)."""
+    win = A.MainWindow()
+    drop = win.cut.drop
+    assert not drop._dash_timer.isActive()
+    win.show()
+    from qtwait import pump
+    pump(50)
+    assert drop._dash_timer.isActive()
+    win.close()
+    pump(50)
+    assert not drop._dash_timer.isActive()

@@ -101,104 +101,145 @@ def censor_combo(value):
     cb.setCurrentIndex(max(0, cb.findData(value)))
     return cb
 
-BG, SURFACE, SURFACE2, BORDER = "#111216", "#18191f", "#20222a", "#2a2c35"
-FG, MUTED, ACCENT = "#eceef2", "#8b8f9a", "#ff4f6d"
+import theme  # noqa: E402
+
+BG, SURFACE, SURFACE2, BORDER = theme.BG, theme.SURFACE, theme.SURFACE2, theme.BORDER
+FG, MUTED, ACCENT = theme.FG, theme.MUTED, theme.ACCENT
 PANEL, PANEL2 = SURFACE, SURFACE2          # старые имена — для схемы субтитров и окна просмотра
 
 STYLE = f"""
-QWidget {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {FG}; }}
+QWidget {{ font-family: "Inter", "Segoe UI Variable Text", "Segoe UI"; font-size: 13px; color: {FG}; }}
 QMainWindow, #page, #scrollBody {{ background: {BG}; }}
 QScrollArea {{ background: {BG}; border: none; }}
-#side {{ background: #0c0d10; border-right: 1px solid {BORDER}; }}
-#brand {{ font-size: 14pt; font-weight: 700; color: white; padding: 22px 22px 14px 24px; }}
-#brandDot {{ color: {ACCENT}; }}
-#version {{ color: {MUTED}; font-size: 8pt; text-align: left; padding: 0 0 12px 25px;
-            border: none; background: transparent; }}
-#version:hover {{ color: {FG}; }}
-#nav {{ background: transparent; border: none; outline: none; padding: 0 10px; }}
-#nav::item {{ padding: 10px 14px; border-radius: 8px; margin: 2px 0; color: {MUTED}; }}
-#nav::item:selected {{ background: {SURFACE2}; color: white; }}
-#nav::item:hover:!selected {{ background: #16171c; color: {FG}; }}
-#title {{ font-size: 19pt; font-weight: 600; color: white; }}
-#subtitle {{ color: {MUTED}; }}
-#hint {{ color: {MUTED}; font-size: 9pt; }}
-#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px; }}
-#cardTitle {{ font-size: 11pt; font-weight: 600; color: white; }}
+#side {{ background: {theme.SIDE}; border-right: 1px solid #1a1c23; }}
+#brand {{ font-size: 20px; font-weight: 700; color: white; padding: 24px 24px 4px 24px; }}
+#version {{ color: {theme.DIM}; font-size: 11px; text-align: left; padding: 0 0 16px 25px;
+            border: none; background: transparent; min-height: 16px; }}
+#version:hover {{ color: {FG}; background: transparent; }}
+#nav {{ background: transparent; border: none; outline: none; padding: 0 12px; }}
+#nav::item {{ padding: 11px 12px; border-radius: 10px; margin: 2px 0; color: {MUTED};
+              border-left: 3px solid transparent; }}
+#nav::item:selected {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2b1620, stop:1 #17181e);
+                       color: white; border-left: 3px solid {ACCENT}; }}
+#nav::item:hover:!selected {{ background: #15161c; color: {FG}; }}
+#title {{ font-size: 26px; font-weight: 700; color: white; }}
+#subtitle {{ color: {MUTED}; font-size: 13px; }}
+#hint {{ color: {MUTED}; font-size: 12px; }}
+#card {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #17181f, stop:1 #14151b);
+         border: 1px solid {BORDER}; border-top-color: #2e313c; border-radius: 16px; }}
+#panel {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 16px; }}
+#cardTitle {{ font-size: 15px; font-weight: 600; color: white; }}
+#cardIcon {{ background: {theme.ACCENT_DEEP}; border-radius: 8px; }}
 #rowLabel {{ color: {FG}; }}
-#rowHint {{ color: {MUTED}; font-size: 9pt; }}
+#rowHint {{ color: {MUTED}; font-size: 12px; }}
 #sep {{ background: {BORDER}; }}
-#fieldLabel {{ color: {MUTED}; font-size: 9pt; }}
-#drop {{ background: {SURFACE}; border: 2px dashed #2f323c; border-radius: 14px; }}
-#drop[hover="true"] {{ border-color: {ACCENT}; background: #1c1a20; }}
-#dropText {{ font-size: 13pt; font-weight: 600; color: white; }}
-#dropHint {{ color: {MUTED}; }}
-QPushButton {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 8px;
-              padding: 0 14px; min-height: 32px; }}
-QPushButton:hover {{ background: #272a33; border-color: #363946; }}
-QPushButton:pressed {{ background: #1b1d23; }}
-QPushButton:disabled {{ color: #5c606b; background: #17181d; border-color: #22242b; }}
-#accent {{ background: {ACCENT}; border: none; color: white; font-size: 12pt; font-weight: 600;
-          min-height: 46px; border-radius: 10px; padding: 0 28px; }}
-#accent:hover {{ background: #ff6680; }}
-#accent[busy="true"] {{ background: #3b2430; color: #ffb3c0; }}
-#primary {{ background: {ACCENT}; border: none; color: white; font-weight: 600; padding: 0 18px; }}
-#primary:hover {{ background: #ff6680; }}
-#primary:disabled {{ background: #3b2430; color: #a07080; }}
+#fieldLabel {{ color: {MUTED}; font-size: 12px; font-weight: 500; }}
+#drop {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #17181f, stop:1 #131419);
+         border: none; border-radius: 20px; }}
+#drop[hover="true"] {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #241820, stop:1 #16161b); }}
+#dropText {{ font-size: 17px; font-weight: 600; color: white; }}
+#dropHint {{ color: {MUTED}; font-size: 13px; }}
+QPushButton {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 10px;
+              padding: 0 16px; min-height: 32px; font-weight: 500; }}
+QPushButton:hover {{ background: {theme.SURFACE3}; border-color: {theme.BORDER_HI}; color: white; }}
+QPushButton:pressed {{ background: #18191f; border-color: {BORDER}; padding-top: 2px; }}
+QPushButton:disabled {{ color: {theme.DIM}; background: #15161b; border-color: #1f2128; }}
+#accent {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff6680, stop:1 #e8344f);
+          border: none; color: white; font-size: 16px; font-weight: 600;
+          min-height: 48px; border-radius: 14px; padding: 0 28px; }}
+#accent:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff7a91, stop:1 #f2405c); }}
+#accent:pressed {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #e8475f, stop:1 #c92a44);
+                  padding-top: 2px; }}
+#accent[busy="true"] {{ background: #2c1820; color: #ffb3c0; border: 1px solid #5a2433; }}
+#primary {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff6680, stop:1 #e8344f);
+           border: none; color: white; font-weight: 600; padding: 0 18px; }}
+#primary:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff7a91, stop:1 #f2405c); }}
+#primary:pressed {{ background: #c92a44; padding-top: 2px; }}
+#primary:disabled {{ background: #2c1820; color: #8a5a66; }}
 #ghost {{ background: transparent; border: none; color: {MUTED}; padding: 0 8px; }}
 #ghost:hover {{ color: {FG}; background: {SURFACE2}; }}
 #danger:hover {{ color: #ff8094; border-color: #5a2a35; background: #2a1a20; }}
-#square {{ padding: 0; min-width: 32px; max-width: 32px; font-size: 12pt; }}
-#filter {{ background: transparent; border: 1px solid {BORDER}; border-radius: 14px;
-          padding: 0 11px; min-height: 28px; color: {MUTED}; }}
-#filter:hover {{ color: {FG}; }}
-#filter:checked {{ background: {ACCENT}; border-color: {ACCENT}; color: white; }}
-#stepValue {{ font-size: 12pt; font-weight: 600; min-width: 34px; }}
-QComboBox, QLineEdit, QSpinBox {{ background: {SURFACE2}; border: 1px solid {BORDER};
-    border-radius: 8px; padding: 0 10px; min-height: 32px; }}
-QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{ border-color: #3a3d48; }}
-QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; }}
-QComboBox:disabled, QLineEdit:disabled {{ color: #5c606b; background: #17181d; }}
+#square {{ padding: 0; min-width: 32px; max-width: 32px; font-size: 15px; }}
+#filter {{ background: transparent; border: 1px solid {BORDER}; border-radius: 15px;
+          padding: 0 12px; min-height: 30px; color: {MUTED}; }}
+#filter:hover {{ color: white; border-color: {theme.BORDER_HI}; background: #17181e; }}
+#filter:checked {{ background: {theme.ACCENT_DEEP}; border-color: {ACCENT}; color: white; }}
+#segBox {{ background: #121318; border: 1px solid {BORDER}; border-radius: 12px; }}
+#seg {{ background: transparent; border: none; border-radius: 9px; padding: 0 14px; min-height: 30px;
+       color: {MUTED}; font-weight: 500; }}
+#seg:hover {{ color: white; background: #1b1c23; }}
+#seg:checked {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff6680, stop:1 #e8344f);
+               color: white; }}
+#viewBtn {{ background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0;
+           min-width: 32px; max-width: 32px; min-height: 30px; }}
+#viewBtn:hover {{ background: {SURFACE2}; }}
+#viewBtn:checked {{ background: {theme.ACCENT_DEEP}; border-color: #5a2433; }}
+#stepValue {{ font-size: 16px; font-weight: 600; min-width: 34px; }}
+QComboBox, QLineEdit, QSpinBox {{ background: #15161c; border: 1px solid {BORDER};
+    border-radius: 10px; padding: 0 12px; min-height: 32px; }}
+QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{ border-color: {theme.BORDER_HI}; }}
+QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{ border-color: {ACCENT}; background: #18141a; }}
+QComboBox:disabled, QLineEdit:disabled {{ color: {theme.DIM}; background: #131419; }}
 QComboBox::drop-down {{ border: none; width: 28px; }}
 QComboBox::down-arrow {{ image: url(@ARROW@); width: 10px; height: 10px; }}
 QComboBox QAbstractItemView {{ background: {SURFACE2}; border: 1px solid {BORDER};
-    padding: 4px; outline: none; selection-background-color: #30333d; }}
+    padding: 4px; outline: none; selection-background-color: #3a1e29; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 0; border: none; }}
-QPlainTextEdit {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
-    font-family: "Cascadia Mono", Consolas; font-size: 9pt; padding: 10px; color: #b9bcc6; }}
-#desc {{ font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 10pt; color: {FG};
-         background: {SURFACE2}; padding: 8px; }}
-QProgressBar {{ background: {SURFACE2}; border: none; border-radius: 3px; }}
-QProgressBar::chunk {{ background: {ACCENT}; border-radius: 3px; }}
-#step {{ color: {MUTED}; font-size: 9pt; padding: 3px 10px; border-radius: 10px;
-        background: {SURFACE}; border: 1px solid {BORDER}; }}
-#step[state="active"] {{ color: white; border-color: {ACCENT}; }}
-#step[state="done"] {{ color: #9fe3b4; border-color: #2c4a37; background: #17221b; }}
-#stepArrow {{ color: {MUTED}; font-size: 9pt; }}
-#stepTotal {{ color: {FG}; font-size: 9pt; font-weight: 600; }}
-#clipList {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 12px;
-    outline: none; padding: 6px; }}
-#clipList::item {{ padding: 8px 10px; border-radius: 8px; margin: 1px 0; }}
-#clipList::item:selected {{ background: #2a2d37; color: white; }}
-#clipList::item:hover:!selected {{ background: #1e2027; }}
-QSlider::groove:horizontal {{ height: 4px; background: #343845; border-radius: 2px; }}
+QDoubleSpinBox {{ background: #15161c; border: 1px solid {BORDER}; border-radius: 10px; padding: 0 12px;
+    min-height: 32px; }}
+QDoubleSpinBox:focus {{ border-color: {ACCENT}; }}
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; border: none; }}
+#card QScrollArea, #card QScrollArea > QWidget > QWidget {{ background: transparent; }}
+#card QStackedWidget {{ background: transparent; }}
+QPlainTextEdit {{ background: #121318; border: 1px solid {BORDER}; border-radius: 14px;
+    font-family: "Cascadia Mono", Consolas; font-size: 12px; padding: 12px; color: #b9bcc6; }}
+#desc {{ font-family: "Inter", "Segoe UI"; font-size: 13px; color: {FG};
+         background: #15161c; padding: 8px; }}
+QProgressBar {{ background: #121318; border: 1px solid {BORDER}; border-radius: 11px;
+               color: white; font-weight: 600; font-size: 12px; }}
+QProgressBar::chunk {{ border-radius: 10px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #c92a44, stop:1 #ff6680); }}
+#step {{ color: {MUTED}; font-size: 12px; padding: 4px 12px; border-radius: 12px;
+        background: #15161c; border: 1px solid {BORDER}; }}
+#step[state="active"] {{ color: white; border-color: {ACCENT}; background: {theme.ACCENT_DEEP}; }}
+#step[state="done"] {{ color: #9fe3b4; border-color: #2c4a37; background: #14211a; }}
+#stepTotal {{ color: {FG}; font-size: 12px; font-weight: 600; }}
+#clipList {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 16px;
+    outline: none; padding: 8px; }}
+#clipList::item {{ padding: 8px 10px; border-radius: 10px; margin: 1px 0; }}
+#clipList::item:selected {{ background: #2a1a22; color: white; }}
+#clipList::item:hover:!selected {{ background: #1c1d24; }}
+#cardList {{ background: transparent; border: none; outline: none; }}
+QSlider::groove:horizontal {{ height: 4px; background: #2e313c; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: white; width: 12px; margin: -5px 0; border-radius: 6px; }}
+QSlider::handle:horizontal {{ background: white; width: 14px; margin: -5px 0; border-radius: 7px; }}
 QSplitter::handle {{ background: {BG}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #2d3039; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical {{ background: #2a2d37; border-radius: 4px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #3a3e4a; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: #2a2d37; border-radius: 4px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QToolTip {{ background: {SURFACE2}; color: {FG}; border: 1px solid {BORDER}; padding: 4px; }}
-QToolButton#more {{ background: transparent; border: none; color: {MUTED}; padding: 2px 4px; }}
-QToolButton#more:hover, QToolButton#more:checked {{ color: {FG}; }}
-QPushButton:checked {{ background: #2a1a20; border-color: {ACCENT}; color: white; }}
-#toast {{ background: #23252e; color: {FG}; border: 1px solid #343845; border-radius: 10px;
-          padding: 10px 16px; }}
-#scissors {{ color: white; font-size: 11pt; background: transparent; }}
-#plane {{ color: #7ec8ff; font-size: 13pt; background: transparent; }}
+QToolTip {{ background: {SURFACE2}; color: {FG}; border: 1px solid {theme.BORDER_HI}; padding: 6px;
+           border-radius: 6px; }}
+QToolButton#more {{ background: transparent; border: none; color: {MUTED}; padding: 4px 6px;
+                   border-radius: 8px; }}
+QToolButton#more:hover, QToolButton#more:checked {{ color: white; background: #17181e; }}
+QPushButton:checked {{ background: {theme.ACCENT_DEEP}; border-color: {ACCENT}; color: white; }}
+#toast {{ background: #1f2129; color: {FG}; border: 1px solid {theme.BORDER_HI};
+          border-left: 3px solid {ACCENT}; border-radius: 12px; padding: 12px 18px; }}
+#scissors {{ background: transparent; }}
+#plane {{ color: #7ec8ff; font-size: 17px; background: transparent; }}
+#pill {{ border-radius: 9px; padding: 2px 9px; font-size: 11px; font-weight: 600; }}
+#playerBox {{ background: #08090b; border: 1px solid {BORDER}; border-radius: 16px; }}
+QMenu {{ background: {SURFACE2}; border: 1px solid {theme.BORDER_HI}; border-radius: 10px; padding: 6px; }}
+QMenu::item {{ padding: 7px 18px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {theme.ACCENT_DEEP}; color: white; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px; border: 1px solid {theme.BORDER_HI};
+                       background: #15161c; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 """
-
 
 # ---------------- служебное ----------------
 
@@ -273,6 +314,17 @@ class Stream:
 
     def flush(self):
         pass
+
+
+CONTENT_MAX = 1440      # на широком мониторе содержимое раздела — по центру, не шире этого (2.3.0)
+
+
+def center_content(widget, lay, side=32):
+    """Поля раздела растут на широком окне, чтобы содержимое было по центру."""
+    extra = max(0, (widget.width() - 2 * side - CONTENT_MAX) // 2)
+    m = lay.contentsMargins()
+    if m.left() != side + extra:
+        lay.setContentsMargins(side + extra, m.top(), side + extra, m.bottom())
 
 
 def page_title(text, sub=""):
@@ -646,6 +698,55 @@ def fade_in(widget, ms=160):
     widget._fade = anim
 
 
+class GlowButton(QObject):
+    """Красное свечение под главной кнопкой; при наведении — ярче (150–250 мс), при нажатии — тише."""
+
+    def __init__(self, button, radius=22, alpha=90):
+        super().__init__(button)
+        self.btn = button
+        self.base = (radius, alpha)
+        self.eff = theme.glow(button, radius=radius, alpha=alpha)
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(200)
+        self.anim.valueChanged.connect(self._apply)
+        button.installEventFilter(self)
+
+    def _apply(self, v):
+        r, a = self.base
+        self.eff.setBlurRadius(r + 14 * v)
+        c = QColor(ACCENT)
+        c.setAlpha(int(min(255, a + 80 * v)))
+        self.eff.setColor(c)
+
+    def _to(self, v):
+        if not animations_ok(self.btn):
+            self._apply(v)
+            return
+        self.anim.stop()
+        self.anim.setStartValue(self.anim.currentValue() if self.anim.currentValue() is not None else 0.0)
+        self.anim.setEndValue(float(v))
+        self.anim.start()
+
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == e.Type.Enter and self.btn.isEnabled():
+            self._to(1.0)
+        elif t == e.Type.Leave:
+            self._to(0.0)
+        elif t == e.Type.MouseButtonPress:
+            self._to(-0.4)
+        elif t == e.Type.MouseButtonRelease:
+            self._to(1.0 if self.btn.underMouse() else 0.0)
+        elif t == e.Type.EnabledChange:
+            self.eff.setEnabled(self.btn.isEnabled())
+        return False
+
+
+def glow_button(button, radius=22, alpha=90):
+    button._glow = GlowButton(button, radius, alpha)
+    return button
+
+
 class Toast(QLabel):
     """Короткое сообщение внизу окна вместо всплывающего окна — само исчезает."""
 
@@ -725,6 +826,16 @@ def ask_choice(parent, text, choices):
 EDITS_CHOICES = (("apply", "Применить"), ("discard", "Не применять"), ("cancel", "Отмена"))
 
 
+def text_width(text, px=13, weight=None):
+    """Ширина текста шрифтом программы — чтобы подписи не обрезались (2.3.0)."""
+    from PySide6.QtGui import QFontMetrics
+    f = QFont(theme.FAMILY or "Segoe UI")
+    f.setPixelSize(px)
+    if weight is not None:
+        f.setWeight(weight)
+    return QFontMetrics(f).horizontalAdvance(text)
+
+
 def hint(text):
     h = QLabel(text)
     h.setObjectName("hint")
@@ -732,17 +843,43 @@ def hint(text):
     return h
 
 
-def card(title=None, sub=None):
-    """Карточка: (рамка, раскладка содержимого)."""
+CARD_ICONS = {"OBS": "video", "Telegram": "send", "Запуск": "rocket", "Музыка": "music",
+              "Ник в углу": "user", "Новые клипы": "sparkles", "Обновления": "download",
+              "Отчёт об ошибке": "bug", "Папка для клипов": "folder", "Пресеты экспорта": "film",
+              "Прогноз": "chart-column", "Резервная копия": "hard-drive", "Сборка клипов": "layers",
+              "Состояние системы": "activity", "Субтитры": "captions", "Хэштеги и описание": "hash",
+              "Языковая модель": "bot", "Нарезка": "scissors"}
+
+
+def icon_label(name, color=ACCENT, size=18, box=32):
+    """Значок раздела в красном квадратике."""
+    lb = QLabel()
+    lb.setObjectName("cardIcon")
+    lb.setFixedSize(box, box)
+    lb.setAlignment(Qt.AlignCenter)
+    lb.setPixmap(theme.pixmap(name, color, size))
+    return lb
+
+
+def card(title=None, sub=None, icon=None):
+    """Карточка: (рамка, раскладка содержимого). У заголовка — значок раздела (2.3.0)."""
     frame = QFrame()
     frame.setObjectName("card")
     lay = QVBoxLayout(frame)
-    lay.setContentsMargins(18, 16, 18, 16)
+    lay.setContentsMargins(20, 18, 20, 18)
     lay.setSpacing(4)
     if title:
         t = QLabel(title)
         t.setObjectName("cardTitle")
-        lay.addWidget(t)
+        name = icon or CARD_ICONS.get(title)
+        if name and theme.has_icon(name):
+            head = QHBoxLayout()
+            head.setSpacing(12)
+            head.addWidget(icon_label(name))
+            head.addWidget(t, 1)
+            lay.addLayout(head)
+        else:
+            lay.addWidget(t)
     if sub:
         s = QLabel(sub)
         s.setObjectName("rowHint")
@@ -893,11 +1030,12 @@ class Stepper(QWidget):
 
 
 class SoundButton(QPushButton):
-    """▶ — прослушать звук на мат."""
+    """Кнопка-значок «прослушать звук на мат»."""
 
     def __init__(self, combo):
-        super().__init__("▶")
+        super().__init__()
         self.setObjectName("square")
+        theme.set_icon(self, "volume-2", FG, 16)
         self.setToolTip("Прослушать")
         self.combo = combo
         self.player = QMediaPlayer(self)
@@ -1048,14 +1186,17 @@ class PlayerPanel(QWidget):
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.player.setVideoOutput(self.video)
 
-        self.btn_play = QPushButton("▶")
-        self.btn_play.setFixedWidth(44)
+        self.btn_play = QPushButton()
+        self.btn_play.setObjectName("primary")
+        self.btn_play.setFixedSize(44, 36)
+        theme.set_icon(self.btn_play, "play", "#ffffff", 18)
         self.btn_play.clicked.connect(self.toggle)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.sliderMoved.connect(self.player.setPosition)
         self.time = QLabel("0:00 / 0:00")
         self.time.setObjectName("hint")
         self.btn_detach = QPushButton("Открепить")
+        theme.set_icon(self.btn_detach, "external-link", FG, 15)
         self.btn_detach.setToolTip("Показать просмотр в отдельном окне, например на втором мониторе")
         self.btn_detach.clicked.connect(self.detach_clicked)
 
@@ -1181,7 +1322,7 @@ class PlayerPanel(QWidget):
             self.player.pause()
             self.player.setPosition(0)
             return
-        self.btn_play.setText("❚❚" if st == QMediaPlayer.PlayingState else "▶")
+        theme.set_icon(self.btn_play, "pause" if st == QMediaPlayer.PlayingState else "play", "#ffffff", 18)
 
 
 class DetachedWindow(QWidget):
@@ -1208,16 +1349,25 @@ class DropZone(QFrame):
         self.setObjectName("drop")
         self.setAcceptDrops(True)
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(200)
+        self._dash = 0.0                              # сдвиг пунктира — рамка медленно «бежит» (2.3.0)
+        self._dash_timer = QTimer(self)
+        self._dash_timer.setInterval(50)
+        self._dash_timer.timeout.connect(self._tick)   # идёт, только пока рамку видно
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(22, 18, 22, 18)
-        lay.setSpacing(22)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(24)
         self.pic = QLabel()
         self.pic.setFixedSize(0, 0)
         lay.addWidget(self.pic)
         col = QVBoxLayout()
         col.setSpacing(6)
         col.addStretch(1)
+        self.up_icon = QLabel()
+        self.up_icon.setPixmap(theme.pixmap("upload", ACCENT, 34))
+        self.up_icon.setAlignment(Qt.AlignCenter)
+        col.addWidget(self.up_icon)
+        col.addSpacing(6)
         self.text = QLabel("Перетащи сюда запись стрима")
         self.text.setObjectName("dropText")
         self.sub = QLabel("или нажми, чтобы выбрать файл")
@@ -1232,6 +1382,33 @@ class DropZone(QFrame):
         al = Qt.AlignCenter if on else (Qt.AlignLeft | Qt.AlignVCenter)
         self.text.setAlignment(al)
         self.sub.setAlignment(al)
+        self.up_icon.setVisible(on)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._dash_timer.start()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._dash_timer.stop()
+
+    def _tick(self):
+        if not self.isVisible() or not animations_ok(self):
+            return
+        self._dash = (self._dash + (0.9 if self.property("hover") else 0.35)) % 16
+        self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        hover = bool(self.property("hover"))
+        pen = QPen(QColor(ACCENT if hover else "#3a3e4a"), 2)
+        pen.setDashPattern([5, 3])
+        pen.setDashOffset(-self._dash)
+        p.setPen(pen)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 20, 20)
+        p.end()
 
     def set_preview(self, pixmap, text, sub=""):
         if pixmap:
@@ -1289,6 +1466,7 @@ class CutPage(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 28, 32, 24)
         lay.setSpacing(14)
+        self._lay = lay
         lay.addLayout(page_title("Нарезка", "Перетащи запись — программа найдёт яркие моменты "
                                             "и нарежет клипы."))
 
@@ -1320,19 +1498,31 @@ class CutPage(QWidget):
         self.preset.currentTextChanged.connect(lambda t: self._set("preset", t) if t else None)
         row.addLayout(labeled("Пресет", self.preset))
         row.addStretch(1)
-        self.btn = QPushButton("✂   Нарезать")
+        self.btn = QPushButton("Нарезать")
         self.btn.setObjectName("accent")
         self.btn.setMinimumWidth(240)
+        theme.set_icon(self.btn, "scissors", "#ffffff", 20)
+        glow_button(self.btn, 26, 100)
         self.btn.clicked.connect(self.start_or_stop)
         row.addWidget(self.btn, 0, Qt.AlignBottom)
         lay.addLayout(row)
 
+        self.prog_card, pc = card()                    # прогресс — своей карточкой (2.3.0)
+        pc.setSpacing(12)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(icon_label("scissors"))
+        ht = QLabel("Ход нарезки")
+        ht.setObjectName("cardTitle")
+        head.addWidget(ht)
+        head.addStretch(1)
         steps = QHBoxLayout()
         steps.setSpacing(6)
         self.step_labels = []
         for k, st in enumerate(autoclip.STAGES):       # «Звук → Расшифровка → Модель → Поиск → Рендер» (5.19)
             if k:
-                arrow = QLabel("→")
+                arrow = QLabel()
+                arrow.setPixmap(theme.pixmap("chevron-right", theme.DIM, 14))
                 arrow.setObjectName("stepArrow")
                 steps.addWidget(arrow)
             lb = QLabel(stage_name(st))
@@ -1342,15 +1532,17 @@ class CutPage(QWidget):
         steps.addStretch(1)
         self.total = QLabel("")
         self.total.setObjectName("stepTotal")
-        steps.addWidget(self.total)
-        lay.addLayout(steps)
+        head.addWidget(self.total)
+        pc.addLayout(head)
+        pc.addLayout(steps)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
-        self.bar.setFixedHeight(22)
+        self.bar.setFixedHeight(24)
         self.bar.setTextVisible(True)
         self.bar.setFormat("")
         self.bar.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self.bar)
+        pc.addWidget(self.bar)
+        lay.addWidget(self.prog_card)
         self.eta = None
 
         self.resume_bar = QWidget()                 # прерванная нарезка — доделать с места обрыва (P3)
@@ -1368,7 +1560,9 @@ class CutPage(QWidget):
         from PySide6.QtWidgets import QToolButton
         self.btn_log = QToolButton()                # лог — свёрнут в «Подробности ▸» (D.1)
         self.btn_log.setObjectName("more")
-        self.btn_log.setText("Подробности  ▸")
+        self.btn_log.setText("Подробности")
+        self.btn_log.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        theme.set_icon(self.btn_log, "chevron-right", MUTED, 14)
         self.btn_log.setCheckable(True)
         self.btn_log.toggled.connect(self._toggle_log)
         lay.addWidget(self.btn_log, 0, Qt.AlignLeft)
@@ -1381,9 +1575,11 @@ class CutPage(QWidget):
 
         row = QHBoxLayout()
         self.btn_folder = QPushButton("Открыть папку с клипами")
+        theme.set_icon(self.btn_folder, "folder-open", FG, 16)
         self.btn_folder.setEnabled(False)
         self.btn_folder.clicked.connect(lambda: self.last_out and open_path(self.last_out))
-        self.btn_clips = QPushButton("К клипам  →")
+        self.btn_clips = QPushButton("К клипам")
+        theme.set_icon(self.btn_clips, "film", FG, 16)
         self.btn_clips.setEnabled(False)
         self.btn_clips.clicked.connect(lambda: self.win.go("clips"))
         row.addWidget(self.btn_folder)
@@ -1397,6 +1593,10 @@ class CutPage(QWidget):
     def _set(self, key, value):
         self.s[key] = value
         save_settings(self.s)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        center_content(self, self._lay)
 
     def set_mode(self, key):
         key = "auto" if key == "auto" else "count"
@@ -1426,7 +1626,7 @@ class CutPage(QWidget):
             return
         self.files = paths
         more = f"…и ещё {len(paths) - 1}" if len(paths) > 1 else ""
-        self.drop.set_preview(None, "🎬  " + os.path.basename(paths[0]), more)
+        self.drop.set_preview(None, os.path.basename(paths[0]), more)
         self.thumb_n += 1
         threading.Thread(target=self._make_thumb, args=(paths, self.thumb_n), daemon=True).start()
 
@@ -1514,7 +1714,7 @@ class CutPage(QWidget):
         self.apply_config()
         self.eta = autoclip.Eta()
         self.win.start_cut(list(self.files))
-        self.btn.setText("■   Остановить")
+        self.btn.setText("Остановить")
         self._busy_style(True)
         self.btn_folder.setEnabled(False)
         self.btn_clips.setEnabled(False)
@@ -1526,8 +1726,9 @@ class CutPage(QWidget):
     def _move_scissors(self, frac):
         """Ножницы едут по полосе нарезки вместе с прогрессом (5.20)."""
         if getattr(self, "scissors", None) is None:
-            self.scissors = QLabel("✂", self.bar)
+            self.scissors = QLabel(self.bar)
             self.scissors.setObjectName("scissors")
+            self.scissors.setPixmap(theme.pixmap("scissors", "#ffffff", 16))
             self.scissors.setAttribute(Qt.WA_TransparentForMouseEvents)
         if not animations_ok(self) or frac >= 1:
             self.scissors.hide()
@@ -1556,9 +1757,10 @@ class CutPage(QWidget):
     def _toggle_log(self, on):
         self.log.setVisible(on)
         self.log_spacer.setVisible(not on)
-        self.btn_log.setText("Подробности  ▾" if on else "Подробности  ▸")
+        theme.set_icon(self.btn_log, "chevron-down" if on else "chevron-right", MUTED, 14)
 
     def _busy_style(self, on):
+        theme.set_icon(self.btn, "square" if on else "scissors", "#ffb3c0" if on else "#ffffff", 20 if not on else 16)
         self.btn.setProperty("busy", on)
         self.btn.style().unpolish(self.btn)
         self.btn.style().polish(self.btn)
@@ -1591,7 +1793,7 @@ class CutPage(QWidget):
         if getattr(self, "scissors", None) is not None:
             self.scissors.hide()
         self.bar.setFormat("готово" if out else "")
-        self.btn.setText("✂   Нарезать")
+        self.btn.setText("Нарезать")
         self.btn.setEnabled(True)
         self._busy_style(False)
         if out:
@@ -1614,6 +1816,370 @@ class _LeftClick:
 # ---------------- раздел «Клипы» ----------------
 
 CLIP_PATH = Qt.UserRole + 2          # путь к файлу клипа в строке списка
+CARD = Qt.UserRole + 3               # что рисовать на карточке клипа (2.3.0)
+STATUS_NAMES = {"new": "Новый", "post": "Выложу", "ok": "Норм", "published": "Выложен",
+                "candidate": "Кандидат", "deleted": "Удалён"}
+
+
+def _rounded(rect, r):
+    from PySide6.QtGui import QPainterPath
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(rect), r, r)
+    return path
+
+
+class ClipCards(QObject):
+    """Карточки клипов (2.3.0): крупная вертикальная обложка, плашка статуса, оценка; при наведении
+    карточка приподнимается, превью играет без звука; пока обложки грузятся — заглушки-скелеты.
+    Список остаётся обычным QListWidget — текст строк прежний, рисует карточки делегат."""
+
+    LIST_H = 116                    # высота строки в режиме «список»
+    GRID_W, GRID_COVER = 156, 248   # ширина карточки и высота обложки в «сетке»
+
+    def __init__(self, view, page):
+        super().__init__(view)
+        self.view = view
+        self.page = page
+        self.grid = False
+        self.hover = {}                 # строка → 0..1 (приподнята)
+        self.target = {}
+        self.hover_row = -1
+        self.phase = 0.0                # бегущий блик на скелетах
+        self.pixmaps = {}               # путь обложки → (время изменения, картинка)
+        self.queue = []                 # обложки, которые ещё грузятся
+        self.timer = QTimer(self)
+        self.timer.setInterval(16)
+        self.timer.timeout.connect(self._tick)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(450)
+        self.preview_timer.timeout.connect(self._start_preview)
+        self.preview = None             # (виджет видео, проигрыватель)
+        from PySide6.QtWidgets import QStyledItemDelegate
+
+        cards = self
+
+        class Delegate(QStyledItemDelegate):
+            def paint(self, p, opt, index):
+                cards.paint(p, opt, index)
+
+            def sizeHint(self, opt, index):
+                return cards.size_hint()
+
+        self.delegate = Delegate(view)
+        view.setItemDelegate(self.delegate)
+        view.setMouseTracking(True)
+        view.viewport().setMouseTracking(True)
+        view.viewport().installEventFilter(self)
+        view.verticalScrollBar().valueChanged.connect(lambda _: self.stop_preview())
+
+    # --- режим ---
+    def set_grid(self, on):
+        from PySide6.QtWidgets import QListView
+        self.grid = bool(on)
+        v = self.view
+        self.stop_preview()
+        if on:
+            v.setViewMode(QListView.IconMode)
+            v.setFlow(QListView.LeftToRight)
+            v.setWrapping(True)
+            v.setResizeMode(QListView.Adjust)
+            v.setMovement(QListView.Static)
+            v.setSpacing(6)
+        else:
+            v.setViewMode(QListView.ListMode)
+            v.setFlow(QListView.TopToBottom)
+            v.setWrapping(False)
+            v.setSpacing(0)
+        v.setDragEnabled(True)
+        v.setDragDropMode(QAbstractItemView.DragOnly)
+        v.setUniformItemSizes(True)
+        v.doItemsLayout()
+
+    def _grid_size(self):
+        """Карточки сетки тянутся на всю ширину списка: столько столбцов, сколько влезает."""
+        vw = max(160, self.view.viewport().width() - 6)
+        cols = max(1, vw // (self.GRID_W + 12))
+        w = vw // cols - 12
+        return w, int((w - 16) * 16 / 9) + 16
+
+    def size_hint(self):
+        if self.grid:
+            w, ch = self._grid_size()
+            return QSize(w, ch + 74)
+        return QSize(max(200, self.view.viewport().width() - 4), self.LIST_H)
+
+    # --- обложки ---
+    def cover(self, path):
+        """Обложка, если уже загружена; иначе — поставить в очередь (пока рисуется скелет)."""
+        if not path:
+            return None
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        got = self.pixmaps.get(path)
+        if got and got[0] == mtime:
+            return got[1]
+        if path not in self.queue:
+            self.queue.append(path)
+            self.timer.start()
+        return False
+
+    def load_all_now(self):
+        """Догрузить все обложки сразу (снимки экрана, тесты)."""
+        while self.queue:
+            self._load_one()
+        self.view.viewport().update()
+
+    def _load_one(self):
+        path = self.queue.pop(0)
+        pm = QPixmap(path)
+        if pm.isNull():
+            self.pixmaps[path] = (0, None)
+            return
+        pm = pm.scaledToHeight(self.GRID_COVER * 2, Qt.SmoothTransformation)
+        try:
+            self.pixmaps[path] = (os.path.getmtime(path), pm)
+        except OSError:
+            pass
+
+    def _tick(self):
+        busy = False
+        for _ in range(3):                           # по 3 обложки за кадр — окно не подвисает
+            if self.queue:
+                self._load_one()
+                busy = True
+        step = 16 / 180                              # приподнимание — 180 мс
+        for row, want in list(self.target.items()):
+            cur = self.hover.get(row, 0.0)
+            if abs(cur - want) > 0.01:
+                self.hover[row] = cur + max(-step, min(step, want - cur))
+                busy = True
+            else:
+                self.hover[row] = want
+                if want == 0:
+                    self.target.pop(row, None)
+                    self.hover.pop(row, None)
+        if self.queue:
+            self.phase = (self.phase + 0.025) % 1.0
+        self.view.viewport().update()
+        if not busy and not self.queue:
+            self.timer.stop()
+
+    # --- наведение ---
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == e.Type.Resize and self.grid:
+            QTimer.singleShot(0, self.view.doItemsLayout)
+        if t == e.Type.MouseMove:
+            idx = self.view.indexAt(e.position().toPoint())
+            self._hover_to(idx.row() if idx.isValid() else -1)
+        elif t == e.Type.Leave:
+            self._hover_to(-1)
+        return False
+
+    def _hover_to(self, row):
+        if row == self.hover_row:
+            return
+        self.stop_preview()
+        if self.hover_row >= 0:
+            self.target[self.hover_row] = 0.0
+        self.hover_row = row
+        if row >= 0:
+            self.target[row] = 1.0
+            self.preview_timer.start()
+        if animations_ok(self.view):
+            self.timer.start()
+        else:                                        # без анимаций — сразу
+            for r, want in list(self.target.items()):
+                self.hover[r] = want
+            self.view.viewport().update()
+
+    def _cover_rect(self, rect):
+        if self.grid:
+            w, ch = self._grid_size()
+            return QRectF(rect.x() + 8, rect.y() + 8, rect.width() - 16, ch - 16)
+        h = rect.height() - 16
+        return QRectF(rect.x() + 8, rect.y() + 8, h * 9 / 16, h)
+
+    def _start_preview(self):
+        """Превью клипа без звука прямо на обложке."""
+        from PySide6.QtGui import QGuiApplication
+        row = self.hover_row
+        if row < 0 or not animations_ok(self.view) or QGuiApplication.platformName() == "offscreen":
+            return
+        it = self.view.item(row)
+        path = it.data(CLIP_PATH) if it else None
+        if not path or not os.path.isfile(path):
+            return
+        rect = self.view.visualItemRect(it)
+        cr = self._cover_rect(rect).toRect().adjusted(0, -3, 0, -3)
+        video = QVideoWidget(self.view.viewport())
+        video.setAttribute(Qt.WA_TransparentForMouseEvents)
+        video.setAspectRatioMode(Qt.KeepAspectRatioByExpanding)
+        video.setGeometry(cr)
+        player = QMediaPlayer(video)
+        player.setVideoOutput(video)
+        player.setLoops(QMediaPlayer.Infinite)
+        player.setSource(QUrl.fromLocalFile(path))     # без QAudioOutput — звука нет
+        video.show()
+        player.play()
+        self.preview = (video, player)
+
+    def stop_preview(self):
+        self.preview_timer.stop()
+        if self.preview:
+            video, player = self.preview
+            self.preview = None
+            player.stop()
+            video.hide()
+            video.deleteLater()
+
+    # --- рисование ---
+    def paint(self, p, opt, index):
+        from PySide6.QtWidgets import QStyle
+        d = index.data(CARD)
+        if not d:
+            return
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        t = self.hover.get(index.row(), 0.0)
+        sel = bool(opt.state & QStyle.State_Selected)
+        rect = QRectF(opt.rect).adjusted(4, 4, -4, -4)
+        rect.translate(0, -3 * t)
+        if t > 0:                                    # мягкая тень под приподнятой карточкой
+            for k in range(4):
+                c = QColor(0, 0, 0, int(28 * t))
+                p.setPen(Qt.NoPen)
+                p.setBrush(c)
+                p.drawRoundedRect(rect.adjusted(-k, k + 2, k, k + 4), 14 + k, 14 + k)
+        bg = QColor("#2a1a22") if sel else QColor("#17181e").lighter(100 + int(18 * t))
+        p.setBrush(bg)
+        p.setPen(QPen(QColor(ACCENT if sel else ("#3a3e4a" if t > 0.5 else "#24262e")), 1.6 if sel else 1))
+        p.drawRoundedRect(rect, 14, 14)
+        cand = d["kind"] != "clip"
+        cr = self._cover_rect(rect.toRect())
+        pm = None if cand else self.cover(d.get("cover"))
+        p.save()
+        p.setClipPath(_rounded(cr, 10))
+        if pm:
+            sw = cr.width() / cr.height() * pm.height()
+            src = QRectF((pm.width() - sw) / 2, 0, sw, pm.height())     # по центру, как 9:16
+            p.drawPixmap(cr, pm, src)
+        elif pm is False:                              # грузится — скелет с бегущим бликом
+            from PySide6.QtGui import QLinearGradient
+            g = QLinearGradient(cr.left() - cr.width() + 3 * cr.width() * self.phase, 0,
+                                cr.left() + 3 * cr.width() * self.phase, 0)
+            g.setColorAt(0, QColor("#1c1d24"))
+            g.setColorAt(0.5, QColor("#2a2c35"))
+            g.setColorAt(1, QColor("#1c1d24"))
+            p.fillRect(cr, g)
+        else:
+            p.fillRect(cr, QColor("#1c1d24"))
+            ic = theme.pixmap("sparkles" if cand else "film", "#4a4e5a", 22)
+            p.drawPixmap(int(cr.center().x() - 11), int(cr.center().y() - 11), ic)
+        p.restore()
+        if self.grid:
+            self._paint_grid(p, rect, cr, d, sel)
+        else:
+            self._paint_list(p, rect, cr, d, sel)
+        p.restore()
+
+    def _font(self, px, weight=QFont.Normal):
+        f = QFont(theme.FAMILY or "Segoe UI")
+        f.setPixelSize(px)
+        f.setWeight(weight)
+        return f
+
+    def _pill(self, p, x, y, status):
+        name = STATUS_NAMES.get(status, status)
+        fg, bg = theme.STATUS_COLORS.get(status, theme.STATUS_COLORS["rejected"])
+        f = self._font(11, QFont.DemiBold)
+        p.setFont(f)
+        from PySide6.QtGui import QFontMetrics
+        w = QFontMetrics(f).horizontalAdvance(name) + 18
+        r = QRectF(x, y, w, 20)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(bg))
+        p.drawRoundedRect(r, 10, 10)
+        p.setPen(QColor(fg))
+        p.drawText(r, Qt.AlignCenter, name)
+        return w
+
+    def _score(self, p, x, y, score, on_cover=False):
+        r = QRectF(x, y, 30 + text_width(f"{score:.1f}", 12, QFont.DemiBold), 22)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 160) if on_cover else QColor("#22242c"))
+        p.drawRoundedRect(r, 11, 11)
+        hot = score >= 6
+        p.drawPixmap(int(x + 7), int(y + 4), theme.pixmap("star", ACCENT if hot else "#f5c451", 14))
+        p.setFont(self._font(12, QFont.DemiBold))
+        p.setPen(QColor("#ffffff"))
+        p.drawText(r.adjusted(22, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, f"{score:.1f}")
+
+    def _paint_list(self, p, rect, cr, d, sel):
+        x = cr.right() + 14
+        w = rect.right() - x - 10
+        y = rect.top() + 10
+        p.setFont(self._font(12, QFont.DemiBold))
+        p.setPen(QColor(theme.DIM if d["kind"] != "clip" else MUTED))
+        num = f"{d['num']:02d}" if d.get("num") is not None else ""
+        p.drawText(QRectF(x, y, 30, 20), Qt.AlignVCenter | Qt.AlignLeft, num)
+        tx = x + (28 if num else 0)
+        p.setFont(self._font(14, QFont.DemiBold))
+        p.setPen(QColor("#ffffff" if d["kind"] == "clip" else MUTED))
+        from PySide6.QtGui import QFontMetrics
+        title = QFontMetrics(p.font()).elidedText(d["title"], Qt.ElideRight, int(w - (tx - x)))
+        p.drawText(QRectF(tx, y, w - (tx - x), 20), Qt.AlignVCenter | Qt.AlignLeft, title)
+        p.setFont(self._font(12))
+        p.setPen(QColor(MUTED))
+        meta = QFontMetrics(p.font()).elidedText(d["meta"], Qt.ElideRight, int(w))
+        p.drawText(QRectF(x, y + 24, w, 18), Qt.AlignVCenter | Qt.AlignLeft, meta)
+        if d.get("tags"):
+            p.setPen(QColor(theme.DIM))
+            tags = QFontMetrics(p.font()).elidedText(d["tags"], Qt.ElideRight, int(w))
+            p.drawText(QRectF(x, y + 44, w, 18), Qt.AlignVCenter | Qt.AlignLeft, tags)
+        by = rect.bottom() - 32
+        px = x + self._pill(p, x, by + 1, d["status"]) + 8
+        self._score(p, px, by, d["score"])
+        if d.get("marks"):
+            sx = px + 38 + text_width(f"{d['score']:.1f}", 12, QFont.DemiBold)
+            p.drawPixmap(int(sx), int(by + 3), theme.pixmap("flag", ACCENT, 16))
+
+    def _paint_grid(self, p, rect, cr, d, sel):
+        self._score(p, cr.left() + 6, cr.top() + 6, d["score"], on_cover=True)
+        if d.get("marks"):
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 160))
+            p.drawEllipse(QRectF(cr.right() - 28, cr.top() + 6, 22, 22))
+            p.drawPixmap(int(cr.right() - 24), int(cr.top() + 10), theme.pixmap("flag", ACCENT, 14))
+        self._pill(p, cr.left() + 6, cr.bottom() - 26, d["status"])
+        x, w = rect.left() + 10, rect.width() - 20
+        y = cr.bottom() + 8
+        from PySide6.QtGui import QFontMetrics
+        p.setFont(self._font(13, QFont.DemiBold))
+        p.setPen(QColor("#ffffff" if d["kind"] == "clip" else MUTED))
+        fm = QFontMetrics(p.font())
+        text = (f"{d['num']:02d}  " if d.get("num") is not None else "") + d["title"]
+        lines, rest = [], text
+        for _ in range(2):                           # название — в две строки, дальше «…»
+            if not rest:
+                break
+            cut = len(rest)
+            while cut > 1 and fm.horizontalAdvance(rest[:cut]) > w:
+                cut = rest.rfind(" ", 0, cut - 1) if rest.rfind(" ", 0, cut - 1) > 0 else cut - 1
+            lines.append(rest[:cut].strip())
+            rest = rest[cut:].strip()
+        if rest and lines:
+            lines[-1] = fm.elidedText(lines[-1] + " " + rest, Qt.ElideRight, int(w))
+        for k, line in enumerate(lines):
+            p.drawText(QRectF(x, y + 18 * k, w, 18), Qt.AlignVCenter | Qt.AlignLeft, line)
+        p.setFont(self._font(11))
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(x, y + 40, w, 16), Qt.AlignVCenter | Qt.AlignLeft,
+                   QFontMetrics(p.font()).elidedText(d["meta"], Qt.ElideRight, int(w)))
 
 
 class ClipList(QListWidget):
@@ -1696,11 +2262,23 @@ class ClipsPage(QWidget):
             fb = QPushButton(name)
             fb.setCheckable(True)
             fb.setObjectName("filter")
-            fb.setMinimumWidth(fb.fontMetrics().horizontalAdvance(name) + 28)
+            fb.setMinimumWidth(text_width(name, 13) + 30)
             fb.clicked.connect(lambda _, i=i: self.set_filter(i))
             frow.addWidget(fb, i // per_row, i % per_row)
             self.filter_btns.append(fb)
         frow.setColumnStretch(per_row, 1)
+        vbox = QHBoxLayout()                       # «список / сетка» (2.3.0)
+        vbox.setSpacing(2)
+        self.view_btns = {}
+        for key, ic, tip in (("list", "list", "Список"), ("grid", "layout-grid", "Сетка")):
+            vb = QPushButton()
+            vb.setObjectName("viewBtn")
+            vb.setCheckable(True)
+            vb.setToolTip(tip)
+            theme.set_icon(vb, ic, MUTED, 16, active="#ffffff")
+            vb.clicked.connect(lambda _, k=key: self.set_view(k))
+            vbox.addWidget(vb)
+            self.view_btns[key] = vb
         ll.addLayout(frow)
         self.filter = 0
         self.filter_btns[0].setChecked(True)
@@ -1713,7 +2291,11 @@ class ClipsPage(QWidget):
         self._search_timer.setInterval(250)
         self._search_timer.timeout.connect(self.run_search)
         self.search.textChanged.connect(lambda _: self._search_timer.start())
-        ll.addWidget(self.search)
+        srow = QHBoxLayout()
+        srow.setSpacing(8)
+        srow.addWidget(self.search, 1)
+        srow.addLayout(vbox)
+        ll.addLayout(srow)
         self.left_stack = QStackedWidget()
         ll.addWidget(self.left_stack, 1)
         found = QWidget()
@@ -1744,6 +2326,7 @@ class ClipsPage(QWidget):
         self.list.setTextElideMode(Qt.ElideNone)
         self.list.setIconSize(QSize(COVER_W, COVER_H))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.cards = ClipCards(self.list, self)
         self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)    # Ctrl/Shift — несколько (5.15)
         self._covers = {}              # обложки списка: путь → (время изменения, значок)
         self.list.currentRowChanged.connect(self._row_changed)
@@ -1755,8 +2338,19 @@ class ClipsPage(QWidget):
         split.addWidget(left)
 
         right = QWidget()
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(12, 0, 0, 0)
+        rl_outer = QVBoxLayout(right)
+        rl_outer.setContentsMargins(16, 0, 0, 0)
+        rl_outer.setSpacing(12)
+        upper = QHBoxLayout()
+        upper.setSpacing(16)
+        self.upper = upper
+        rl_outer.addLayout(upper, 1)
+        player_col = QFrame()
+        player_col.setObjectName("playerBox")
+        rl = QVBoxLayout(player_col)
+        rl.setContentsMargins(12, 12, 12, 10)
+        rl.setSpacing(8)
+        upper.addWidget(player_col, 1)
         self.player_slot = QVBoxLayout()
         self.player = PlayerPanel()
         sc = QShortcut(QKeySequence(Qt.Key_Space), self)
@@ -1810,21 +2404,23 @@ class ClipsPage(QWidget):
         self.cand_bar.hide()
         rl.addWidget(self.cand_bar)
 
-        # --- редактор клипа ---
+        # --- редактор клипа: справа от плеера, вкладки — сегментированный переключатель (2.3.0) ---
         self.editor, outer = card()
-        outer.setSpacing(10)
-        tabs = QHBoxLayout()
-        tabs.setSpacing(6)
+        outer.setSpacing(12)
+        seg = QFrame()
+        seg.setObjectName("segBox")
+        tabs = QHBoxLayout(seg)
+        tabs.setContentsMargins(3, 3, 3, 3)
+        tabs.setSpacing(2)
         self.ed_tabs = []
         for i, name in enumerate(("Клип", "Текст", "Описание", "Публикация", "Музыка")):
             b = QPushButton(name)
-            b.setObjectName("filter")
+            b.setObjectName("seg")
             b.setCheckable(True)
             b.clicked.connect(lambda _, i=i: self.show_tab(i))
-            tabs.addWidget(b)
+            tabs.addWidget(b, 1)
             self.ed_tabs.append(b)
-        tabs.addStretch(1)
-        outer.addLayout(tabs)
+        outer.addWidget(seg)
         self.ed_stack = QStackedWidget()
         outer.addWidget(self.ed_stack)
         page = QWidget()
@@ -1848,7 +2444,11 @@ class ClipsPage(QWidget):
         self.tl.seek.connect(self._tl_seek)
         self.tl.selection_changed.connect(self._tl_selection)
         self.tl.bleep_clicked.connect(self._tl_bleep)
-        ed.addWidget(self.tl)
+        self.tl_box = QFrame()                       # таймлайн — во всю ширину под плеером (2.3.0)
+        self.tl_box.setObjectName("panel")
+        tlb = QVBoxLayout(self.tl_box)
+        tlb.setContentsMargins(12, 10, 12, 10)
+        tlb.addWidget(self.tl)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -1858,6 +2458,8 @@ class ClipsPage(QWidget):
         row.addWidget(self.e_title, 1)
         self.btn_rebuild = QPushButton("Пересобрать")
         self.btn_rebuild.setObjectName("primary")
+        theme.set_icon(self.btn_rebuild, "refresh-cw", "#ffffff", 15)
+        glow_button(self.btn_rebuild, 16, 70)
         self.btn_rebuild.clicked.connect(self.rebuild)
         row.addWidget(self.btn_rebuild)
         ed.addLayout(row)
@@ -1885,7 +2487,8 @@ class ClipsPage(QWidget):
         ed.addLayout(row)
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_good = QPushButton("👍  Выложу")
+        self.btn_good = QPushButton("Выложу")
+        theme.set_icon(self.btn_good, "thumbs-up", FG, 16, active="#ffffff")
         self.btn_good.setToolTip("Момент хороший — буду выкладывать  (G)")
         self.btn_good.setCheckable(True)
         self.btn_good.clicked.connect(lambda: self.rate("post"))
@@ -1905,7 +2508,9 @@ class ClipsPage(QWidget):
 
         from PySide6.QtWidgets import QToolButton
         self.btn_more = QToolButton()
-        self.btn_more.setText("Ещё настройки  ▸")
+        self.btn_more.setText("Ещё настройки")
+        self.btn_more.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        theme.set_icon(self.btn_more, "chevron-right", MUTED, 14)
         self.btn_more.setCheckable(True)
         self.btn_more.setObjectName("more")
         self.btn_more.toggled.connect(self._toggle_more)
@@ -2161,10 +2766,10 @@ class ClipsPage(QWidget):
             row.setSpacing(8)
             lbl = QLabel(name)
             lbl.setObjectName("rowLabel")
-            lbl.setFixedWidth(84)
+            lbl.setMinimumWidth(text_width("Instagram", 13) + 8)
             row.addWidget(lbl)
             state = hint("")
-            state.setFixedWidth(100)
+            state.setMinimumWidth(100)
             row.addWidget(state)
             go = QPushButton("Открыть")
             go.setToolTip(f"Окно загрузки {name}, описание — в буфер")
@@ -2227,7 +2832,10 @@ class ClipsPage(QWidget):
                                                    self._music_set(volume=float(v))))
         row.addWidget(self.m_vol)
         row.addWidget(self.m_vol_l)
-        row.addSpacing(10)
+        row.addStretch(1)
+        ml.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(10)
         self.m_duck = Toggle(True, tip="Когда говорят — музыка уходит ещё тише")
         self.m_duck.toggled.connect(lambda v: self._music_set(duck=bool(v)))
         row.addWidget(self.m_duck)
@@ -2262,16 +2870,24 @@ class ClipsPage(QWidget):
         self._desc_timer.timeout.connect(self.save_desc)
         self.show_tab(0)
         self.set_desc_platform("tiktok")
+        self.set_view(self.win.settings.get("clips_view", "grid"))
 
-        rl.addWidget(self.editor)
+        self.editor.setMinimumWidth(420)
+        self.editor.setMaximumWidth(600)
+        self.editor.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        upper.addWidget(self.editor)
+        rl_outer.addWidget(self.tl_box)
         self.editor.setEnabled(False)
 
         split.addWidget(right)
-        left.setMinimumWidth(430)          # пять фильтров в ряд
-        split.setStretchFactor(0, 2)
+        left.setMinimumWidth(max(400, sum(b.minimumWidth() for b in self.filter_btns[4:]) + 3 * 4 +
+                                 max(b.minimumWidth() for b in self.filter_btns[:4]) + 8))
+        split.setStretchFactor(0, 1)                # на широком мониторе растёт и список
         split.setStretchFactor(1, 3)
-        split.setSizes([450, 690])
+        split.setSizes([410, 1000])
+        right.installEventFilter(self)              # ширина правой части — раскладка редактора
         self.split = split
+        split.splitterMoved.connect(lambda *_: self._relayout())
         lay.addWidget(split, 1)
 
         # пока нарезка не выбрана — вместо пустого редактора подсказка
@@ -2401,8 +3017,45 @@ class ClipsPage(QWidget):
         c = self.current_clip()
         self.refill(c["id"] if c else None)
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._relayout()
+
+    def eventFilter(self, obj, e):
+        if e.type() == e.Type.Resize and obj is self.split.widget(1):
+            self._relayout()
+        return False
+
+    def _relayout(self):
+        """Широкое окно — редактор справа от плеера; узкое — под плеером (ничего не обрезается)."""
+        from PySide6.QtWidgets import QBoxLayout
+        right = self.split.widget(1)
+        if right is None:
+            return
+        wide = right.width() >= 860
+        if wide == getattr(self, "_wide", None):
+            return
+        self._wide = wide
+        self.upper.setDirection(QBoxLayout.LeftToRight if wide else QBoxLayout.TopToBottom)
+        self.editor.setMaximumWidth(600 if wide else 16777215)
+        self.editor.setMinimumWidth(420 if wide else 0)
+        self.upper.setStretch(0, 1 if wide else 3)
+        self.upper.setStretch(1, 0 if wide else 2)
+
+    def set_view(self, key):
+        """«Список» или «Сетка» — запоминается."""
+        key = "list" if key == "list" else "grid"
+        for k, b in self.view_btns.items():
+            b.setChecked(k == key)
+        self.cards.set_grid(key == "grid")
+        if self.win.settings.get("clips_view") != key:
+            self.win.settings["clips_view"] = key
+            save_settings(self.win.settings)
+        fade_in(self.list, 160)
+
     def refill(self, select_id=None):
         want = FILTERS[self.filter][1]
+        self.cards.stop_preview()
         self.list.blockSignals(True)
         self.list.clear()
         clips = [c for c in sorted(self.proj["clips"], key=lambda c: c["num"])
@@ -2416,9 +3069,13 @@ class ClipsPage(QWidget):
                 f" · {c['end'] - c['start']:.0f} с · " + " · ".join(autoclip.clip_tags(c)))
             if c.get("marks"):
                 it.setToolTip("Клип по метке из OBS")
-            icon = self.cover_icon(c)
-            if icon:
-                it.setIcon(icon)
+            tags = [t for t in autoclip.clip_tags(c)[1:]]
+            it.setData(CARD, {"kind": "clip", "num": c["num"], "score": float(c["score"]), "title": c["title"],
+                              "status": c["status"], "marks": bool(c.get("marks")), "tags": " · ".join(tags),
+                              "meta": f"{autoclip.fmt_time(c['start'])}–{autoclip.fmt_time(c['end'])}"
+                                      f" · {c['end'] - c['start']:.0f} с",
+                              "cover": autoclip.cover_path_for(autoclip.cut_root(self.proj), c["file"])
+                              if c.get("cover") else None})
             it.setData(Qt.UserRole, c["id"])
             it.setData(CLIP_PATH, self.clip_path(c))
             self.list.addItem(it)
@@ -2438,6 +3095,11 @@ class ClipsPage(QWidget):
                     f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}"
                     f" · {k['end'] - k['start']:.0f} с · " + ("удалён" if show_deleted else "кандидат"))
                 it.setForeground(gray)
+                it.setData(CARD, {"kind": "cand", "num": None, "score": float(k["score"]), "title": k["title"],
+                                  "status": "deleted" if show_deleted else "candidate", "marks": False,
+                                  "tags": "момент без видео",
+                                  "meta": f"{autoclip.fmt_time(k['start'])}–{autoclip.fmt_time(k['end'])}"
+                                          f" · {k['end'] - k['start']:.0f} с"})
                 it.setToolTip("Кандидат: момент без видео. «Собрать» — сделать из него клип")
                 it.setData(Qt.UserRole, CAND + k["id"])
                 self.list.addItem(it)
@@ -3624,7 +4286,7 @@ class ClipsPage(QWidget):
 
     def _toggle_more(self, on):
         self.more.setVisible(on)
-        self.btn_more.setText("Ещё настройки  ▾" if on else "Ещё настройки  ▸")
+        theme.set_icon(self.btn_more, "chevron-down" if on else "chevron-right", MUTED, 14)
 
     def _shortcuts(self):
         """Горячие клавиши редактора (5.17)."""
@@ -3691,7 +4353,9 @@ class ClipsPage(QWidget):
     def show_tab(self, i):
         for j, b in enumerate(self.ed_tabs):
             b.setChecked(j == i)
-        self.ed_stack.setCurrentIndex(i)
+        if self.ed_stack.currentIndex() != i:
+            self.ed_stack.setCurrentIndex(i)
+            fade_in(self.ed_stack.currentWidget(), 180)       # плавная смена вкладки
 
     def set_desc_platform(self, key):
         self.save_desc()
@@ -3949,6 +4613,7 @@ class WeeklyPage(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 28, 32, 24)
         lay.setSpacing(14)
+        self._lay = lay
         lay.addLayout(page_title("Подборка", "Один ролик из «хороших» и «выложенных» клипов "
                                              "за последние дни. Лучшие — первыми."))
 
@@ -3965,6 +4630,7 @@ class WeeklyPage(QWidget):
             b = QPushButton(text)
             b.setObjectName("filter")
             b.setCheckable(True)
+            b.setMinimumWidth(text_width(text, 13) + 34)
             b.clicked.connect(lambda _, k=key: self.set_format(k))
             fmt.addWidget(b)
             self.fmt_btns[key] = b
@@ -4004,8 +4670,10 @@ class WeeklyPage(QWidget):
         body.addWidget(self.list, 1)
         side = QVBoxLayout()
         side.setSpacing(6)
-        self.up = QPushButton("↑")
-        self.down = QPushButton("↓")
+        self.up = QPushButton()
+        self.down = QPushButton()
+        theme.set_icon(self.up, "arrow-up", FG, 16)
+        theme.set_icon(self.down, "arrow-down", FG, 16)
         for b, d in ((self.up, -1), (self.down, 1)):
             b.setObjectName("square")
             b.setToolTip("Выше" if d < 0 else "Ниже")
@@ -4018,6 +4686,8 @@ class WeeklyPage(QWidget):
         self.empty = QWidget()
         el = QVBoxLayout(self.empty)
         el.addStretch(1)
+        el.addWidget(icon_label("layers", ACCENT, 28, 64), 0, Qt.AlignCenter)
+        el.addSpacing(8)
         t = QLabel("Клипов для подборки нет")
         t.setObjectName("cardTitle")
         t.setAlignment(Qt.AlignCenter)
@@ -4038,13 +4708,18 @@ class WeeklyPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.btn = QPushButton("🎞   Собрать подборку")
+        self.btn = QPushButton("Собрать подборку")
+        theme.set_icon(self.btn, "clapperboard", "#ffffff", 20)
+        glow_button(self.btn, 26, 100)
         self.btn.setObjectName("accent")
         self.btn.setMinimumWidth(260)
         self.btn.clicked.connect(self.build)
+        self.build_card, bc = card("Сборка подборки", icon="clapperboard")   # сборка — своей карточкой (2.3.0)
+        bc.setSpacing(10)
         mrow = QHBoxLayout()
         mrow.setSpacing(6)
         b = QPushButton("Музыка…")
+        theme.set_icon(b, "music", FG, 15)
         b.setToolTip("Один трек на всю подборку — свой или свободный")
         b.clicked.connect(self.pick_music)
         mrow.addWidget(b)
@@ -4054,14 +4729,14 @@ class WeeklyPage(QWidget):
         mrow.addWidget(self.music_none)
         self.music_label = hint("")
         mrow.addWidget(self.music_label, 1)
-        lay.addLayout(mrow)
+        bc.addLayout(mrow)
         self.set_music(self.s.get("weekly_music", ""))
         row.addWidget(self.btn)
         col = QVBoxLayout()
         col.setSpacing(6)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
-        self.bar.setFixedHeight(6)
+        self.bar.setFixedHeight(8)
         self.bar.setTextVisible(False)
         col.addWidget(self.bar)
         self.state = hint("")
@@ -4071,10 +4746,12 @@ class WeeklyPage(QWidget):
         self.btn_open.clicked.connect(lambda: self.last and open_path(self.last))
         self.btn_show = QPushButton("Показать в папке")
         self.btn_show.clicked.connect(lambda: self.last and show_in_folder(self.last))
+        theme.set_icon(self.btn_open, "play", FG, 14)
+        theme.set_icon(self.btn_show, "folder-open", FG, 15)
         for b in (self.btn_open, self.btn_show):
             b.setEnabled(False)
             row.addWidget(b)
-        lay.addLayout(row)
+        bc.addLayout(row)
 
         row = QHBoxLayout()
         self.dir_hint = hint("")
@@ -4083,11 +4760,16 @@ class WeeklyPage(QWidget):
         b.setObjectName("ghost")
         b.clicked.connect(self.pick_dir)
         row.addWidget(b)
-        lay.addLayout(row)
+        bc.addLayout(row)
+        lay.addWidget(self.build_card)
         self._show_dir()
 
         win.bus.weekly_progress.connect(self._progress)
         win.bus.weekly_done.connect(self._done)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        center_content(self, self._lay)
 
     # ---------- настройки страницы ----------
     def _days_changed(self, v):
@@ -4270,6 +4952,7 @@ class SettingsPage(QWidget):
         lay = QVBoxLayout(body)
         lay.setContentsMargins(32, 28, 32, 24)
         lay.setSpacing(16)
+        self._lay = lay
         lay.addLayout(page_title("Настройки"))
 
         # --- новые клипы ---
@@ -4347,7 +5030,7 @@ class SettingsPage(QWidget):
         self.bleep_db.setValue(int(self.s.get("bleep_rel_db", 0)))
         self.bleep_db.setFixedWidth(180)
         self.bleep_db_l = QLabel()
-        self.bleep_db_l.setFixedWidth(110)
+        self.bleep_db_l.setMinimumWidth(text_width("на уровне голоса", 13) + 6)
 
         def show_bleep_db(v):
             self.bleep_db_l.setText("на уровне голоса" if v == 0 else f"{v:+d} дБ к голосу")
@@ -5213,6 +5896,10 @@ class SettingsPage(QWidget):
             self.win.quit_app()
         return True
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        center_content(self, self._lay)
+
     def set_autostart(self, on):
         import autostart
         try:
@@ -5655,8 +6342,8 @@ def need_setup(settings, settings_existed):
 
 
 class MainWindow(QMainWindow):
-    PAGES = (("cut", "Нарезка", "\ue8c6"), ("clips", "Клипы", "\ue714"),
-             ("weekly", "Подборка", "\ue8f1"), ("settings", "Настройки", "\ue713"))
+    PAGES = (("cut", "Нарезка", "scissors"), ("clips", "Клипы", "film"),
+             ("weekly", "Подборка", "layers"), ("settings", "Настройки", "settings"))
 
     def __init__(self):
         super().__init__()
@@ -5687,6 +6374,7 @@ class MainWindow(QMainWindow):
         brand.setObjectName("brand")
         sl.addWidget(brand)
         self.version_btn = QPushButton(f"версия {update.VERSION}")
+        self.version_btn.setFlat(True)
         self.version_btn.setObjectName("version")
         self.version_btn.setCursor(Qt.PointingHandCursor)
         self.version_btn.setToolTip("Что нового")
@@ -5694,10 +6382,12 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.version_btn)
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
-        f = QFont("Segoe UI", 10)
         self.nav.setIconSize(QSize(18, 18))
         for _, text, icon in self.PAGES:
-            it = QListWidgetItem(glyph_icon(icon), "  " + text)
+            it = QListWidgetItem(theme.icon(icon, MUTED, 18, active="#ffffff"), "  " + text)
+            f = it.font()
+            f.setPixelSize(14)
+            f.setWeight(QFont.Medium)
             it.setFont(f)
             self.nav.addItem(it)
         sl.addWidget(self.nav, 1)
@@ -6181,7 +6871,7 @@ class MainWindow(QMainWindow):
         self.cancel.clear()
         self.cut.resume_bar.hide()
         self.cut.eta = autoclip.Eta()
-        self.cut.btn.setText("■   Остановить")
+        self.cut.btn.setText("Остановить")
         self.cut._busy_style(True)
 
         def work():
@@ -6334,6 +7024,11 @@ def dark_palette(app):
     pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#5c606b"))
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#5c606b"))
     app.setPalette(pal)
+    fam = theme.load_fonts()                      # Inter из папки программы (2.3.0)
+    if fam:
+        f = QFont(fam)
+        f.setPixelSize(13)
+        app.setFont(f)
     app.setStyleSheet(STYLE.replace("@ARROW@", arrow_icon()))
 
 

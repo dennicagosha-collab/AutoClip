@@ -26,7 +26,7 @@ def test_second_copy_hands_over_and_exits():
                 "from PySide6.QtWidgets import QApplication; q=QApplication([]); import app;"
                 "sys.exit(0 if app.ping_running(%r) else 3)") % (HERE, name)
         p = subprocess.Popen([sys.executable, "-c", code])
-        for _ in range(200):
+        for _ in range(600):                 # до 30 с: под нагрузкой вторая копия грузится долго
             pump(50)
             if p.poll() is not None and got:
                 break
