@@ -138,7 +138,7 @@ def test_window_backup_buttons(tmp_path, monkeypatch, fake_trash):
     monkeypatch.setattr(QMessageBox, "information", lambda p, t, text, *a: told.append(text))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (z, ""))
     st.save_backup()
-    assert os.path.isfile(z) and "токен" in told[-1] and "Последняя копия" in st.backup_state.text()
+    assert os.path.isfile(z) and "токен" in win._toast.text() and "Последняя копия" in st.backup_state.text()
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (z, ""))
     monkeypatch.setattr(app, "ask_choice", lambda p, text, ch: "yes")
     st.restore_backup()

@@ -105,3 +105,40 @@ def test_stage_strip_shows_current_and_total(monkeypatch):
     assert texts[0] == "✓ Звук" and texts[1] == "✓ Расшифровка" and texts[2] == "Модель  50%"
     assert cut.step_labels[2].property("state") == "active" and cut.total.text().startswith("Всего ")
     win.close()
+
+
+def test_animations_only_when_visible(monkeypatch):
+    """5.20: анимации — только когда окно видно и игра не на весь экран; тост сам исчезает."""
+    import sys
+    import pytest
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    import autoclip
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    monkeypatch.setattr(autoclip, "log", autoclip.log)
+    import app
+    app.dark_palette(QApplication.instance() or QApplication([]))
+    monkeypatch.setattr(autoclip, "fullscreen_app", lambda: None)
+    app._ANIM["t"] = 0
+    win = app.MainWindow()
+    assert not app.animations_ok(win)                          # окно скрыто (в трее) — без анимаций
+    win.show()
+    assert app.animations_ok(win)
+    monkeypatch.setattr(autoclip, "fullscreen_app", lambda: "game.exe")
+    app._ANIM["t"] = 0
+    assert not app.animations_ok(win)                          # игра на весь экран — без анимаций
+    app._ANIM["t"] = 0
+    monkeypatch.setattr(autoclip, "fullscreen_app", lambda: None)
+    win.toast("Привет", ms=50)
+    assert win._toast.isVisible() and win._toast.text() == "Привет"
+    from qtwait import pump
+    pump(200)
+    assert not win._toast.isVisible()
+    cut = win.cut
+    cut.eta = autoclip.Eta()
+    cut.show_progress("поиск", 50, "")
+    assert cut.scissors.isVisible() and cut.scissors.x() > 0  # ножницы едут по полосе
+    cut.finished(None)
+    assert not cut.scissors.isVisible()
+    win.close()

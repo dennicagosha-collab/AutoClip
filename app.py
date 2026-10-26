@@ -189,6 +189,13 @@ QScrollBar::handle:vertical:hover {{ background: #3a3e4a; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QToolTip {{ background: {SURFACE2}; color: {FG}; border: 1px solid {BORDER}; padding: 4px; }}
+QToolButton#more {{ background: transparent; border: none; color: {MUTED}; padding: 2px 4px; }}
+QToolButton#more:hover, QToolButton#more:checked {{ color: {FG}; }}
+QPushButton:checked {{ background: #2a1a20; border-color: {ACCENT}; color: white; }}
+#toast {{ background: #23252e; color: {FG}; border: 1px solid #343845; border-radius: 10px;
+          padding: 10px 16px; }}
+#scissors {{ color: white; font-size: 11pt; background: transparent; }}
+#plane {{ color: #7ec8ff; font-size: 13pt; background: transparent; }}
 """
 
 
@@ -601,6 +608,66 @@ class WaveView(QWidget):
 
 # сколько времени обычно занимает этап нарезки (доли): так полоса идёт ровнее, чем «поровну»
 STAGE_WEIGHTS = {"звук": 0.05, "расшифровка": 0.35, "модель": 0.2, "поиск": 0.05, "рендер": 0.35}
+
+
+_ANIM = {"t": 0.0, "ok": True}
+
+
+def animations_ok(widget=None):
+    """Анимации не грузят ПК: окно скрыто, свернуто, в трее или идёт игра на весь экран — без них."""
+    import time as _time
+    w = widget.window() if widget is not None else None
+    if w is not None and (not w.isVisible() or w.isMinimized()):
+        return False
+    now = _time.time()
+    if now - _ANIM["t"] > 10:                      # игру проверяем не чаще раза в 10 с
+        _ANIM["t"] = now
+        try:
+            _ANIM["ok"] = not autoclip.fullscreen_app()
+        except Exception:
+            _ANIM["ok"] = True
+    return _ANIM["ok"]
+
+
+def fade_in(widget, ms=160):
+    """Плавное появление (переход разделов, список клипов)."""
+    if widget is None or not animations_ok(widget):
+        return
+    from PySide6.QtCore import QPropertyAnimation
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+    eff = QGraphicsOpacityEffect(widget)
+    widget.setGraphicsEffect(eff)
+    anim = QPropertyAnimation(eff, b"opacity", widget)
+    anim.setDuration(ms)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+    anim.start()
+    widget._fade = anim
+
+
+class Toast(QLabel):
+    """Короткое сообщение внизу окна вместо всплывающего окна — само исчезает."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("toast")
+        self.setWordWrap(True)
+        self.hide()
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.hide)
+
+    def show_text(self, text, ms=4000):
+        self.setText(text)
+        self.setMaximumWidth(min(560, max(240, self.parent().width() - 80)))
+        self.adjustSize()
+        p = self.parent()
+        self.move((p.width() - self.width()) // 2, p.height() - self.height() - 28)
+        self.raise_()
+        self.show()
+        fade_in(self, 180)
+        self.timer.start(ms)
 
 
 def stage_name(st):
@@ -1423,6 +1490,21 @@ class CutPage(QWidget):
             self._step_state(lb, stage_name(st), "")
         self.total.setText("")
 
+    def _move_scissors(self, frac):
+        """Ножницы едут по полосе нарезки вместе с прогрессом (5.20)."""
+        if getattr(self, "scissors", None) is None:
+            self.scissors = QLabel("✂", self.bar)
+            self.scissors.setObjectName("scissors")
+            self.scissors.setAttribute(Qt.WA_TransparentForMouseEvents)
+        if not animations_ok(self) or frac >= 1:
+            self.scissors.hide()
+            return
+        self.scissors.adjustSize()
+        x = int(self.bar.width() * frac) - self.scissors.width() // 2
+        self.scissors.move(max(0, min(self.bar.width() - self.scissors.width(), x)),
+                           (self.bar.height() - self.scissors.height()) // 2)
+        self.scissors.show()
+
     def _busy_style(self, on):
         self.btn.setProperty("busy", on)
         self.btn.style().unpolish(self.btn)
@@ -1441,6 +1523,7 @@ class CutPage(QWidget):
         i = stages.index(stage)
         frac = stage_fraction(stage, pct)
         self.bar.setValue(int(frac * 1000))
+        self._move_scissors(frac)
         left = self.eta.update(frac) if self.eta else None
         self.bar.setFormat(f"{frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
         self.total.setText(f"Всего {frac * 100:.0f}%" + (f"  ·  {autoclip.fmt_left(left)}" if left is not None else ""))
@@ -1452,6 +1535,8 @@ class CutPage(QWidget):
 
     def finished(self, out):
         self.eta = None
+        if getattr(self, "scissors", None) is not None:
+            self.scissors.hide()
         self.bar.setFormat("готово" if out else "")
         self.btn.setText("✂   Нарезать")
         self.btn.setEnabled(True)
@@ -2158,8 +2243,32 @@ class ClipsPage(QWidget):
         self.win.bus.rebuilt.connect(self._rebuilt)
         self.win.bus.added.connect(self._added)
         self.win.bus.rebuild_progress.connect(self._rebuild_progress)
-        self.win.bus.send_state.connect(lambda t: self.state.setText(t))
+        self.win.bus.send_state.connect(self._send_state)
         self.refresh_recent()
+
+    def _send_state(self, text):
+        self.state.setText(text)
+        if text.startswith("Отправлено в Telegram"):
+            self.fly_plane()
+
+    def fly_plane(self):
+        """Самолётик улетает, когда клип ушёл в Telegram (5.20)."""
+        if not animations_ok(self):
+            return
+        from PySide6.QtCore import QPoint, QPropertyAnimation
+        plane = QLabel("✈", self.editor)
+        plane.setObjectName("plane")
+        plane.adjustSize()
+        y = max(0, self.editor.height() - 60)
+        plane.move(10, y)
+        plane.show()
+        anim = QPropertyAnimation(plane, b"pos", plane)
+        anim.setDuration(900)
+        anim.setStartValue(QPoint(10, y))
+        anim.setEndValue(QPoint(self.editor.width() - 30, max(0, y - 40)))
+        anim.finished.connect(plane.deleteLater)
+        anim.start()
+        plane._anim = anim
 
     # ---------- нарезки ----------
     def refresh_recent(self):
@@ -2216,6 +2325,7 @@ class ClipsPage(QWidget):
 
     def reload(self, select_id=None):
         """Перечитать project.json после изменений ядра."""
+        fade_in(self.list, 140)
         if self.proj:
             self.proj = autoclip.load_project(self.proj["_path"])
             self.refill(select_id)
@@ -2876,7 +2986,7 @@ class ClipsPage(QWidget):
         if not c or self.busy:
             return
         if self.pending():
-            QMessageBox.information(self, "AutoClip", "Сначала пересобери клип или отмени правки.")
+            self.win.toast("Сначала пересобери клип или отмени правки.")
             return
         t = self.rec_at_player(c)
         words = autoclip.all_words(self.segments() or [])
@@ -4956,8 +5066,8 @@ class SettingsPage(QWidget):
         self.show_backup_state()
         extra = (f"\nНе вошли занятые файлы ({len(res['skipped'])}) — закрой окна соцсетей и сохрани ещё раз, "
                  "если важен вход в соцсети." if res["skipped"] else "")
-        QMessageBox.information(self, "AutoClip", f"Копия сохранена: {path}\n\nВ ней токен Telegram-бота — "
-                                                  f"никому её не пересылай.{extra}")
+        self.win.toast(f"Копия сохранена: {path}\nВ ней токен Telegram-бота — никому её не пересылай.{extra}",
+                       8000)
 
     def restore_backup(self):
         import backup
@@ -5023,7 +5133,7 @@ class SettingsPage(QWidget):
             self.obs.setText(d)
             self._set("obs_dir", d)
         else:
-            QMessageBox.information(self, "AutoClip", "Папку записей в настройках OBS не нашёл — "
+            self.win.toast("Папку записей в настройках OBS не нашёл — "
                                                       "выбери её кнопкой «Выбрать…».")
 
     def set_watch(self, on):
@@ -5782,6 +5892,7 @@ class MainWindow(QMainWindow):
 
     def _page(self, i):
         self.stack.setCurrentIndex(i)
+        fade_in(self.stack.currentWidget())               # плавный переход раздела
         if self.PAGES[i][0] == "weekly":
             self.weekly.refresh()
         if self.PAGES[i][0] != "clips" and not self.detached:
@@ -5789,6 +5900,11 @@ class MainWindow(QMainWindow):
 
     def go(self, key):
         self.nav.setCurrentRow([p[0] for p in self.PAGES].index(key))
+
+    def toast(self, text, ms=4000):
+        if getattr(self, "_toast", None) is None:
+            self._toast = Toast(self)
+        self._toast.show_text(text, ms)
 
     # --- нарезка в фоне ---
     def start_cut(self, files):
