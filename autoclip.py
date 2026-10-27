@@ -3287,28 +3287,72 @@ def check_music(mcfg):
     return dict(MUSIC_DEFAULT, **mcfg)
 
 
+_levels_cache = {}
+QUIET_RANGE_DB = 30.0     # окна тише самого громкого на 30 дБ — паузы, не речь
+BLEEP_BELOW_DB = 3.0      # звук на мат — чуть тише голоса: не «скример» (просьба Гоши)
+BLEEP_PEAK_HEADROOM = -1.0  # пик звука на мат — на 1 дБ ниже пика голоса рядом
+
+
+def sound_levels(path, start=0.0, dur=None, pct=90):
+    """Уровни куска звука по окнам 50 мс (дБ от полной шкалы): (громкость — pct-й процентиль окон,
+    где что-то звучит; пик). Работает и на коротких звуках (в отличие от LUFS). Тишина — (None, None)."""
+    import numpy as np
+    key = (os.path.abspath(path), round(start, 2), dur and round(dur, 2), pct,
+           os.path.getmtime(path) if os.path.exists(path) else 0)
+    if key in _levels_cache:
+        return _levels_cache[key]
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, start):.3f}"]
+    if dur:
+        cmd += ["-t", f"{dur:.3f}"]
+    cmd += ["-i", path, "-vn", "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"]
+    p = run(cmd, binary=True)
+    x = np.frombuffer(p.stdout or b"", dtype=np.float32)
+    res = (None, None)
+    if len(x):
+        peak = float(np.max(np.abs(x)))
+        n = 800                                              # 50 мс при 16 кГц
+        frames = x[:len(x) // n * n].reshape(-1, n) if len(x) >= n else x.reshape(1, -1)
+        rms = 20 * np.log10(np.sqrt(np.mean(frames ** 2, axis=1)) + 1e-9)
+        active = rms[rms > max(float(rms.max()) - QUIET_RANGE_DB, -75.0)]
+        if peak > 1e-5 and len(active):
+            res = (float(np.percentile(active, pct)), 20 * math.log10(peak))
+    _levels_cache[key] = res
+    return res
+
+
 def bleep_gains(src, tl, bleeps, snd, cfg):
     """snd — путь к звуку или список путей (свой на каждое место)."""
-    if isinstance(snd, list):
-        cache = {}
-        out = []
-        for i, b in enumerate(bleeps):
-            if snd[i] not in cache:
-                cache[snd[i]] = loudness(snd[i])
-            out.append(_bleep_gain(src, tl, b, cache[snd[i]], cfg))
-        return out
-    sl = loudness(snd)
-    return [_bleep_gain(src, tl, b, sl, cfg) for b in bleeps]
+    paths = snd if isinstance(snd, list) else [snd] * len(bleeps)
+    durs = {}
+    out = []
+    for b, path in zip(bleeps, paths):
+        if path not in durs:
+            durs[path] = sound_duration(path)
+        out.append(_bleep_gain(src, tl, b, path, durs[path], cfg))
+    return out
 
 
-def _bleep_gain(src, tl, bleep, sl, cfg):
-    """Усиление звука на мат (дБ) для каждого места: под громкость речи рядом (окно ±1,5 с
-    в записи, LUFS) плюс поправка bleep_rel_db. Не измерить — фиксированная bleep_volume."""
-    fixed = 20 * math.log10(max(0.01, float(cfg.get("bleep_volume", 1.0))))
-    a, b, _ = bleep
+def _bleep_gain(src, tl, bleep, snd, sdur, cfg):
+    """Усиление звука на мат (дБ) для каждого места — по ТЕКУЩЕЙ громкости голоса рядом (±1,5 с
+    в записи) и по той части звука, что реально прозвучит. Плюс поправка bleep_rel_db.
+    Потолок: пик звука не громче пика голоса рядом — никаких «скримеров»."""
+    a, b, until = bleep
+    rel = float(cfg.get("bleep_rel_db", 0.0))
+    L = max(0.05, min(sdur, until - a))                     # столько звука прозвучит
     t = out_to_rec(a, tl)                                   # где это место в записи
-    voice = loudness(src, max(0.0, t - 1.5), (b - a) + 3.0)
-    return fixed if (sl is None or voice is None) else voice + float(cfg.get("bleep_rel_db", 0.0)) - sl
+    # громкая часть звука = громкая часть речи рядом (минус BLEEP_BELOW_DB), пик — не выше пика голоса
+    v_level, v_peak = sound_levels(src, max(0.0, t - 1.5), (b - a) + 3.0, pct=90)
+    if v_level is None:                                     # рядом тихо — смотрим шире
+        v_level, v_peak = sound_levels(src, max(0.0, t - 5.0), (b - a) + 10.0, pct=90)
+    s_level, s_peak = sound_levels(snd, 0.0, L, pct=90)
+    if s_level is None:
+        return 0.0
+    if v_level is None:
+        v_level, v_peak = -26.0, -12.0                      # голоса не нашли — тихо, как обычная речь
+    gain = v_level - BLEEP_BELOW_DB + rel - s_level
+    if s_peak is not None and v_peak is not None:
+        gain = min(gain, v_peak + BLEEP_PEAK_HEADROOM + max(0.0, rel) - s_peak)
+    return max(-40.0, min(gain, 24.0))
 
 
 def clip_words(segments, s, e):
