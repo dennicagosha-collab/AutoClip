@@ -64,3 +64,61 @@ def test_ok_is_half_signal():
     lo = forecast.predict(dict(mid, laugh=0.0), 2.0, info)
     hi = forecast.predict(dict(mid, laugh=3.0), 2.0, info)
     assert lo["value"] < p["value"] < hi["value"]                   # «Норм» — между
+
+
+def test_move_waits_while_file_is_briefly_busy(tmp_path):
+    """Оценка переносит клип в папку оценки; проигрыватель отпускает файл не сразу — перенос
+    повторяется, а не падает «файл занят другим процессом»."""
+    import threading
+    src, dst = tmp_path / "клип.mp4", tmp_path / "Выложу" / "клип.mp4"
+    src.write_bytes(b"x" * 1000)
+    dst.parent.mkdir()
+    f = open(src, "rb")                                       # «плеер» держит файл открытым
+    threading.Timer(0.5, f.close).start()                     # и отпускает через полсекунды
+    autoclip._replace_retry(str(src), str(dst))
+    assert dst.is_file() and not src.exists()
+    g = open(dst, "rb")                                       # держит насовсем — честная ошибка
+    try:
+        try:
+            autoclip._replace_retry(str(dst), str(src), seconds=0.3)
+            moved = True
+        except PermissionError:
+            moved = False
+        assert not moved
+    finally:
+        g.close()
+
+
+def test_rate_frees_player_and_explains_busy_file(tmp_path, monkeypatch):
+    """«Выложу»: перед переносом плеер и превью отпускают файл; если файл всё равно занят —
+    понятное сообщение, программа не падает."""
+    import sys
+    import pytest
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
+    monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    import app as A
+    A.dark_palette(QApplication.instance() or QApplication([]))
+    cut = _proj(tmp_path, [{}])
+    win = A.MainWindow()
+    page = win.clips
+    page.load(cut)
+    page.list.setCurrentRow(0)
+    freed = []
+    monkeypatch.setattr(page.player, "release_file", lambda ms=300: freed.append("плеер"))
+    monkeypatch.setattr(page.cards, "stop_preview", lambda: freed.append("превью"))
+    page.rate("post")
+    assert freed[:2] == ["превью", "плеер"]                  # до переноса файла
+    assert autoclip.load_project(cut)["clips"][0]["status"] == "post"
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))
+
+    def busy(*a, **k):
+        raise PermissionError(32, "файл занят")
+    monkeypatch.setattr(autoclip, "set_rating", busy)
+    page.rate("ok")
+    assert warned and "открыт в другой программе" in warned[0]
+    win.close()

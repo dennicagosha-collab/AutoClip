@@ -4000,6 +4000,19 @@ def clip_rel(proj, status, name):
     return f"{sub}/{os.path.basename(name)}"
 
 
+def _replace_retry(src, dst, seconds=2.0):
+    """Перенос файла; занят (проигрыватель отпускает его не сразу) — повторять до seconds."""
+    end = time.time() + seconds
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if time.time() >= end:
+                raise
+            time.sleep(0.1)
+
+
 def place_clip(proj, clip):
     """Положить файл клипа и обложку в подпапку его статуса (5.11). Файла нет — только запись."""
     if proj.get("layout") != 2 or clip.get("status") == "rejected":
@@ -4011,10 +4024,10 @@ def place_clip(proj, clip):
     src, dst = os.path.join(root, clip["file"]), os.path.join(root, want)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.isfile(src):
-        os.replace(src, dst)
+        _replace_retry(src, dst)
     csrc, cdst = cover_path_for(root, clip["file"]), cover_path_for(root, want)
     if os.path.isfile(csrc):
-        os.replace(csrc, cdst)
+        _replace_retry(csrc, cdst)
     clip["file"] = want
     if clip.get("cover"):
         clip["cover"]["file"] = os.path.splitext(want)[0] + ".jpg"

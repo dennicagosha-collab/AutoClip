@@ -3869,7 +3869,7 @@ class ClipsPage(QWidget):
         return menu
 
     def _bulk(self, clips, fn, done_text):
-        self.player.release_file()
+        self._free_files()
         errors = []
         for c in clips:
             try:
@@ -3920,7 +3920,7 @@ class ClipsPage(QWidget):
             return
         self.busy = True
         self.editor.setEnabled(False)
-        self.player.release_file()
+        self._free_files()
         pp, bus, ids = self.proj["_path"], self.win.bus, [c["id"] for c in clips]
 
         def work():
@@ -3981,7 +3981,7 @@ class ClipsPage(QWidget):
         if r != QMessageBox.Yes:
             return
         row = self.list.currentRow()
-        self.player.release_file()
+        self._free_files()
         try:
             autoclip.remove_clip(self.proj["_path"], c["id"])
         except autoclip.AutoClipError as e:
@@ -4276,7 +4276,7 @@ class ClipsPage(QWidget):
         self.busy = True
         self.editor.setEnabled(False)
         self.state.setText("Разбиваю на два клипа…")
-        self.player.release_file()
+        self._free_files()
         cid, pp, bus = c["id"], self.proj["_path"], self.win.bus
 
         def work():
@@ -4416,7 +4416,7 @@ class ClipsPage(QWidget):
             return
         self.m_state.setText("Смешиваю…")
         self.m_listen.setEnabled(False)
-        self.player.release_file()
+        self._free_files()
         pp, cid, m, bus = self.proj["_path"], c["id"], dict(self.music), self.win.bus
         out = os.path.join(tempfile.gettempdir(), f"autoclip_music_{os.getpid()}.mp4")
 
@@ -5066,7 +5066,7 @@ class ClipsPage(QWidget):
         self.busy = True
         self.editor.setEnabled(False)
         self.state.setText("Пересобираю…")
-        self.player.release_file()               # иначе Windows не даст заменить файл
+        self._free_files()               # иначе Windows не даст заменить файл
         cid, pp = c["id"], self.proj["_path"]
         bus = self.win.bus
         self._reta = autoclip.Eta()
@@ -5103,15 +5103,29 @@ class ClipsPage(QWidget):
     def toggle_good(self):
         self.rate("post")
 
+    def _free_files(self):
+        """Отпустить файл клипа: плеер и превью при наведении держат его открытым, и тогда Windows
+        не даёт перенести клип в папку оценки («файл занят другим процессом»)."""
+        self.cards.stop_preview()
+        self.player.release_file()
+
     def rate(self, rating):
-        """«Выложу» / «Норм»; повторное нажатие снимает оценку."""
+        """«Выложу» / «Норм»; повторное нажатие снимает оценку. Файл клипа переезжает в папку
+        оценки — сначала его надо отпустить."""
         c = self.current_clip()
         if not c:
             return
+        self._free_files()
         try:
             autoclip.set_rating(self.proj["_path"], c["id"], None if c.get("rating") == rating else rating)
         except autoclip.AutoClipError as e:
             QMessageBox.warning(self, "AutoClip", str(e))
+            self.select()
+            return
+        except PermissionError:
+            QMessageBox.warning(self, "AutoClip", "Файл клипа открыт в другой программе (плеер, монтажка, "
+                                                  "проводник с превью) — закрой его там и поставь оценку ещё раз.")
+            self.select()
             return
         self.base = {}
         self.reload(c["id"])
@@ -5125,7 +5139,7 @@ class ClipsPage(QWidget):
         if r != QMessageBox.Yes:
             return
         row = self.list.currentRow()
-        self.player.release_file()               # иначе Windows не даст перенести файл
+        self._free_files()               # иначе Windows не даст перенести файл
         try:
             autoclip.set_status(self.proj["_path"], c["id"], "rejected")
         except Exception as e:
