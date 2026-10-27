@@ -189,3 +189,21 @@ def test_new_own_sound_appears_without_restart(A, tmp_path, monkeypatch):
     assert combo.findText("мой.mp3") >= 0
     assert "мой.mp3" in win.settings_page.pool_checks        # и в «Случайном» тоже
     win.close()
+
+
+def test_player_volume_only_for_preview(A, tmp_path, monkeypatch):
+    """Громкость просмотра: ползунок у плеера, запоминается, на сборку клипов не влияет."""
+    win = A.MainWindow()
+    pl = win.clips.player
+    pl.vol.setValue(30)
+    assert A.load_settings()["player_volume"] == 30
+    assert 0 < pl.audio.volume() < 0.3                       # «на слух»: 30% ползунка — заметно тише
+    pl._toggle_mute()
+    assert pl.vol.value() == 0 and pl.audio.volume() == 0
+    pl._toggle_mute()
+    assert pl.vol.value() == 30
+    assert "player_volume" not in autoclip.RENDER_KEYS        # в настройки сборки клипа не попадает
+    win.close()
+    win2 = A.MainWindow()
+    assert win2.clips.player.vol.value() == 30                # запомнилось
+    win2.close()

@@ -1347,6 +1347,7 @@ class PlayerPanel(QWidget):
     """Видео с перемоткой. Можно открепить в отдельное окно и вернуть.
     Клип открывается на паузе с первым кадром; играет по ▶, клику по видео или пробелу."""
     detach_clicked = Signal()
+    volume_changed = Signal(int)          # громкость просмотра 0–100 — запомнить в настройках
 
     def __init__(self):
         super().__init__()
@@ -1371,15 +1372,32 @@ class PlayerPanel(QWidget):
         self.slider.sliderMoved.connect(self.player.setPosition)
         self.time = QLabel("0:00 / 0:00")
         self.time.setObjectName("hint")
-        self.btn_detach = QPushButton("Открепить")
-        theme.set_icon(self.btn_detach, "external-link", FG, 15)
-        self.btn_detach.setToolTip("Показать просмотр в отдельном окне, например на втором мониторе")
+        self.btn_detach = QPushButton()                 # значком — в узком плеере место перемотке
+        self.btn_detach.setObjectName("viewBtn")
+        theme.set_icon(self.btn_detach, "external-link", FG, 16)
+        self.btn_detach.setToolTip("Открепить: просмотр в отдельном окне, например на втором мониторе")
         self.btn_detach.clicked.connect(self.detach_clicked)
+
+        # громкость просмотра — только то, что слышно здесь; на клипы и запись не влияет
+        self.btn_vol = QPushButton()
+        self.btn_vol.setObjectName("viewBtn")
+        self.btn_vol.setToolTip("Без звука / вернуть. Громкость — только для просмотра, клипы не меняются")
+        self.btn_vol.clicked.connect(self._toggle_mute)
+        self.vol = QSlider(Qt.Horizontal)
+        self.vol.setRange(0, 100)
+        self.vol.setFixedWidth(72)
+        self.vol.setToolTip("Громкость просмотра — на клипы и запись не влияет")
+        self.vol.valueChanged.connect(self._volume)
+        self._last_vol = 80
+        self.vol.setValue(80)
+        self._volume(80)
 
         ctl = QHBoxLayout()
         ctl.addWidget(self.btn_play)
         ctl.addWidget(self.slider, 1)
         ctl.addWidget(self.time)
+        ctl.addWidget(self.btn_vol)
+        ctl.addWidget(self.vol)
         ctl.addWidget(self.btn_detach)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1396,6 +1414,29 @@ class PlayerPanel(QWidget):
         self._pending_seek = None
         self.player.seekableChanged.connect(self._seekable)
         self.player.durationChanged.connect(lambda _: self._seekable(self.player.isSeekable()))
+
+    def _volume(self, v):
+        from PySide6.QtMultimedia import QtAudio
+        v = int(v)
+        if v:
+            self._last_vol = v
+        # ползунок — «на слух» (логарифмический), плееру — линейная громкость
+        self.audio.setVolume(QtAudio.convertVolume(v / 100, QtAudio.VolumeScale.LogarithmicVolumeScale,
+                                                   QtAudio.VolumeScale.LinearVolumeScale))
+        theme.set_icon(self.btn_vol, "volume-x" if v == 0 else "volume-2", MUTED if v == 0 else FG, 16)
+        self.volume_changed.emit(v)
+
+    def _toggle_mute(self):
+        self.vol.setValue(0 if self.vol.value() else (self._last_vol or 80))
+
+    def set_volume(self, v):
+        """Громкость из настроек (без повторного сохранения)."""
+        self.vol.blockSignals(True)
+        self.vol.setValue(max(0, min(100, int(v))))
+        self.vol.blockSignals(False)
+        self.blockSignals(True)
+        self._volume(self.vol.value())
+        self.blockSignals(False)
 
     def open(self, path, autoplay=False, at_ms=0):
         if not autoplay:
@@ -2864,6 +2905,8 @@ class ClipsPage(QWidget):
         upper.addWidget(player_col, 1)
         self.player_slot = QVBoxLayout()
         self.player = PlayerPanel()
+        self.player.set_volume(self.win.settings.get("player_volume", 80))
+        self.player.volume_changed.connect(self._player_volume)
         sc = QShortcut(QKeySequence(Qt.Key_Space), self)
         sc.setContext(Qt.WidgetWithChildrenShortcut)
         sc.activated.connect(self.player.toggle)
@@ -3548,6 +3591,12 @@ class ClipsPage(QWidget):
         self.upper.setStretch(1, 0 if wide else 2)
         # горизонтальное видео сверху — редактору хватит его содержимого, остальное — плееру
         self.editor.setMaximumHeight(320 if (horiz and not wide) else 16777215)
+
+    def _player_volume(self, v):
+        """Громкость просмотра запоминается (одна на все клипы)."""
+        if self.win.settings.get("player_volume") != v:
+            self.win.settings["player_volume"] = v
+            save_settings(self.win.settings)
 
     def set_view(self, key):
         """«Список» или «Сетка» — запоминается."""
@@ -7465,7 +7514,8 @@ class MainWindow(QMainWindow):
             self.detached.closed.connect(self._reattach)
             self.detached.space.activated.connect(p.toggle)
             self.detached.lay.addWidget(p)
-            p.btn_detach.setText("Вернуть")
+            theme.set_icon(p.btn_detach, "minimize-2", FG, 16)
+            p.btn_detach.setToolTip("Вернуть просмотр в окно программы")
             if self.settings.get("player_geometry"):
                 self.detached.restoreGeometry(
                     QByteArray.fromHex(self.settings["player_geometry"].encode()))
@@ -7486,7 +7536,8 @@ class MainWindow(QMainWindow):
         self.detached = None
         p = self.clips.player
         self.clips.player_slot.insertWidget(0, p)
-        p.btn_detach.setText("Открепить")
+        theme.set_icon(p.btn_detach, "external-link", FG, 16)
+        p.btn_detach.setToolTip("Открепить: просмотр в отдельном окне, например на втором мониторе")
         self.clips.detached_note.hide()
         w.deleteLater()
 
