@@ -921,14 +921,6 @@ class Toast(QLabel):
         self.timer.start(ms)
 
 
-def in_game():
-    """Игра (или любая программа) на весь экран — никаких всплывающих окон (P3)."""
-    try:
-        return autoclip.fullscreen_app() is not None
-    except Exception:
-        return False
-
-
 def stage_name(st):
     return st[:1].upper() + st[1:]
 
@@ -6943,9 +6935,6 @@ class MainWindow(QMainWindow):
         qs = forecast.due_questions(days)
         if not qs or getattr(self, "_views_dialog", None):
             return
-        if in_game():                                    # в игре окно не показываем — спросим позже
-            QTimer.singleShot(120000, self.ask_views)
-            return
         dlg = ViewsDialog(self, qs)
         self._views_dialog = dlg
 
@@ -7003,9 +6992,6 @@ class MainWindow(QMainWindow):
         seen = self.settings.get("seen_version") or ""
         if seen == update.VERSION or not self.isVisible():
             return
-        if in_game():
-            QTimer.singleShot(120000, self.news_after_update)
-            return
         self.settings["seen_version"] = update.VERSION
         save_settings(self.settings)
         fresh = update.news_since(seen)
@@ -7052,8 +7038,8 @@ class MainWindow(QMainWindow):
             self.telegram.do(lambda bot, rel=rel: bot.notify_update(rel, update.VERSION))
         if self._update_dialog:
             return
-        if not manual and (not self.isVisible() or self.working() or in_game()):
-            # окна нет (в трее, идёт игра) или идёт работа — спросим, когда откроют / закончится
+        if not manual and (not self.isVisible() or self.working()):
+            # окна нет (в трее) или идёт работа — спросим, когда откроют / закончится
             self._pending_update = rel
             if self.tray and not self.isVisible():
                 self.tray.showMessage("AutoClip", f"Вышла версия {rel['version']}. Откройте окно, чтобы обновить.",
@@ -7073,7 +7059,7 @@ class MainWindow(QMainWindow):
 
     def ask_pending_update(self):
         rel = self._pending_update
-        if rel and self.isVisible() and not self.working() and not self._update_dialog and not in_game():
+        if rel and self.isVisible() and not self.working() and not self._update_dialog:
             self.update_found(rel, False)
 
     def install_update(self, dlg):
@@ -7173,7 +7159,7 @@ class MainWindow(QMainWindow):
             self.ask_pending()
 
     def ask_pending(self):
-        if self._dialog or not self._pending or in_game():
+        if self._dialog or not self._pending:
             return
         path, info = self._pending.pop(0)
         self._dialog = NewRecordingDialog(self, path, info)
@@ -7562,7 +7548,7 @@ def friendly_error(exc_type, exc, tb_text=""):
 
 def install_error_hook(win):
     """Любая непойманная ошибка — в лог и понятным окном с кнопкой «Отчёт об ошибке»
-    (во время игры — без окна, только в лог и в трей)."""
+    (окно спрятано в трей — сообщением в трее)."""
     import threading as _threading
 
     def show(exc_type, exc, tb):
@@ -7578,7 +7564,7 @@ def install_error_hook(win):
             pass
 
         def ui():
-            if in_game() or not win.isVisible():
+            if not win.isVisible():
                 if win.tray:
                     win.tray.showMessage("AutoClip — ошибка", msg, QSystemTrayIcon.Warning, 8000)
                 return
