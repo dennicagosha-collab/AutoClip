@@ -92,14 +92,14 @@ CONFIG = {
     "nick": False,
     "nick_text": "Final_KFC_Boss",
     "nick_corner": "Сверху слева",  # см. NICK_CORNERS
-    "nick_size": 40,                # размер шрифта при ширине кадра 1080
+    "nick_size": 40,                # размер шрифта при короткой стороне кадра 1080
     "nick_opacity": 70,             # непрозрачность, %
     "sub_max_words": 3,
     "sub_mode": "words",      # words — по 2–3 слова; single — по одному слову
     "sub_color": "#FFFFFF",   # текст
     "sub_hl_color": "#FFE600",  # текущее слово
     "sub_outline_color": "#000000",
-    "sub_outline": 7,         # толщина обводки при ширине кадра 1080
+    "sub_outline": 7,         # толщина обводки при короткой стороне кадра 1080
     "sub_x": None,            # центр строки по ширине (доля кадра); None — середина области
     "sub_style": "Обычный",   # сохранённый стиль
     "sub_max_chars": 18,
@@ -137,7 +137,7 @@ CONFIG = {
     "hook_percentile": 97,        # и сильнее, чем 97% секунд этой записи
 
     # --- экспорт ---
-    "preset": "TikTok 1080p60",   # имя пресета из load_presets()
+    "preset": "Вертикальный 1080×1920",   # имя пресета из load_presets()
     "clip_length": "normal",      # длина клипов: short / normal / long (LENGTHS)
     "clips_dir": r"D:\Клипы",    # куда класть нарезки (5.11); пусто — рядом с записью, как до 1.5.0
     "cache_days": 30,             # кэш расшифровки, которым не пользовались столько дней, удаляется (5.13)
@@ -2749,7 +2749,7 @@ NICK_ALIGN = {"tl": 7, "tr": 9, "bl": 1, "br": 3}     # выравнивание
 
 def frame_area(w, h, cfg):
     """Где можно рисовать текст: внутри сейф-зоны соцсетей или с отступом от краёв."""
-    if cfg.get("safe_zone"):
+    if cfg.get("safe_zone") and h > w:                  # кнопки TikTok/Shorts/Reels — только у вертикального
         return (SAFE_ZONE["left"] * w, SAFE_ZONE["top"] * h,
                 w - SAFE_ZONE["right"] * w, h - SAFE_ZONE["bottom"] * h)
     return 40.0, 40.0, w - 40.0, h - 40.0
@@ -2760,7 +2760,7 @@ def nick_layout(w, h, cfg=None):
     cfg = cfg or CONFIG
     left, top, right, bottom = frame_area(w, h, cfg)
     corner = NICK_CORNERS.get(cfg.get("nick_corner"), "tl")
-    fs = int(cfg.get("nick_size", 40) * w / 1080)
+    fs = int(cfg.get("nick_size", 40) * min(w, h) / 1080)
     pad = 0.015 * w                                  # небольшой отступ от края области
     x = left + pad if corner[1] == "l" else right - pad
     y = top + pad if corner[0] == "t" else bottom - pad
@@ -2799,7 +2799,7 @@ def subs_layout(w, h, cfg=None):
     """Куда и каким размером ставить субтитры: центр (x, y), размер шрифта, сколько букв
     влезает в строку и границы области. С сейф-зоной — внутри неё."""
     cfg = cfg or CONFIG
-    fs = int(cfg["sub_size"] * w / 1080)
+    fs = int(cfg["sub_size"] * min(w, h) / 1080)
     left, top, right, bottom = frame_area(w, h, cfg)
     half = 0.6 * fs                                  # половина строки с обводкой и тенью
     y = min(max(h * cfg["sub_y"], top + half), bottom - half)
@@ -2832,7 +2832,7 @@ def build_ass(words, w, h, path, cfg=None):
     cfg = cfg or CONFIG
     lay = subs_layout(w, h, cfg)
     fs = lay["fs"]
-    outline = max(1, int(round(float(cfg.get("sub_outline", 7)) * w / 1080)))
+    outline = max(1, int(round(float(cfg.get("sub_outline", 7)) * min(w, h) / 1080)))
     text_c, out_c = ass_color(cfg.get("sub_color")), ass_color(cfg.get("sub_outline_color", "#000000"))
     hl = ass_color(cfg.get("sub_hl_color", "#FFE600"))[4:]        # без прозрачности: &HBBGGRR
     base = text_c[4:]
@@ -3083,8 +3083,33 @@ WHISPER_DEVICE = "кэш"     # на чём шла расшифровка: cuda 
 
 # пресеты экспорта: встроенные + свои из %APPDATA%\AutoClip\пресеты.json
 BUILTIN_PRESETS = [
-    {"name": "TikTok 1080p60", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000},
+    {"name": "Вертикальный 1080×1920", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000},
+    {"name": "Горизонтальный 1920×1080", "w": 1920, "h": 1080, "fps": 60, "kbps": 18000},
 ]
+PRESET_ALIASES = {"TikTok 1080p60": "Вертикальный 1080×1920"}     # старое имя (до 0.1.0 бета) — тот же вертикальный
+
+
+def is_horizontal(preset):
+    """Пресет горизонтальный (шире, чем выше)?"""
+    p = get_preset(preset) if not isinstance(preset, dict) or "w" not in preset else preset
+    return p["w"] > p["h"]
+
+
+def project_horizontal(proj):
+    """Нарезка горизонтальная? (по пресету, с которым её собирали; старые — вертикальные)."""
+    p = (proj.get("settings") or {}).get("preset")
+    try:
+        return bool(p) and is_horizontal(p)
+    except AutoClipError:
+        return False
+
+
+def check_orientation(vinfo, preset):
+    """Горизонтальный пресет — только для горизонтальных записей: из вертикальной записи
+    горизонтальный клип не собрать (Гоша: «только горизонтальные записи»)."""
+    if is_horizontal(preset) and vinfo["h"] > vinfo["w"]:
+        raise AutoClipError(f"❌ Запись вертикальная ({vinfo['w']}×{vinfo['h']}) — горизонтальный пресет для неё "
+                            f"не подходит. Выбери «Вертикальный 1080×1920».")
 PRESETS_PATH = os.path.join(user_dir(), "пресеты.json")
 # цвет Rec. 709 во всех трёх полях + обычный (не полный) диапазон
 COLOR_FLAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
@@ -3143,6 +3168,7 @@ def get_preset(value):
     """Имя пресета или сам пресет → пресет. Неизвестное имя → первый встроенный."""
     if isinstance(value, dict):
         return check_preset(value)
+    value = PRESET_ALIASES.get(value, value)
     for p in load_presets():
         if p["name"] == value:
             return check_preset(p)
@@ -3563,7 +3589,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             f"clip((t-{z - 0.12:.2f})/0.12,0,1)*clip(({z + 1.6:.2f}-t)/0.35,0,1)"
             for z in zooms)
         Z = f"(1+{A}*min(1,{env}))"
-        fy = cfg["zoom_focus_y"]
+        fy = cfg["zoom_focus_y"] if H > W else 0.5
         vf.append(f"scale=w='2*trunc({W}*{Z}/2)':h='2*trunc({H}*{Z}/2)':eval=frame:flags=lanczos")
         vf.append(f"crop={W}:{H}:x='(iw-ow)/2':y='(ih-oh)*{fy}'")
     sub_words = [w for w in words if w["w"] and (w.get("spk", "me") == "me" or cfg.get("subs_team"))]
@@ -4402,23 +4428,29 @@ TG_TARGET_MB = 48         # облегчённая копия — с запас�
 FULL_HD_MIN_K = 5000      # ниже — сначала 30 к/с, потом меньше разрешение (не ниже 720×1280)
 
 
-def light_plan(dur, limit_mb=TG_LIMIT_MB):
+def light_plan(dur, limit_mb=TG_LIMIT_MB, horizontal=False):
     """Как сжать клип в limit_mb: (ширина, высота, кадры/с, видео кбит/с). Сначала держим
     1080×1920 и 60 к/с; битрейта мало — 30 к/с; совсем мало — 720×1280."""
     target = min(TG_TARGET_MB, limit_mb * 0.96)
     video_k = max(200, int(target * 8 * 1024 / max(dur, 1.0)) - 128)
+    big, small = ((1920, 1080), (1280, 720)) if horizontal else ((1080, 1920), (720, 1280))
     if video_k >= FULL_HD_MIN_K:
-        return 1080, 1920, 60, video_k
+        return big[0], big[1], 60, video_k
     if video_k >= FULL_HD_MIN_K / 2:
-        return 1080, 1920, 30, video_k              # вдвое меньше кадров — то же качество кадра
-    return 720, 1280, 30, video_k
+        return big[0], big[1], 30, video_k          # вдвое меньше кадров — то же качество кадра
+    return small[0], small[1], 30, video_k
 
 
 def light_copy(src, dst, limit_mb=TG_LIMIT_MB, on_frac=None, cancel=None):
     """Облегчённая копия клипа для Telegram под ~48 МБ: сначала на видеокарте (NVENC, пара секунд),
     не вышло или не влезла — H.264 на процессоре в два прохода (preset slow). Звук AAC 128 кбит/с."""
     dur = _probe_dur(src)
-    w, h, fps, video_k = light_plan(dur, limit_mb)
+    try:
+        info = probe(src)
+        horizontal = info["w"] > info["h"]
+    except Exception:
+        horizontal = False
+    w, h, fps, video_k = light_plan(dur, limit_mb, horizontal)
     nv = ["-vf", f"scale={w}:{h}:flags=lanczos,fps={fps}", "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
           "-multipass", "fullres", "-rc", "vbr", "-b:v", f"{int(video_k * 0.94)}k",
           "-maxrate", f"{int(video_k * 1.2)}k", "-bufsize", f"{video_k * 2}k", "-profile:v", "high"]
@@ -5597,6 +5629,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     vinfo = probe(video)
     log(f"🎬 {os.path.basename(video)} — {fmt_time(vinfo['dur'])}, {vinfo['w']}x{vinfo['h']}")
     preset = get_preset(CONFIG["preset"])
+    check_orientation(vinfo, preset)                 # вертикальная запись + горизонтальный пресет — нельзя
     if vinfo["w"] * preset["h"] != vinfo["h"] * preset["w"]:
         log(f"⚠️  Пропорции записи не как у клипа — возьму середину кадра "
             f"и приведу к {preset['w']}x{preset['h']}.")

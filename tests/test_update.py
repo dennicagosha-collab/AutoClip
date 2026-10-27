@@ -190,7 +190,7 @@ def win(tmp_path, monkeypatch):
 
 def test_update_dialog_and_settings(win):
     A, w = win
-    assert w.windowTitle() == f"AutoClip {update.VERSION}"
+    assert w.windowTitle() == f"AutoClip {update.version_name()}"
     assert "не подключён" in w.settings_page.update_state.text()
     w.update_found(None, True)
     assert "последняя версия" in w.settings_page.update_state.text()
@@ -249,7 +249,7 @@ def test_real_changelog_has_current_version():
 
 def test_news_shown_once_after_update(win, monkeypatch):
     A, w = win
-    assert w.version_btn.text() == f"версия {update.VERSION}"
+    assert w.version_btn.text() == f"версия {update.version_name()}"
     w.show_news()
     assert "Версия 1.0.0" in w._news.body.text()
     w._news.accept()

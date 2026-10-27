@@ -40,12 +40,12 @@ def main():
     zip_path = os.path.join("dist", f"AutoClip-{tag}.zip")
     run("git", "archive", "--format=zip", "--prefix=AutoClip/", "-o", zip_path, "HEAD")
     notes += f"\n\nSHA-256: {update.sha256(os.path.join(HERE, zip_path))}"   # программа сверит архив
-    run("git", "tag", "-a", tag, "-m", f"AutoClip {update.VERSION}")
+    run("git", "tag", "-a", tag, "-m", f"AutoClip {update.version_name()}")
     branch = run("git", "rev-parse", "--abbrev-ref", "HEAD", capture=True)
     run("git", "push", "origin", branch, tag)
     run(GH, "release", "create", tag, zip_path, "--repo", update.REPO,
-        "--title", f"AutoClip {update.VERSION}", "--notes", notes)
-    print(f"Готово: {tag} выложен, у пользователей программа предложит обновиться.")
+        "--title", f"AutoClip {update.version_name()}", "--notes", notes)
+    print(f"Готово: {update.version_name()} ({tag}) выложен, у пользователей программа предложит обновиться.")
 
 
 if __name__ == "__main__":

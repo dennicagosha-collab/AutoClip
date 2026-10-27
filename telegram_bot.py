@@ -327,7 +327,8 @@ class Bot:
         self.st.setdefault("pending", {})[f"u{v}"] = {"kind": "update", "version": v}
         self.save()
         notes = (rel.get("notes") or "").strip()
-        self.send(f"Вышла новая версия AutoClip {v} (сейчас {current})."
+        import update
+        self.send(f"Вышла новая версия AutoClip {update.version_name(v)} (сейчас {update.version_name(current)})."
                   + (f"\n\n{notes[:800]}" if notes else "")
                   + "\n\nОбновлю, только когда скажешь, и не во время нарезки.",
                   [("Обновить", f"upd:{v}"), ("Позже", f"later_upd:{v}"), ("Пропустить версию", f"skip_upd:{v}")])

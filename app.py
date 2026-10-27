@@ -365,14 +365,17 @@ def sub_settings(s):
     return out
 
 
-def latest_cover():
-    """Кадр для предпросмотра субтитров: обложка последнего клипа (без субтитров)."""
+def latest_cover(horizontal=False):
+    """Кадр для предпросмотра субтитров: обложка последнего клипа той же ориентации (без субтитров)."""
     for pp in reversed(autoclip.known_projects()):
         try:
             with open(pp, encoding="utf-8") as f:
-                clips = json.load(f).get("clips", [])
+                data = json.load(f)
         except (OSError, ValueError):
             continue
+        if autoclip.project_horizontal(data) != horizontal:
+            continue
+        clips = data.get("clips", [])
         for c in reversed(clips):
             cv = (c.get("cover") or {}).get("file")
             path = autoclip.cover_path_for(autoclip.cut_root({"_path": pp}), c["file"]) if cv else ""
@@ -414,6 +417,7 @@ class LivePreview(QWidget):
     def __init__(self):
         super().__init__()
         self.setFixedSize(243, 432)
+        self.horizontal = False
         self.setCursor(Qt.OpenHandCursor)
         self.setToolTip("Перетащи субтитры мышкой")
         self.frame = None
@@ -421,6 +425,13 @@ class LivePreview(QWidget):
         self.cfg = dict(autoclip.CONFIG)
         self.drag = None              # (точка нажатия, смещение)
         self.offset = (0.0, 0.0)
+
+    def set_orientation(self, horizontal):
+        """Горизонтальный пресет — кадр 16:9 (1920×1080), иначе 9:16."""
+        self.horizontal = bool(horizontal)
+        self.W, self.H = (1920, 1080) if horizontal else (1080, 1920)
+        self.setFixedSize(*((432, 243) if horizontal else (243, 432)))
+        self.update()
 
     def set_frame(self, path):
         pm = QPixmap(path) if path else QPixmap()
@@ -454,14 +465,21 @@ class LivePreview(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         w, h = self.width(), self.height()
         if self.frame:
-            p.drawPixmap(self.rect(), self.frame)
+            fw, fh = self.frame.width(), self.frame.height()          # по центру, без растяжения
+            if fw * h > fh * w:
+                sw = fh * w / h
+                src = QRectF((fw - sw) / 2, 0, sw, fh)
+            else:
+                sh = fw * h / w
+                src = QRectF(0, (fh - sh) / 2, fw, sh)
+            p.drawPixmap(QRectF(self.rect()), self.frame, src)
         else:
             from PySide6.QtGui import QLinearGradient
             g = QLinearGradient(0, 0, 0, h)
             g.setColorAt(0, QColor("#2b2f3a"))
             g.setColorAt(1, QColor("#14161c"))
             p.fillRect(self.rect(), g)
-        if self.cfg.get("safe_zone"):
+        if self.cfg.get("safe_zone") and not self.horizontal:     # кнопки соцсетей — у вертикального
             z = autoclip.SAFE_ZONE
             pen = QPen(QColor(255, 79, 109, 220), 1, Qt.DashLine)
             p.setPen(pen)
@@ -1951,7 +1969,7 @@ class CutPage(QWidget):
         self.preset = QComboBox()
         self.preset.setMinimumWidth(200)
         self.preset.setToolTip("Размер, кадры и битрейт клипов. Свой пресет — в «Настройках».")
-        self.preset.currentTextChanged.connect(lambda t: self._set("preset", t) if t else None)
+        self.preset.currentTextChanged.connect(self._preset_changed)
         row.addLayout(labeled("Пресет", self.preset))
         row.addStretch(1)
         self.btn = QPushButton("Нарезать")
@@ -2043,9 +2061,30 @@ class CutPage(QWidget):
         if self.s.get("clips_mode") != key:
             self._set("clips_mode", key)
 
+    def _preset_changed(self, t):
+        if not t:
+            return
+        self._set("preset", t)
+        if getattr(self, "_thumb_info", None):
+            self.show_thumb(self.thumb_n, None, self._thumb_info)    # подсказка под новую ориентацию
+        sp = getattr(self.win, "settings_page", None)
+        if sp is not None:
+            sp.live_orientation()
+
+    def orientation_problem(self, info=None):
+        """Вертикальная запись + горизонтальный пресет → текст ошибки, иначе None."""
+        info = info or getattr(self, "_thumb_info", None)
+        if not info:
+            return None
+        try:
+            autoclip.check_orientation(info, self.s.get("preset"))
+        except autoclip.AutoClipError as e:
+            return str(e).replace("❌ ", "")
+        return None
+
     def refresh_presets(self):
         names = [p["name"] for p in autoclip.load_presets()]
-        want = self.s.get("preset")
+        want = autoclip.PRESET_ALIASES.get(self.s.get("preset"), self.s.get("preset"))
         self.preset.blockSignals(True)
         self.preset.clear()
         self.preset.addItems(names)
@@ -2062,6 +2101,7 @@ class CutPage(QWidget):
             self.write("ℹ️  Дождись конца нарезки или останови её.")
             return
         self.files = paths
+        self._thumb_info = None
         more = f"…и ещё {len(paths) - 1}" if len(paths) > 1 else ""
         self.drop.set_preview(None, os.path.basename(paths[0]), more)
         self.thumb_n += 1
@@ -2079,17 +2119,29 @@ class CutPage(QWidget):
     def show_thumb(self, n, png, info):
         if n != self.thumb_n:                        # пока делали кадр, выбрали другой файл
             return
-        pm = QPixmap(png)
-        try:
-            os.remove(png)                           # наш временный кадр
-        except OSError:
-            pass
+        if png is None:                              # сменили пресет — кадр прежний, подсказка новая
+            pm = getattr(self, "_thumb_pm", None) or QPixmap()
+        else:
+            pm = QPixmap(png)
+            try:
+                os.remove(png)                       # наш временный кадр
+            except OSError:
+                pass
+            self._thumb_pm = pm
+        self._thumb_info = info
         paths = info["paths"]
         sub = [f"{autoclip.fmt_time(info['dur'])}  ·  {info['w']}×{info['h']}  ·  "
                f"{info['fps']:g} к/с",
                f"меток из OBS: {info.get('marks', 0)}"]
-        if info["w"] > info["h"]:
-            sub.append("горизонтальное — возьму середину кадра")
+        try:
+            hor = autoclip.is_horizontal(self.s.get("preset"))
+        except autoclip.AutoClipError:
+            hor = False
+        problem = self.orientation_problem(info)
+        if problem:
+            sub.append("⚠ " + problem)
+        elif info["w"] > info["h"]:
+            sub.append("горизонтальная — клипы 16:9" if hor else "горизонтальное — возьму середину кадра")
         if len(paths) > 1:
             sub.append(f"…и ещё {len(paths) - 1}")
         self.drop.set_preview(None if pm.isNull() else pm, os.path.basename(paths[0]),
@@ -2148,6 +2200,11 @@ class CutPage(QWidget):
             self.drop.mousePressEvent(_LeftClick())
             if not self.files:
                 return
+        problem = self.orientation_problem()
+        if problem:
+            self.write("❌ " + problem)
+            self.win.toast(problem, 6000)
+            return
         self.apply_config()
         self.eta = autoclip.Eta()
         self.win.start_cut(list(self.files))
@@ -2256,6 +2313,7 @@ class ClipCards(QObject):
         self.view = view
         self.page = page
         self.grid = False
+        self.horiz = False              # нарезка горизонтальная — обложки 16:9
         self.hover = {}                 # строка → 0..1 (приподнята)
         self.target = {}
         self.hover_row = -1
@@ -2315,12 +2373,21 @@ class ClipCards(QObject):
         v.setUniformItemSizes(True)
         v.doItemsLayout()
 
+    GRID_W_H = 300                  # ширина карточки 16:9 в «сетке»
+
+    def set_horizontal(self, on):
+        if bool(on) != self.horiz:
+            self.horiz = bool(on)
+            self.view.doItemsLayout()
+
     def _grid_size(self):
         """Карточки сетки тянутся на всю ширину списка: столько столбцов, сколько влезает."""
         vw = max(160, self.view.viewport().width() - 6)
-        cols = max(1, vw // (self.GRID_W + 12))
+        base = self.GRID_W_H if self.horiz else self.GRID_W
+        cols = max(1, vw // (base + 12))
         w = vw // cols - 12
-        return w, int((w - 16) * 16 / 9) + 16
+        ratio = 9 / 16 if self.horiz else 16 / 9
+        return w, int((w - 16) * ratio) + 16
 
     def size_hint(self):
         if self.grid:
@@ -2357,7 +2424,8 @@ class ClipCards(QObject):
         if pm.isNull():
             self.pixmaps[path] = (0, None)
             return
-        pm = pm.scaledToHeight(self.GRID_COVER * 2, Qt.SmoothTransformation)
+        pm = (pm.scaledToWidth(self.GRID_W_H * 2, Qt.SmoothTransformation) if pm.width() > pm.height()
+              else pm.scaledToHeight(self.GRID_COVER * 2, Qt.SmoothTransformation))
         try:
             self.pixmaps[path] = (os.path.getmtime(path), pm)
         except OSError:
@@ -2420,7 +2488,7 @@ class ClipCards(QObject):
             w, ch = self._grid_size()
             return QRectF(rect.x() + 8, rect.y() + 8, rect.width() - 16, ch - 16)
         h = rect.height() - 16
-        return QRectF(rect.x() + 8, rect.y() + 8, h * 9 / 16, h)
+        return QRectF(rect.x() + 8, rect.y() + 8, h * (16 / 9 if self.horiz else 9 / 16), h)
 
     def _start_preview(self):
         """Превью клипа без звука прямо на обложке. Кадры рисуются на карточке сами — без второго
@@ -2457,7 +2525,9 @@ class ClipCards(QObject):
         img = frame.toImage()
         if img.isNull():
             return
-        self.preview_pm = QPixmap.fromImage(img.scaledToHeight(self.GRID_COVER * 2, Qt.FastTransformation))
+        img = (img.scaledToWidth(self.GRID_W_H * 2, Qt.FastTransformation) if img.width() > img.height()
+               else img.scaledToHeight(self.GRID_COVER * 2, Qt.FastTransformation))
+        self.preview_pm = QPixmap.fromImage(img)
         it = self.view.item(self.preview_row)
         if it is not None:
             self.view.viewport().update(self.view.visualItemRect(it))
@@ -3465,7 +3535,9 @@ class ClipsPage(QWidget):
         right = self.split.widget(1)
         if right is None:
             return
-        wide = right.width() >= 860
+        # горизонтальным клипам нужен широкий плеер: рядом с редактором — только на очень широком окне
+        horiz = self.cards.horiz if hasattr(self, "cards") else False
+        wide = right.width() >= (1500 if horiz else 860)
         if wide == getattr(self, "_wide", None):
             return
         self._wide = wide
@@ -3474,6 +3546,8 @@ class ClipsPage(QWidget):
         self.editor.setMinimumWidth(420 if wide else 0)
         self.upper.setStretch(0, 1 if wide else 3)
         self.upper.setStretch(1, 0 if wide else 2)
+        # горизонтальное видео сверху — редактору хватит его содержимого, остальное — плееру
+        self.editor.setMaximumHeight(320 if (horiz and not wide) else 16777215)
 
     def set_view(self, key):
         """«Список» или «Сетка» — запоминается."""
@@ -3489,6 +3563,10 @@ class ClipsPage(QWidget):
     def refill(self, select_id=None):
         want = FILTERS[self.filter][1]
         self.cards.stop_preview()
+        if self.cards.horiz != autoclip.project_horizontal(self.proj):
+            self.cards.set_horizontal(autoclip.project_horizontal(self.proj))
+            self._wide = None                            # раскладка плеера — под ориентацию нарезки
+            self._relayout()
         self.list.blockSignals(True)
         self.list.clear()
         clips = [c for c in sorted(self.proj["clips"], key=lambda c: c["num"])
@@ -5569,7 +5647,7 @@ class SettingsPage(QWidget):
         form.addStretch(1)
         body.addLayout(form, 1)
         self.live = LivePreview()
-        self.live.set_frame(latest_cover())
+        self.live_orientation()
         self.live.moved.connect(self.subs_moved)
         body.addWidget(self.live, 0, Qt.AlignTop)
         v.addLayout(body)
@@ -5797,7 +5875,7 @@ class SettingsPage(QWidget):
         lay.addWidget(box)
 
         # --- обновления ---
-        box, v = card("Обновления", f"Сейчас стоит версия {update.VERSION}. Обновляются только "
+        box, v = card("Обновления", f"Сейчас стоит версия {update.version_name()}. Обновляются только "
                                     "файлы программы, настройки и клипы остаются на месте.")
         self.cb_updates = self._toggle("check_updates")
         v.addWidget(option_row("Проверять при запуске", self.cb_updates,
@@ -6121,6 +6199,17 @@ class SettingsPage(QWidget):
         cfg.update(nick=False)                       # ник — на маленькой схеме у «Ника в углу»
         return cfg
 
+    def live_orientation(self):
+        """Предпросмотр субтитров — в ориентации выбранного пресета (горизонтальный — 16:9)."""
+        try:
+            hor = autoclip.is_horizontal(self.s.get("preset") or autoclip.CONFIG["preset"])
+        except autoclip.AutoClipError:
+            hor = False
+        if getattr(self.live, "horizontal", None) != hor or self.live.frame is None:
+            self.live.set_orientation(hor)
+            self.live.set_frame(latest_cover(hor))
+            self.refresh_live()
+
     def refresh_live(self, *_):
         if hasattr(self, "_live_timer"):
             self._live_timer.start()
@@ -6128,11 +6217,12 @@ class SettingsPage(QWidget):
     def render_live(self):
         self._live_n += 1
         n, cfg, bus = self._live_n, self.live_cfg(), self.win.bus
+        live_w, live_h = self.live.W, self.live.H
         out = os.path.join(tempfile.gettempdir(), f"autoclip_live_{os.getpid()}_{n % 4}.png")
 
         def work():
             try:
-                autoclip.render_sub_layer(cfg, LivePreview.W, LivePreview.H, out)
+                autoclip.render_sub_layer(cfg, live_w, live_h, out)
                 path = out
             except Exception:
                 path = ""
@@ -6500,7 +6590,7 @@ class NewsDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(10)
-        t = QLabel(f"AutoClip обновился до {update.VERSION}" if only_new else "Что нового")
+        t = QLabel(f"AutoClip обновился до {update.version_name()}" if only_new else "Что нового")
         t.setObjectName("cardTitle")
         lay.addWidget(t)
         body = QLabel(self.html(entries) if entries else "Список изменений не найден.")
@@ -6531,7 +6621,8 @@ class NewsDialog(QDialog):
             date = f" <span style='color:{MUTED}'>· {escape(e['date'])}</span>" if e["date"] else ""
             cur = " <span style='color:#7dd99a'>· сейчас</span>" if e["version"] == update.VERSION else ""
             items = "".join(f"<li style='margin-bottom:4px'>{escape(i)}</li>" for i in e["items"])
-            parts.append(f"<p style='margin-top:10px'><b>Версия {escape(e['version'])}</b>{date}{cur}</p>"
+            parts.append(f"<p style='margin-top:10px'><b>Версия {escape(update.version_name(e['version']))}</b>"
+                         f"{date}{cur}</p>"
                          f"<ul style='margin-left:-18px'>{items}</ul>")
         return "".join(parts)
 
@@ -6550,10 +6641,10 @@ class UpdateDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(10)
-        t = QLabel(f"Вышла версия {rel['version']}")
+        t = QLabel(f"Вышла версия {update.version_name(rel['version'])}")
         t.setObjectName("cardTitle")
         lay.addWidget(t)
-        lay.addWidget(hint(f"Сейчас стоит {update.VERSION}. Настройки, клипы и записи "
+        lay.addWidget(hint(f"Сейчас стоит {update.version_name()}. Настройки, клипы и записи "
                            "не тронутся, программа перезапустится сама."))
         if rel.get("notes"):
             notes = QLabel(rel["notes"])
@@ -6786,7 +6877,7 @@ class MainWindow(QMainWindow):
         self.detached = None
         self.bus = Bus()
 
-        self.setWindowTitle(f"AutoClip {update.VERSION}")
+        self.setWindowTitle(f"AutoClip {update.version_name()}")
         self.resize(1200, 860)
         self.setMinimumSize(980, 720)
         if self.settings.get("geometry"):
@@ -6806,7 +6897,7 @@ class MainWindow(QMainWindow):
         brand = QLabel('Auto<span style="color:%s">Clip</span>' % ACCENT)
         brand.setObjectName("brand")
         sl.addWidget(brand)
-        self.version_btn = QPushButton(f"версия {update.VERSION}")
+        self.version_btn = QPushButton(f"версия {update.version_name()}")
         self.version_btn.setFlat(True)
         self.version_btn.setObjectName("version")
         self.version_btn.setCursor(Qt.PointingHandCursor)
@@ -7045,9 +7136,9 @@ class MainWindow(QMainWindow):
             st.setText(rel["error"])
             return
         if not rel:
-            st.setText(f"Стоит последняя версия — {update.VERSION}.")
+            st.setText(f"Стоит последняя версия — {update.version_name()}.")
             return
-        st.setText(f"Есть версия {rel['version']}.")
+        st.setText(f"Есть версия {update.version_name(rel['version'])}.")
         if not manual and self.settings.get("tg_update_told") != rel["version"]:
             self.settings["tg_update_told"] = rel["version"]
             save_settings(self.settings)
@@ -7058,7 +7149,8 @@ class MainWindow(QMainWindow):
             # окна нет (в трее) или идёт работа — спросим, когда откроют / закончится
             self._pending_update = rel
             if self.tray and not self.isVisible():
-                self.tray.showMessage("AutoClip", f"Вышла версия {rel['version']}. Откройте окно, чтобы обновить.",
+                self.tray.showMessage("AutoClip", f"Вышла версия {update.version_name(rel['version'])}. "
+                                      "Откройте окно, чтобы обновить.",
                                       QSystemTrayIcon.Information, 10000)
             return
         self._pending_update = None

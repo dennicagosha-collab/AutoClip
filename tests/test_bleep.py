@@ -43,7 +43,7 @@ def test_bleep_sound_stops_before_next_clean_word(tmp_path, silent_video, long_s
         {"s": 1.5, "e": 1.9, "w": "ну"},
         {"s": 2.0, "e": 2.4, "w": "вот"}]}]
     cfg = dict(autoclip.CONFIG, subs=False, zoom=False, bleep=True,
-               bleep_sound=str(long_sound), preset="TikTok 1080p60", censor="full")
+               bleep_sound=str(long_sound), preset="Вертикальный 1080×1920", censor="full")
     out = tmp_path / "клип.mp4"
     bl = autoclip.render_clip(str(silent_video), {"s": 0.0, "e": 5.0, "zooms": []}, segs,
                               {"w": 270, "h": 480, "fps": 30.0, "dur": 6.0}, str(out),

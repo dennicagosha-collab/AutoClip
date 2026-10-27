@@ -17,21 +17,22 @@ def presets_file(tmp_path, monkeypatch):
 
 def test_default_preset_is_tiktok():
     p = autoclip.get_preset(autoclip.CONFIG["preset"])
-    assert p == {"name": "TikTok 1080p60", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000}
+    assert p == {"name": "Вертикальный 1080×1920", "w": 1080, "h": 1920, "fps": 60, "kbps": 18000}
+    assert autoclip.get_preset("TikTok 1080p60")["name"] == "Вертикальный 1080×1920"      # старое имя — тот же пресет
 
 
 def test_user_presets_saved_and_loaded(presets_file):
     mine = {"name": "Мой 720p30", "w": 720, "h": 1280, "fps": 30, "kbps": 8000}
     autoclip.save_user_presets(autoclip.load_presets() + [mine])
     names = [p["name"] for p in autoclip.load_presets()]
-    assert names == ["TikTok 1080p60", "Мой 720p30"]
+    assert names == ["Вертикальный 1080×1920", "Горизонтальный 1920×1080", "Мой 720p30"]
     # встроенный в файл не пишется
     assert json.loads(presets_file.read_text(encoding="utf-8")) == [mine]
     assert autoclip.get_preset("Мой 720p30")["fps"] == 30
 
 
 def test_unknown_preset_falls_back_to_default(presets_file):
-    assert autoclip.get_preset("нет такого")["name"] == "TikTok 1080p60"
+    assert autoclip.get_preset("нет такого")["name"] == "Вертикальный 1080×1920"
 
 
 @pytest.mark.parametrize("bad", [
@@ -47,7 +48,7 @@ def test_bad_presets_rejected(bad):
 
 
 def test_frame_filters():
-    tiktok = autoclip.get_preset("TikTok 1080p60")
+    tiktok = autoclip.get_preset("Вертикальный 1080×1920")
     same = autoclip.frame_filters({"w": 1080, "h": 1920, "fps": 60.0}, tiktok)
     assert same == ["setsar=1"]
     wide = autoclip.frame_filters({"w": 2560, "h": 1440, "fps": 60.0}, tiktok)
@@ -84,7 +85,7 @@ def test_horizontal_30fps_record_becomes_tiktok_clip(tmp_path, fake_trash, monke
 
     out_dir = autoclip.process(str(video))
     proj = autoclip.load_project(out_dir)
-    assert proj["settings"]["preset"]["name"] == "TikTok 1080p60"
+    assert proj["settings"]["preset"]["name"] == "Вертикальный 1080×1920"
     v, bitrate = _probe(os.path.join(out_dir, proj["clips"][0]["file"]))
     assert (v["width"], v["height"]) == (1080, 1920)
     assert v["r_frame_rate"] == "60/1"

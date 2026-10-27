@@ -80,7 +80,7 @@ def prune_logs(log_dir=None, keep=KEEP_LOGS):
 def version():
     try:
         import update
-        return update.VERSION
+        return f"{update.version_name()} ({update.VERSION})"
     except Exception:
         return "?"
 

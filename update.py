@@ -22,7 +22,7 @@ import zipfile
 import autoclip
 from autoclip import AutoClipError
 
-VERSION = "2.3.6"
+VERSION = "3.0.0"            # номер для обновлений (только растёт); людям показывается version_name()
 REPO = "dennicagosha-collab/AutoClip"   # пусто — обновления выключены
 API = "https://api.github.com/repos/{repo}/releases/latest"
 
@@ -71,6 +71,18 @@ def release_notes(version=None):
         if parse_version(e["version"]) == v:
             return "\n".join(f"- {i}" for i in e["items"])
     return ""
+
+
+def version_name(version=None):
+    """Как версию видит человек. С 3.0.0 нумерация начата заново: 3.0.0 → «0.1.0 бета», 3.0.1 → «0.1.1 бета»,
+    3.1.0 → «0.2.0 бета». Обновления по-прежнему сравнивают внутренний номер, поэтому старые копии
+    (2.x) обновляются сами."""
+    v = parse_version(version or VERSION)
+    if not v:
+        return str(version or VERSION)
+    if v[0] == 3:
+        return f"0.{v[1] + 1}.{v[2]} бета"
+    return ".".join(map(str, v))
 
 
 def parse_version(text):
