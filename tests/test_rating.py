@@ -122,3 +122,57 @@ def test_rate_frees_player_and_explains_busy_file(tmp_path, monkeypatch):
     page.rate("ok")
     assert warned and "открыт в другой программе" in warned[0]
     win.close()
+
+
+def _layout2_cut(tmp_path):
+    """Нарезка нового вида: клип лежит в «Новые», файл — настоящее видео (его откроет плеер)."""
+    import subprocess
+    root = tmp_path / "Клипы 27.10.2026"
+    (root / ".autoclip").mkdir(parents=True)
+    (root / "Новые").mkdir()
+    vid = root / "Новые" / "01_клип.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=180x320:r=30:d=3",
+                    "-f", "lavfi", "-i", "sine=f=300:d=3", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(vid)], check=True)
+    proj = autoclip.new_project(str(tmp_path / "запись.mp4"), {"w": 180, "h": 320, "dur": 600.0, "fps": 30},
+                                str(root), str(tmp_path / "t.json"), layout=2)
+    c = autoclip.make_clip_record({"s": 30.0, "e": 33.0, "peak": 31.0, "score": 5, "zooms": [], "title": "клип",
+                                   "reason": ""}, 1, "Новые/01_клип.mp4")
+    proj["clips"].append(c)
+    autoclip.save_project(proj)
+    return proj["_path"]
+
+
+def test_any_move_releases_file_open_in_player(tmp_path, monkeypatch):
+    """«Выложу», потом «Выложил на TikTok» — клип каждый раз переезжает в папку, хотя открыт в плеере
+    (раньше: «файл занят другим процессом»)."""
+    import sys
+    import pytest
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from qtwait import pump
+    monkeypatch.setattr(autoclip, "SETTINGS_PATH", str(tmp_path / "настройки.json"))
+    monkeypatch.setattr(autoclip, "PRESETS_PATH", str(tmp_path / "пресеты.json"))
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    import app as A
+    A.dark_palette(QApplication.instance() or QApplication([]))
+    pp = _layout2_cut(tmp_path)
+    win = A.MainWindow()
+    win.show()
+    page = win.clips
+    page.load(pp)
+    page.list.setCurrentRow(0)
+    pump(800)                                                  # плеер открыл файл
+    root = autoclip.cut_root(autoclip.load_project(pp))
+    autoclip.set_rating(pp, "c01", "post")                     # как из меню правой кнопкой — мимо rate()
+    c = autoclip.load_project(pp)["clips"][0]
+    assert c["file"].startswith("Выложу/") and os.path.isfile(os.path.join(root, c["file"]))
+    page.reload(c["id"])
+    page.list.setCurrentRow(0)
+    pump(800)
+    page.toggle_published("tiktok")                            # «Выложил на TikTok»
+    c = autoclip.load_project(pp)["clips"][0]
+    assert c["status"] == "published" and c["file"].startswith("Выложенные/")
+    assert os.path.isfile(os.path.join(root, c["file"]))
+    win.close()

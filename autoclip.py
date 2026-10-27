@@ -4000,6 +4000,17 @@ def clip_rel(proj, status, name):
     return f"{sub}/{os.path.basename(name)}"
 
 
+BEFORE_MOVE = []   # окно: отпустить файл перед переносом (плеер и превью держат клип открытым)
+
+
+def _before_move(path):
+    for f in list(BEFORE_MOVE):
+        try:
+            f(path)
+        except Exception:
+            pass
+
+
 def _replace_retry(src, dst, seconds=2.0):
     """Перенос файла; занят (проигрыватель отпускает его не сразу) — повторять до seconds."""
     end = time.time() + seconds
@@ -4024,6 +4035,7 @@ def place_clip(proj, clip):
     src, dst = os.path.join(root, clip["file"]), os.path.join(root, want)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.isfile(src):
+        _before_move(src)                                    # открыт в плеере — отпустить, иначе «файл занят»
         _replace_retry(src, dst)
     csrc, cdst = cover_path_for(root, clip["file"]), cover_path_for(root, want)
     if os.path.isfile(csrc):

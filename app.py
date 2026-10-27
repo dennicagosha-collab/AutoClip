@@ -2905,6 +2905,7 @@ class ClipsPage(QWidget):
         upper.addWidget(player_col, 1)
         self.player_slot = QVBoxLayout()
         self.player = PlayerPanel()
+        autoclip.BEFORE_MOVE[:] = [self._release_if_open]     # перед переносом файла — отпустить его
         self.player.set_volume(self.win.settings.get("player_volume", 80))
         self.player.volume_changed.connect(self._player_volume)
         sc = QShortcut(QKeySequence(Qt.Key_Space), self)
@@ -5102,6 +5103,22 @@ class ClipsPage(QWidget):
 
     def toggle_good(self):
         self.rate("post")
+
+    def _release_if_open(self, path):
+        """Ядро переносит файл клипа (оценка, «Выложил», меню, Telegram) — если он открыт в плеере
+        или в превью при наведении, отпустить. Только из потока окна."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+        want = os.path.normcase(os.path.abspath(path))
+
+        def same(url):
+            local = url.toLocalFile() if url is not None else ""
+            return bool(local) and os.path.normcase(os.path.abspath(local)) == want
+        pp = self.cards._pp
+        if pp is not None and same(pp.source()):
+            self.cards.stop_preview()
+        if same(self.player.player.source()):
+            self.player.release_file()
 
     def _free_files(self):
         """Отпустить файл клипа: плеер и превью при наведении держат его открытым, и тогда Windows
