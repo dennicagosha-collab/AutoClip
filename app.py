@@ -1193,6 +1193,22 @@ class SoundButton(QPushButton):
             self.player.play()
 
 
+class SoundCombo(QComboBox):
+    """Выбор звука на мат: список перечитывается из папки «Свои звуки» каждый раз, когда его раскрывают —
+    положил файл в папку, и он сразу в списке, без перезапуска."""
+
+    def __init__(self, on_new=None):
+        super().__init__()
+        self.on_new = on_new                 # список поменялся — обновить и остальное (галочки «Случайного»)
+
+    def showPopup(self):
+        before = [self.itemText(i) for i in range(self.count())]
+        fill_sounds(self, self.currentText())
+        if [self.itemText(i) for i in range(self.count())] != before and self.on_new:
+            self.on_new()
+        super().showPopup()
+
+
 def fill_sounds(combo, want):
     names = autoclip.list_sounds() + [autoclip.RANDOM_SOUND]
     combo.blockSignals(True)
@@ -2997,7 +3013,7 @@ class ClipsPage(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(head("Мат"))
-        self.e_sound = QComboBox()
+        self.e_sound = SoundCombo()
         self.e_sound.setMinimumWidth(180)
         self.e_sound.setToolTip("Звук на мат")
         self.e_sound.currentTextChanged.connect(self._changed)
@@ -5421,7 +5437,7 @@ class SettingsPage(QWidget):
                                "TikTok может распознать полузапиканный мат и урезать охват"))
         snd = QHBoxLayout()
         snd.setSpacing(6)
-        self.sound = QComboBox()
+        self.sound = SoundCombo(on_new=lambda: self.refresh_sounds())
         self.sound.setMinimumWidth(190)
         self.sound.currentTextChanged.connect(lambda t: self._set("sound", t) if t else None)
         snd.addWidget(self.sound)

@@ -173,3 +173,19 @@ def test_telegram_send_shows_center_notice(A):
     page._send_state("Не отправилось: файл слишком большой")
     assert n.kind == "error" and "слишком большой" in n.sub
     win.close()
+
+
+def test_new_own_sound_appears_without_restart(A, tmp_path, monkeypatch):
+    """Положил звук в «Свои звуки» — он сразу в списке, когда раскрываешь выбор (без перезапуска)."""
+    names = ["перелистывание", "бип"]
+    monkeypatch.setattr(autoclip, "list_sounds", lambda: list(names))
+    win = A.MainWindow()
+    combo = win.settings_page.sound
+    win.settings_page.refresh_sounds()
+    assert combo.findText("мой.mp3") < 0
+    names.append("мой.mp3")                                  # Гоша положил файл в папку
+    combo.showPopup()
+    combo.hidePopup()
+    assert combo.findText("мой.mp3") >= 0
+    assert "мой.mp3" in win.settings_page.pool_checks        # и в «Случайном» тоже
+    win.close()
