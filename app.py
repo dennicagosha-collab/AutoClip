@@ -35,7 +35,7 @@ from PySide6.QtGui import (  # noqa: E402
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # noqa: E402
 from PySide6.QtMultimediaWidgets import QVideoWidget  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QLayout, QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QDialog, QMenu, QSystemTrayIcon, QSizePolicy, QSlider, QSpinBox,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
@@ -984,6 +984,97 @@ def ask_choice(parent, text, choices):
 
 
 EDITS_CHOICES = (("apply", "Применить"), ("discard", "Не применять"), ("cancel", "Отмена"))
+
+
+class FlowLayout(QLayout):
+    """Строка, которая переносится, как слова в тексте: не влезло — следующий элемент на новую строку,
+    а не за край окна. Вложенный layout (пара «подпись + поле») держится вместе."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+        self._h = 8
+        self._v = 8
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def setSpacing(self, s):
+        self._h = s
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addLayout(self, lay, stretch=0):
+        box = QWidget()                              # пара — одним куском, не разрывается
+        lay.setContentsMargins(0, 0, 0, 0)
+        box.setLayout(lay)
+        box.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.addWidget(box)
+
+    def addWidget(self, w, stretch=0, alignment=None):
+        super().addWidget(w)
+
+    def addStretch(self, *_):
+        pass
+
+    def addSpacing(self, size):
+        pass
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do(QRectF(0, 0, width, 0).toRect(), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for it in self._items:
+            if it.widget() is not None and not it.widget().isVisibleTo(self.parentWidget() or it.widget()):
+                continue
+            size = size.expandedTo(it.minimumSize())
+        return size
+
+    def _do(self, rect, test):
+        """Раскладка по строкам; в строке всё — по центру её высоты."""
+        lines, cur, x = [], [], rect.x()
+        for it in self._items:
+            w = it.widget()
+            if w is not None and w.isHidden():
+                continue
+            hint = it.sizeHint()
+            if cur and x + hint.width() > rect.right() + 1:
+                lines.append(cur)
+                cur, x = [], rect.x()
+            cur.append((it, hint, x))
+            x += hint.width() + self._h
+        if cur:
+            lines.append(cur)
+        y = rect.y()
+        for k, line in enumerate(lines):
+            h = max(hint.height() for _, hint, _ in line)
+            if not test:
+                for it, hint, lx in line:
+                    it.setGeometry(QRectF(lx, y + (h - hint.height()) // 2, hint.width(), hint.height()).toRect())
+            y += h + (self._v if k < len(lines) - 1 else 0)
+        return y - rect.y()
 
 
 def text_width(text, px=13, weight=None):
@@ -2352,6 +2443,7 @@ class ClipCards(QObject):
     def __init__(self, view, page):
         super().__init__(view)
         self.view = view
+        view.cards = self                    # колесо мыши знает, сетка или список
         self.page = page
         self.grid = False
         self.horiz = False              # нарезка горизонтальная — обложки 16:9
@@ -2396,6 +2488,7 @@ class ClipCards(QObject):
         from PySide6.QtWidgets import QListView
         self.grid = bool(on)
         v = self.view
+        v.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)       # плавно и одинаково в обоих видах
         self.stop_preview()
         if on:
             v.setViewMode(QListView.IconMode)
@@ -2756,6 +2849,17 @@ class ClipList(QListWidget):
     def supportedDropActions(self):
         return Qt.CopyAction
 
+    def wheelEvent(self, e):
+        """Колесо — ровный шаг в пикселях (после «список / сетка» Qt сбивал шаг, и скролл полз)."""
+        dy = e.angleDelta().y()
+        if not dy:
+            return super().wheelEvent(e)
+        cards = getattr(self, "cards", None)
+        step = 140 if cards is not None and cards.grid else 110        # примерно одна карточка
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.value() - int(dy / 120 * step))
+        e.accept()
+
 
 FILTERS = (("Все", None), ("Новые", {"new"}), ("Выложу", {"post"}), ("Норм", {"ok"}), ("Выложены", {"published"}),
            ("Кандидаты", {"candidate"}), ("Удалённые", {"deleted"}))
@@ -2991,14 +3095,16 @@ class ClipsPage(QWidget):
         # ---- на виду (5.18): таймлайн, название, Субтитры / Мат / Хук, оценка, «Пересобрать» ----
         from timeline import Timeline
         self.tl = Timeline()
-        self.tl.setToolTip("Тяни красные ручки — начало и конец. Жёлтый отрезок — хук, его можно двигать. "
+        self.tl.setToolTip("Тяни красные ручки — начало и конец. Жёлтый отрезок — хук: двигай его, края — длина. "
                            "Клик — перемотка, потянуть по пустому месту — выделить кусок (X — вырезать). "
-                           "Метки внизу — писки (клик — убрать/вернуть). Колесо — масштаб")
+                           "Метки внизу — писки: края тянутся (длина писка), правой кнопкой — убрать/вернуть. "
+                           "Колесо — масштаб")
         self.tl.bounds_changed.connect(self._tl_bounds)
         self.tl.hook_changed.connect(self._tl_hook)
         self.tl.seek.connect(self._tl_seek)
         self.tl.selection_changed.connect(self._tl_selection)
         self.tl.bleep_clicked.connect(self._tl_bleep)
+        self.tl.bleep_resized.connect(self._tl_bleep_resized)
         self.tl_box = QFrame()                       # таймлайн — во всю ширину под плеером (2.3.0)
         self.tl_box.setObjectName("panel")
         tlb = QVBoxLayout(self.tl_box)
@@ -3083,7 +3189,7 @@ class ClipsPage(QWidget):
             return lb
 
         # вид
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(14)
         row.addWidget(head("Вид"))
         self.e_zoom = tri_combo("auto", "Авто — только на смехе и крике, не больше 3. Вкл — на всех громких местах")
@@ -3104,7 +3210,7 @@ class ClipsPage(QWidget):
             w.toggled.connect(self._changed)
         row.addStretch(1)
         ml.addLayout(row)
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(8)
         row.addWidget(QLabel("Субтитры"))
         self.e_pos = QComboBox()
@@ -3124,7 +3230,7 @@ class ClipsPage(QWidget):
         ml.addLayout(row)
 
         # мат
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(8)
         row.addWidget(head("Мат"))
         self.e_sound = SoundCombo()
@@ -3146,7 +3252,7 @@ class ClipsPage(QWidget):
         row.addWidget(self.e_censor)
         row.addStretch(1)
         ml.addLayout(row)
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(6)
         row.addWidget(QLabel("Мат найден автоматически"))
         self.e_bleeps = QComboBox()
@@ -3162,10 +3268,10 @@ class ClipsPage(QWidget):
         b.clicked.connect(self.bleep_toggle)
         row.addWidget(b)
         ml.addLayout(row)
-        self.b_add, self.b_rem = [], []
+        self.b_add, self.b_rem, self.b_span = [], [], {}
 
         # хук
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(6)
         row.addWidget(head("Хук"))
         self.h_label = hint("")
@@ -3184,7 +3290,7 @@ class ClipsPage(QWidget):
         self.hook_at = None
 
         # точное время
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(6)
         row.addWidget(head("Время"))
         self.e_start = QLineEdit()
@@ -3203,7 +3309,7 @@ class ClipsPage(QWidget):
         ml.addLayout(row)
 
         # вырезки
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(6)
         row.addWidget(head("Вырезки"))
         self.btn_cut = QPushButton("Вырезать выделенное")
@@ -3219,7 +3325,7 @@ class ClipsPage(QWidget):
         row.addWidget(self.btn_cuts_reset)
         row.addStretch(1)
         ml.addLayout(row)
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(6)
         from PySide6.QtWidgets import QDoubleSpinBox
         self.btn_pauses = QPushButton("Сжать паузы")
@@ -3248,7 +3354,7 @@ class ClipsPage(QWidget):
         self.cuts, self.cut_ab, self._voice = [], [None, None], {}
         self.bleep_seed = None
 
-        row = QHBoxLayout()
+        row = FlowLayout()
         row.setSpacing(8)
         self.btn_save = QPushButton("Сохранить как…")
         self.btn_save.clicked.connect(self.save_as)
@@ -3530,6 +3636,12 @@ class ClipsPage(QWidget):
         except autoclip.AutoClipError as e:
             QMessageBox.warning(self, "AutoClip", str(e))
             return
+        try:
+            self.save_desc()                         # правка описания — в ту нарезку, где её делали
+        except (autoclip.AutoClipError, OSError):
+            pass
+        self._desc_timer.stop()
+        self._desc_clip = None                       # клип описания — из прежней нарезки
         self.proj = proj
         self.remember(proj["_path"])
         try:
@@ -3863,6 +3975,9 @@ class ClipsPage(QWidget):
         tg = menu.addAction(f"Отправить в Telegram по очереди ({n})", lambda: self.bulk_telegram(clips))
         tg.setEnabled(telegram_bot.is_connected())
         menu.addAction(f"Пересобрать ({n})", lambda: self.bulk_rebuild(clips))
+        merge = menu.addAction(f"Склеить в один клип ({n})", lambda: self.merge(clips))
+        merge.setToolTip("Новый клип из выделенных — по времени в записи, промежутки вырезаны. "
+                         "Оригиналы остаются")
         menu.addAction("Показать в папке", lambda: show_in_folder(self.clip_path(clips[0])))
         menu.addSeparator()
         menu.addAction(f"Не то — в корзину ({n})", lambda: self.bulk_rate(clips, "bad"))
@@ -3915,6 +4030,25 @@ class ClipsPage(QWidget):
                     bus.send_state.emit(f"«{title}» не отправился: " + str(e).replace("❌ ", ""))
             bus.send_state.emit(f"Отправлено в Telegram: {len(items)} ✓")
         self.win.telegram.do(job)
+
+    def merge(self, clips):
+        """«Склеить»: новый клип из выделенных (оригиналы остаются)."""
+        if self.busy or len(clips) < 2:
+            return
+        self.busy = True
+        self.editor.setEnabled(False)
+        pp, bus, ids = self.proj["_path"], self.win.bus, [c["id"] for c in clips]
+        self.win.notice("busy", "Склеиваю клипы", f"{len(ids)} в один")
+
+        def work():
+            try:
+                rec = autoclip.merge_clips(pp, ids)
+                bus.added.emit(rec["id"], None)
+            except autoclip.AutoClipError as e:
+                bus.added.emit(None, str(e))
+            except Exception:
+                bus.added.emit(None, "❌ " + traceback.format_exc()[-800:])
+        threading.Thread(target=work, daemon=True).start()
 
     def bulk_rebuild(self, clips):
         if self.busy:
@@ -4310,6 +4444,11 @@ class ClipsPage(QWidget):
             label = (f"{autoclip.fmt_time_exact(t)}  «{autoclip.censor_word(w['w'])}»  — "
                      + ("писк снят" if off else "по фильтру"))
             self.e_bleeps.addItem(label, ("rem", round(t, 2)))
+        for a, b, text in self.w_add:                          # слова, добавленные вручную (5.8)
+            if autoclip.is_profane(text):
+                off = any(abs(a - x) < 0.06 for x in self.b_rem)
+                self.e_bleeps.addItem(f"{autoclip.fmt_time_exact(a)}  «{autoclip.censor_word(text)}» +  — "
+                                      + ("писк снят" if off else "добавлено"), ("rem", round(a, 2)))
         for i, (a, b) in enumerate(self.b_add):
             self.e_bleeps.addItem(f"{autoclip.fmt_time_exact(a)}–{autoclip.fmt_time_exact(b)}  — вручную",
                                   ("add", i))
@@ -4562,6 +4701,12 @@ class ClipsPage(QWidget):
         self.btn_build.setText("Собрать")
         self.busy = False
         self.here_state.setText("")
+        n = getattr(self.win, "_notice", None)
+        if n is not None and n.isVisible() and n.title == "Склеиваю клипы":
+            if err:
+                n.dismiss()
+            else:
+                self.win.notice("ok", "Клипы склеены", "новый клип — в «Новых»")
         if err:
             self.btn_here.setEnabled(True)
             self.btn_build.setEnabled(True)
@@ -4596,6 +4741,7 @@ class ClipsPage(QWidget):
                      "words_add": [list(x) for x in (c.get("overrides") or {}).get("words_add") or []],
                      "title": (c.get("overrides") or {}).get("title") or c["title"],
                      "bleep_remove": list((c.get("overrides") or {}).get("bleep_remove") or []),
+                     "bleep_span": dict((c.get("overrides") or {}).get("bleep_span") or {}),
                      "cuts": [list(x) for x in (c.get("overrides") or {}).get("cuts") or []],
                      "start": round(c["start"], 1), "end": round(c["end"], 1)}
         widgets = (self.e_hook, self.e_zoom, self.e_bleep, self.e_subs, self.e_pos, self.e_safe,
@@ -4638,6 +4784,7 @@ class ClipsPage(QWidget):
         self.base["hook_at"] = list(self.hook_at) if self.hook_at else None   # показанный — не правка
         self.show_hook()
         self.b_rem = list(self.base["bleep_remove"])
+        self.b_span = {k: list(v) for k, v in self.base["bleep_span"].items()}
         self.cuts = [list(x) for x in self.base["cuts"]]
         self.cut_ab = [None, None]
         self.show_cuts()
@@ -4683,6 +4830,7 @@ class ClipsPage(QWidget):
                 "mat_words": list(self.m_words),
                 "title": self.t_title.text().strip() or (self.base or {}).get("title", ""),
                 "bleep_remove": list(self.b_rem),
+                "bleep_span": {k: list(v) for k, v in self.b_span.items()},
                 "cuts": [list(x) for x in self.cuts],
                 "start": self._time(self.e_start), "end": self._time(self.e_end)}
 
@@ -4705,13 +4853,17 @@ class ClipsPage(QWidget):
         segs = self.segments() or []
         words = [w for seg in segs for w in seg.get("words", [])
                  if self.tl.view[0] <= w["s"] <= self.tl.view[1]]
+        def span(a, b):                      # своя длина писка (растянули на таймлайне)
+            v = next((v for k, v in self.b_span.items() if abs(float(k) - a) < 0.06), None)
+            return (float(v[0]), float(v[1])) if v else (a, b)
         bleeps = []
         for w in words:
             if autoclip.is_profane(w["w"]):
                 off = any(abs(w["s"] - t) < 0.06 for t in self.b_rem)
-                bleeps.append((w["s"], w["e"], off))
-        bleeps += [(a, b, False) for a, b in self.b_add]
-        bleeps += [(a, b, False) for a, b, t in self.w_add if autoclip.is_profane(t)]
+                bleeps.append((*span(w["s"], w["e"]), off, round(w["s"], 2)))
+        bleeps += [(a, b, False, ("add", i)) for i, (a, b) in enumerate(self.b_add)]
+        bleeps += [(*span(a, b), any(abs(a - x) < 0.06 for x in self.b_rem), round(a, 2))
+                   for a, b, t in self.w_add if autoclip.is_profane(t)]
         try:
             zooms = autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[0]
         except Exception:
@@ -4762,7 +4914,8 @@ class ClipsPage(QWidget):
         return {"start": self.e_start.text(), "end": self.e_end.text(),
                 "hook_at": list(self.hook_at) if self.hook_at else None,
                 "cuts": [list(x) for x in self.cuts], "b_add": [list(x) for x in self.b_add],
-                "b_rem": list(self.b_rem), "w_add": [list(x) for x in self.w_add]}
+                "b_rem": list(self.b_rem), "w_add": [list(x) for x in self.w_add],
+                "b_span": {k: list(v) for k, v in self.b_span.items()}}
 
     def push_undo(self):
         self._undo.append(self._snapshot())
@@ -4777,6 +4930,7 @@ class ClipsPage(QWidget):
         self.e_end.setText(st["end"])
         self.hook_at = st["hook_at"]
         self.cuts, self.b_add, self.b_rem, self.w_add = st["cuts"], st["b_add"], st["b_rem"], st["w_add"]
+        self.b_span = st.get("b_span", {})
         self.show_hook()
         self.show_cuts()
         self.refresh_bleeps()
@@ -4820,8 +4974,21 @@ class ClipsPage(QWidget):
         self.cut_ab = [None, None] if a < 0 else [a, b]
         self.show_cuts()
 
+    def _tl_bleep_resized(self, key, a, b):
+        """Растянули/сжали метку писка: у ручного писка меняются его границы, у слова — своя длина."""
+        self.push_undo()
+        if isinstance(key, tuple) and key[0] == "add":
+            if 0 <= key[1] < len(self.b_add):
+                self.b_add[key[1]] = [a, b]
+        else:
+            k = next((k for k in self.b_span if abs(float(k) - float(key)) < 0.06), f"{float(key):.2f}")
+            self.b_span[k] = [a, b]
+        self.refresh_bleeps()
+        self._changed()
+        self.tl_refresh()
+
     def _tl_bleep(self, t):
-        """Клик по писку на таймлайне: автоматический — убрать/вернуть, ручной — убрать."""
+        """Правой кнопкой по писку на таймлайне: автоматический — убрать/вернуть, ручной — убрать."""
         self.push_undo()
         for i, (a, b) in enumerate(self.b_add):
             if a - 0.05 <= t <= b + 0.05:
@@ -4963,7 +5130,11 @@ class ClipsPage(QWidget):
         cid = self._desc_clip
         if not (cid and self.proj):
             return
-        c = autoclip.find_clip(self.proj, cid)
+        try:
+            c = autoclip.find_clip(self.proj, cid)
+        except autoclip.AutoClipError:
+            self._desc_clip = None
+            return
         text = self.desc.toPlainText()
         auto = autoclip.auto_description(c, self.desc_platform, self.tag_cfg())
         autoclip.set_description(self.proj["_path"], cid, self.desc_platform,
@@ -4974,7 +5145,11 @@ class ClipsPage(QWidget):
     def _desc_pending(self):
         if not (self._desc_clip and self.proj):
             return False
-        c = autoclip.find_clip(self.proj, self._desc_clip)
+        try:
+            c = autoclip.find_clip(self.proj, self._desc_clip)
+        except autoclip.AutoClipError:              # клипа уже нет (удалён, другая нарезка)
+            self._desc_clip = None
+            return False
         return self.desc.toPlainText().strip() != autoclip.clip_description(
             c, self.desc_platform, self.tag_cfg()).strip()
 
@@ -5190,6 +5365,54 @@ class ClipsPage(QWidget):
 
 # ---------------- раздел «Подборка» ----------------
 
+class DragFile(QFrame):
+    """Плашка с файлом: тяни мышкой прямо в окно загрузки на сайте (как клип из списка)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("panel")
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("Перетащи в окно загрузки TikTok / YouTube / Instagram")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(10)
+        ic = QLabel()
+        ic.setPixmap(theme.pixmap("film", ACCENT, 20))
+        lay.addWidget(ic)
+        self.name = QLabel("")
+        self.name.setObjectName("rowLabel")
+        lay.addWidget(self.name, 1)
+        lay.addWidget(hint("тяни в окно загрузки"))
+        self.path = None
+        self._press = None
+
+    def set_path(self, path):
+        self.path = path
+        self.name.setText(os.path.basename(path) if path else "")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._press = e.position().toPoint()
+
+    def mouseMoveEvent(self, e):
+        if self._press is None or not self.path or not os.path.isfile(self.path):
+            return
+        if (e.position().toPoint() - self._press).manhattanLength() < 6:
+            return
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QDrag
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(self.path)])
+        drag = QDrag(self)
+        drag.setMimeData(md)
+        drag.setPixmap(theme.pixmap("film", "#ffffff", 32))
+        self._press = None
+        drag.exec(Qt.CopyAction)
+
+    def mouseReleaseEvent(self, e):
+        self._press = None
+
+
 class WeeklyPage(QWidget):
     """Один ролик из «хороших» и «выложенных» клипов за последние дни.
     Клипы можно убрать галочкой и переставить (перетаскиванием или ↑ ↓)."""
@@ -5353,6 +5576,41 @@ class WeeklyPage(QWidget):
         row.addWidget(b)
         bc.addLayout(row)
         lay.addWidget(self.build_card)
+
+        # --- публикация собранной подборки: как у клипов (окно загрузки, описание в буфер, перетащить файл)
+        self.pub_card, pc = card("Публикация", "Окно загрузки откроется отдельно, описание — в буфере (Ctrl+V). "
+                                               "Видео перетащи мышкой из плашки ниже прямо в окно загрузки.",
+                                 icon="upload")
+        pc.setSpacing(10)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Название"))
+        self.pub_title = QLineEdit("Лучшие моменты недели")
+        self.pub_title.setToolTip("Хэштеги добавятся сами — для каждой площадки свои")
+        row.addWidget(self.pub_title, 1)
+        b = QPushButton("Копировать описание")
+        theme.set_icon(b, "copy", FG, 15)
+        b.clicked.connect(lambda: self._copy_desc("tiktok"))
+        row.addWidget(b)
+        pc.addLayout(row)
+        self.pub_file = DragFile()
+        pc.addWidget(self.pub_file)
+        row = FlowLayout()
+        b = QPushButton("Во все три")
+        b.setObjectName("primary")
+        b.setToolTip("Три окна загрузки рядом на основном мониторе")
+        b.clicked.connect(self.publish_all)
+        row.addWidget(b)
+        for key, name in autoclip.PLATFORMS.items():
+            b = QPushButton(name)
+            b.setToolTip(f"Окно загрузки {name}, описание — в буфер")
+            b.clicked.connect(lambda _, k=key: self.publish(k))
+            row.addWidget(b)
+        pc.addLayout(row)
+        self.pub_state = hint("")
+        pc.addWidget(self.pub_state)
+        self.pub_card.hide()
+        lay.addWidget(self.pub_card)
         self._show_dir()
 
         win.bus.weekly_progress.connect(self._progress)
@@ -5523,6 +5781,46 @@ class WeeklyPage(QWidget):
         self.state.setText(f"Готово: {os.path.basename(out)}")
         self.btn_open.setEnabled(True)
         self.btn_show.setEnabled(True)
+        self.pub_file.set_path(out)                     # можно выкладывать — как клип
+        self.pub_state.setText("")
+        self.pub_card.show()
+        fade_in(self.pub_card, 220)
+
+    # ---------- публикация подборки ----------
+    def description(self, platform):
+        cfg = {"hashtags": self.s.get("hashtags", ""), "platform_tags": self.s.get("platform_tags", {})}
+        tags = autoclip.compose_tags(platform, cfg, [])
+        title = self.pub_title.text().strip() or "Лучшие моменты недели"
+        return (title + ("\n\n" + " ".join(tags) if tags else "")).strip()
+
+    def _copy_desc(self, platform):
+        QApplication.clipboard().setText(self.description(platform))
+        self.pub_state.setText(f"Описание для {autoclip.PLATFORMS[platform]} в буфере")
+
+    def publish(self, platform, rect=None):
+        """Описание — в буфер, страница загрузки — отдельным окном. Публикует сам Гоша."""
+        if not self.last:
+            return
+        QApplication.clipboard().setText(self.description(platform))
+        try:
+            how = autoclip.open_upload(platform, rect)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            return
+        name = autoclip.PLATFORMS[platform]
+        self.pub_state.setText(f"Открыл {name}{'' if how == 'edge' else ' в браузере'} · описание в буфере · "
+                               "перетащи видео из плашки в окно загрузки")
+
+    def publish_all(self):
+        scr = QApplication.primaryScreen()
+        g = scr.availableGeometry()
+        k = scr.devicePixelRatio()
+        rects = autoclip.side_by_side((g.x() * k, g.y() * k, g.width() * k, g.height() * k),
+                                      len(autoclip.PLATFORMS))
+        for key, rect in reversed(list(zip(autoclip.PLATFORMS, rects))):
+            self.publish(key, rect)                  # TikTok последним — его описание в буфере
+        self.pub_state.setText("Открыл три окна · в буфере описание для TikTok, для остальных — "
+                               "«Копировать описание»")
 
 
 # ---------------- раздел «Настройки» ----------------

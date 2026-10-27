@@ -3401,6 +3401,22 @@ def is_mat_word(w):
     return bool(w.get("mat")) or is_profane(w["w"])
 
 
+def apply_bleep_spans(words, cfg):
+    """Своя длина писка у слова (растянули метку на таймлайне): bleep_span — {начало слова в записи:
+    [от, до] в записи}. Слову ставится bleep_ab — те же границы во времени готового клипа."""
+    spans = [(float(k), v) for k, v in (cfg.get("bleep_span") or {}).items()]
+    if not spans:
+        return words
+    out = []
+    for w in words:
+        src = w.get("src")
+        hit = next((v for k, v in spans if src is not None and abs(k - src) < 0.06), None)
+        if hit:
+            w = dict(w, bleep_ab=(round(w["s"] + float(hit[0]) - src, 3), round(w["s"] + float(hit[1]) - src, 3)))
+        out.append(w)
+    return out
+
+
 def apply_word_edits(words, cfg):
     """Правки текста клипа: words_edit — {время слова в записи: новый текст} (пусто — убрать
     из субтитров), mat_words — времена слов, которые фильтр пропустил, а это мат."""
@@ -3494,7 +3510,11 @@ def bleep_spans(words, total, pad, partial=False):
         until = min(total, max(nxt, b))
         span = mask_span(wd["w"]) if partial and wd["w"] else None
         d = wd["e"] - wd["s"]
-        if span and d >= PARTIAL_MIN:
+        if wd.get("bleep_ab"):                   # длину писка поправили руками — она главнее
+            a = max(0.0, float(wd["bleep_ab"][0]))
+            b = min(total, max(a + 0.05, float(wd["bleep_ab"][1])))
+            until = max(until, b)
+        elif span and d >= PARTIAL_MIN:
             x, y, n = span                       # закрыть только скрытые буквы, остальное слышно
             a = max(0.0, wd["s"] + d * x / n - PARTIAL_PAD)
             b = min(total, wd["s"] + d * y / n + PARTIAL_PAD)
@@ -3546,6 +3566,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     words = add_manual_words(words, cfg, tl)
     words = mark_manual_bleeps(words, cfg, tl)
     words = apply_word_edits(words, cfg)
+    words = apply_bleep_spans(words, cfg)
     zooms = []
     pts, _ = clip_zooms(dict(clip, start=s, end=e, overrides={}), cfg)
     for z in pts:
@@ -3891,7 +3912,7 @@ def normalize_clip(c):
 OVERRIDE_KEYS = ("subs", "zoom", "bleep", "bleep_sound", "hook", "sub_y", "safe_zone", "nick",
                  "sub_x", "sub_style", "music", "bleep_add", "bleep_remove", "hook_at",
                  "words_edit", "mat_words", "title", "censor", "cuts", "bleep_seed",
-                 "bleep_pool", "words_add") + STYLE_KEYS
+                 "bleep_pool", "words_add", "bleep_span") + STYLE_KEYS
 # настройки, которые запоминаются в проекте и нужны для пересборки
 RENDER_KEYS = ("subs", "subs_team", "sub_font", "sub_size", "sub_y", "safe_zone", "sub_max_words", "sub_max_chars",
                "sub_mode", "sub_color", "sub_hl_color", "sub_outline_color", "sub_outline",
@@ -4962,6 +4983,76 @@ def split_point(t, s, e, words):
         if best is None or abs(x - t) < abs(best - t):
             best = x
     return None if best is None else round(best, 2)
+
+
+MERGE_LIST_KEYS = ("bleep_add", "bleep_remove", "mat_words", "words_add")
+MERGE_DICT_KEYS = ("words_edit", "bleep_span")
+
+
+def merge_plan(clips):
+    """Как склеить клипы одной нарезки: по времени в записи; промежутки между ними — вырезки.
+    → (начало, конец, вырезки) в записи."""
+    ranges = sorted([float(c["start"]), float(c["end"])] for c in clips)
+    merged = []
+    for a, b in ranges:                                   # пересекаются — одним куском
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    cuts = [[merged[i][1], merged[i + 1][0]] for i in range(len(merged) - 1)]
+    for c in clips:                                       # свои вырезки клипов — тоже
+        cuts += [x for x in clip_cuts(c) if not any(g[0] <= x[0] and x[1] <= g[1] for g in cuts)]
+    return merged[0][0], merged[-1][1], sorted(cuts)
+
+
+def merge_clips(path, refs, progress=None, cancel=None):
+    """«Склеить»: из нескольких клипов нарезки — новый клип (по времени в записи, промежутки
+    вырезаны). Оригиналы не трогаются. Правки клипов (мат, слова, писки) переходят в склейку —
+    они привязаны ко времени записи. → запись нового клипа."""
+    proj = load_project(path)
+    clips = [find_clip(proj, r) for r in refs]
+    clips = [c for c in clips if c["status"] != "rejected"]
+    if len(clips) < 2:
+        raise AutoClipError("❌ Для склейки нужно хотя бы два клипа.")
+    clips.sort(key=lambda c: c["start"])
+    s, e, cuts = merge_plan(clips)
+    ov = {k: v for k, v in (clips[0].get("overrides") or {}).items()
+          if k in OVERRIDE_KEYS and k not in ("title", "hook_at", "cuts") + MERGE_LIST_KEYS + MERGE_DICT_KEYS}
+    for k in MERGE_LIST_KEYS:
+        items = [x for c in clips for x in ((c.get("overrides") or {}).get(k) or [])]
+        if items:
+            ov[k] = items
+    for k in MERGE_DICT_KEYS:
+        d = {}
+        for c in clips:
+            d.update((c.get("overrides") or {}).get(k) or {})
+        if d:
+            ov[k] = d
+    if cuts:
+        ov["cuts"] = cuts
+    best = max(clips, key=lambda c: c.get("score", 0))
+    nums = " + ".join(f"{c['num']:02d}" for c in clips)
+    title = " + ".join(clip_title(c) for c in clips)
+    if len(title) > 60:
+        title = clip_title(clips[0]) + f" и ещё {len(clips) - 1}"
+    segments = load_segments(proj)
+    react = list(proj.get("reaction") or [])
+    for a, b in cuts:                                     # хук — только из оставшихся кусков (правило 5)
+        for i in range(max(0, int(a)), min(len(react), int(math.ceil(b)))):
+            react[i] = 0.0
+    hook = decide_hook(s, e, react, segments, threshold=proj.get("hook_threshold"),
+                       cfg=dict(CONFIG, **proj.get("settings", {})),
+                       voice=clip_voice(proj["source"], s, e) if os.path.isfile(proj["source"]) else None,
+                       peak=best.get("peak"))
+    if hook.get("start") is not None and in_cuts(hook["start"], hook["end"], cuts):
+        hook.update(auto=False, why="момент хука вырезан")
+    c = {"s": s, "e": e, "peak": best.get("peak", s), "score": max(x.get("score", 0) for x in clips),
+         "parts": best.get("score_parts", {}), "title": title, "reason": f"склейка клипов {nums}",
+         "zooms": sorted(z for x in clips for z in x.get("zooms", []) if not in_cuts(z, z + 0.01, cuts)),
+         "hook": hook, "overrides": ov}
+    rec = add_clip(path, c, "merge", progress, cancel)
+    log(f"🧩 Склеил клипы {nums} → {rec['file']}")
+    return rec
 
 
 def split_clip(path, ref, t, progress=None, cancel=None):

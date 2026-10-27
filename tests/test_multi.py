@@ -32,6 +32,17 @@ def test_multi_select_actions(tmp_path, fake_trash, monkeypatch):
     menu = page.build_menu()
     names = [a.text() for a in menu.actions() if a.text()]
     assert "Выложу (2)" in names and "Не то — в корзину (2)" in names and "Пересобрать (2)" in names
+    assert "Склеить в один клип (2)" in names                       # склейка — из меню
+    from qtwait import pump
+    page.merge(clips)
+    for _ in range(600):
+        if not page.busy:
+            break
+        pump(50)
+    proj = autoclip.load_project(cut)
+    merged = [c for c in proj["clips"] if c.get("origin") == "merge"]
+    assert len(merged) == 1 and os.path.isfile(os.path.join(autoclip.cut_root(proj), merged[0]["file"]))
+    assert page.current_clip()["id"] == merged[0]["id"]               # склейка выбрана в списке
     page.bulk_rate(clips, "ok")
     proj = autoclip.load_project(cut)
     assert sorted(c["status"] for c in proj["clips"] if c["id"] in {x["id"] for x in clips}) == ["ok", "ok"]

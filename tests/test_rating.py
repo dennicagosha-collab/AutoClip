@@ -1,4 +1,5 @@
 """Патч 5.3: «Выложу / Норм / Не то»; 5.4: «выложен» ставится всегда."""
+import json
 import os
 
 import autoclip
@@ -176,3 +177,49 @@ def test_any_move_releases_file_open_in_player(tmp_path, monkeypatch):
     assert c["status"] == "published" and c["file"].startswith("Выложенные/")
     assert os.path.isfile(os.path.join(root, c["file"]))
     win.close()
+
+
+def test_merge_plan_order_and_gaps():
+    """Склейка — по времени в записи; промежутки и свои вырезки клипов — вырезаны; пересечения — одним куском."""
+    clips = [{"start": 100.0, "end": 120.0, "overrides": {"cuts": [[105.0, 107.0]]}},
+             {"start": 40.0, "end": 60.0, "overrides": {}},
+             {"start": 115.0, "end": 130.0, "overrides": {}}]
+    s, e, cuts = autoclip.merge_plan(clips)
+    assert (s, e) == (40.0, 130.0)
+    assert [60.0, 100.0] in cuts and [105.0, 107.0] in cuts and len(cuts) == 2
+
+
+def test_merge_clips_new_clip_keeps_originals(tmp_path, monkeypatch):
+    """«Склеить» — новый клип, оригиналы на месте; правки мата переходят в склейку."""
+    import subprocess
+    root = tmp_path / "Клипы 27.10.2026"
+    (root / ".autoclip").mkdir(parents=True)
+    src = tmp_path / "запись.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=180x320:r=30:d=60",
+                    "-f", "lavfi", "-i", "sine=f=300:d=60", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac", "-shortest", str(src)], check=True)
+    vinfo = autoclip.probe(str(src))
+    tr = tmp_path / "t.json"
+    tr.write_text(json.dumps([{"s": 5.0, "e": 50.0, "text": "", "words": [
+        {"s": 6.0, "e": 6.4, "w": "ну"}, {"s": 41.0, "e": 41.5, "w": "блять"}]}]), encoding="utf-8")
+    proj = autoclip.new_project(str(src), vinfo, str(root), str(tr), layout=2)
+    for i, (a, b) in enumerate([(5.0, 15.0), (38.0, 48.0)], 1):
+        c = autoclip.make_clip_record({"s": a, "e": b, "peak": a + 2, "score": i, "zooms": [], "title": f"к{i}",
+                                       "reason": ""}, i, f"Новые/0{i}_к{i}.mp4")
+        (root / "Новые").mkdir(exist_ok=True)
+        (root / c["file"]).write_bytes(b"x")
+        proj["clips"].append(c)
+    proj["clips"][1]["overrides"]["bleep_span"] = {"41.00": [40.9, 41.8]}
+    autoclip.save_project(proj)
+    monkeypatch.setattr(autoclip, "log", lambda m: None)
+    rec = autoclip.merge_clips(proj["_path"], ["c01", "c02"])
+    p = autoclip.load_project(proj["_path"])
+    assert len(p["clips"]) == 3 and rec["origin"] == "merge"
+    assert (rec["start"], rec["end"]) == (5.0, 48.0)
+    assert rec["overrides"]["cuts"] == [[15.0, 38.0]] and rec["overrides"]["bleep_span"] == {"41.00": [40.9, 41.8]}
+    out = os.path.join(autoclip.cut_root(p), rec["file"])
+    assert os.path.isfile(out) and rec["bleeps"] == 1
+    assert 19.0 < autoclip._probe_dur(out) < 22.0                # 10 + 10 с, без промежутка
+    assert all(os.path.isfile(os.path.join(autoclip.cut_root(p), c["file"])) for c in p["clips"][:2])
+    if rec["hook"].get("start") is not None and rec["hook"].get("on"):
+        assert not autoclip.in_cuts(rec["hook"]["start"], rec["hook"]["end"], [[15.0, 38.0]])   # правило 5

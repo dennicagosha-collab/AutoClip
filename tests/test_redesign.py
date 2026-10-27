@@ -207,3 +207,75 @@ def test_player_volume_only_for_preview(A, tmp_path, monkeypatch):
     win2 = A.MainWindow()
     assert win2.clips.player.vol.value() == 30                # запомнилось
     win2.close()
+
+
+def test_wheel_scroll_same_after_view_switch(A, tmp_path):
+    """После «список → сетка → список» колесо листает так же быстро, а не по пикселю."""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import test_cuts
+    autoclip.log = lambda m: None
+    win = A.MainWindow()
+    win.resize(1400, 900)
+    win.show()
+    page = win.clips
+    page.load(test_cuts._project(tmp_path))
+    for i in range(30):                                       # длинный список
+        page.list.addItem(page.list.item(0).clone())
+    from qtwait import pump
+    for view in ("grid", "list", "grid", "list"):
+        page.set_view(view)
+    pump(100)
+    sb = page.list.verticalScrollBar()
+    sb.setValue(0)
+    ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120), Qt.NoButton,
+                     Qt.NoModifier, Qt.ScrollUpdate, False)
+    page.list.wheelEvent(ev)
+    assert sb.value() >= 100                                  # один щелчок колеса — почти карточка
+    win.close()
+
+
+def test_weekly_publish_after_build(A, tmp_path, monkeypatch):
+    """Подборка собрана — появляется «Публикация»: окно загрузки, описание с хэштегами в буфере,
+    видео можно перетащить из плашки."""
+    from PySide6.QtWidgets import QApplication
+    win = A.MainWindow()
+    page = win.weekly
+    assert page.pub_card.isHidden()
+    out = tmp_path / "подборка.mp4"
+    out.write_bytes(b"x")
+    monkeypatch.setattr(autoclip, "mark_compiled", lambda *a, **k: None)
+    page._done(str(out), None)
+    assert not page.pub_card.isHidden() and page.pub_file.path == str(out)
+    win.settings["platform_tags"] = {"youtube": "#shorts"}
+    opened = []
+    monkeypatch.setattr(autoclip, "open_upload", lambda platform, rect=None: opened.append(platform) or "edge")
+    page.publish("youtube")
+    assert opened == ["youtube"]
+    text = QApplication.clipboard().text()
+    assert text.startswith("Лучшие моменты недели") and "#shorts" in text
+    page.publish_all()
+    assert sorted(opened[1:]) == sorted(autoclip.PLATFORMS)
+    win.close()
+
+
+def test_switching_cut_does_not_look_for_old_clip(A, tmp_path):
+    """Нарезка закончилась и открылась новая — описание клипа из прежней нарезки не ищется в новой
+    («В проекте нет клипа c20»)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import test_cuts
+    autoclip.log = lambda m: None
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    one = test_cuts._project(tmp_path / "a")
+    two = test_cuts._project(tmp_path / "b")
+    win = A.MainWindow()
+    page = win.clips
+    page.load(one)
+    page.list.setCurrentRow(0)
+    page._desc_clip = "c20"                                   # как у Гоши: клип прежней нарезки
+    page.desc.setPlainText("моё описание")
+    page.load(two)                                            # раньше — «В проекте нет клипа c20»
+    assert page.proj["_path"].startswith(str(tmp_path / "b"))
+    win.close()

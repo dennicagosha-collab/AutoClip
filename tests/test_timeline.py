@@ -112,3 +112,46 @@ def test_dead_pieces_stored_and_estimated(tmp_path, qapp):
     tl = Timeline()
     tl.set_layers(dead=[[1.0, 5.0]])
     assert tl.dead == [[1.0, 5.0]]
+
+
+def test_bleep_and_hook_edges_resize(qapp):
+    """Края метки писка и хука тянутся мышью; левый клик по писку его НЕ выключает (только правой)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from timeline import Timeline
+    tl = Timeline()
+    tl.resize(800, 96)
+    tl.set_clip(20.0, 40.0, 100.0)
+    tl.set_layers(hook=(30.0, 32.0), bleeps=[(25.0, 25.5, False, 25.0)])
+    got = {"resized": [], "clicked": [], "hook": []}
+    tl.bleep_resized.connect(lambda k, a, b: got["resized"].append((k, a, b)))
+    tl.bleep_clicked.connect(lambda t: got["clicked"].append(t))
+    tl.hook_changed.connect(lambda a, b: got["hook"].append((a, b)))
+    y = tl.height() - 8
+    QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(25.5)), y))     # правый край писка
+    QTest.mouseMove(tl, QPoint(int(tl.x_of(26.2)), y))
+    QTest.mouseRelease(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(26.2)), y))
+    k, a, b = got["resized"][-1]
+    assert k == 25.0 and a == 25.0 and b == pytest.approx(26.2, abs=0.1)
+    QTest.mouseClick(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(25.6)), y))     # середина — перемотка
+    assert got["clicked"] == []
+    QTest.mouseClick(tl, Qt.RightButton, Qt.NoModifier, QPoint(int(tl.x_of(25.6)), y))    # правой — убрать
+    assert got["clicked"] == [25.0]
+    QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(32.0)), 8))     # правый край хука
+    QTest.mouseMove(tl, QPoint(int(tl.x_of(33.5)), 8))
+    QTest.mouseRelease(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(33.5)), 8))
+    a, b = got["hook"][-1]
+    assert a == 30.0 and b == pytest.approx(33.5, abs=0.1)                                  # хук длиннее
+    QTest.mousePress(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(30.0)), 8))     # левый край — за клип
+    QTest.mouseMove(tl, QPoint(int(tl.x_of(15.0)), 8))
+    QTest.mouseRelease(tl, Qt.LeftButton, Qt.NoModifier, QPoint(int(tl.x_of(15.0)), 8))
+    a, b = got["hook"][-1]
+    assert a >= 20.0 and b - a <= 6.0 + 1e-6                                               # правило 5 и не длиннее 6 с
+
+
+def test_bleep_span_override_in_render():
+    """Растянутый писк: в собранном клипе закрыт ровно растянутый кусок."""
+    words = [{"s": 1.0, "e": 1.4, "w": "блять", "src": 11.0}, {"s": 2.0, "e": 2.3, "w": "ну", "src": 12.0}]
+    w2 = autoclip.apply_bleep_spans(words, {"bleep_span": {"11.00": [10.9, 11.8]}})
+    spans = autoclip.bleep_spans(w2, total=5.0, pad=0.0, partial=True)
+    assert spans == [(pytest.approx(0.9), pytest.approx(1.8), pytest.approx(2.0))]

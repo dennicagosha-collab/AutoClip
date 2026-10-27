@@ -35,7 +35,8 @@ class Timeline(QWidget):
     hook_changed = Signal(float, float)
     seek = Signal(float)
     selection_changed = Signal(float, float)
-    bleep_clicked = Signal(float)
+    bleep_clicked = Signal(float)              # правой кнопкой — убрать/вернуть писк
+    bleep_resized = Signal(object, float, float)   # ключ метки, новое начало и конец (в записи)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,7 +49,7 @@ class Timeline(QWidget):
         self.view = (0.0, 1.0)            # что видно
         self.wave = []                    # [(время, громкость 0..1)]
         self.hook = None                  # (начало, конец) или None
-        self.bleeps = []                  # [(начало, конец, снят ли)]
+        self.bleeps = []                  # [(начало, конец, снят ли[, ключ])]
         self.cuts = []                    # [[от, до]]
         self.marks = []                   # время меток OBS
         self.zooms = []                   # время зумов
@@ -142,12 +143,17 @@ class Timeline(QWidget):
             p.setFont(QFont(self.font().family(), 7))
             if r.width() > 26:
                 p.drawText(r, Qt.AlignCenter, "хук")
-        # писки
-        for a, b, off in self.bleeps:
-            r = QRectF(self.x_of(a), h - 12, max(3.0, self.x_of(b) - self.x_of(a)), 8)
+        # писки (края — ручки: тянутся мышью)
+        for bl in self.bleeps:
+            a, b, off = bl[0], bl[1], bl[2]
+            r = QRectF(self.x_of(a), h - 13, max(4.0, self.x_of(b) - self.x_of(a)), 10)
             p.setBrush(QColor(MUTED) if off else BLEEP)
             p.setPen(Qt.NoPen)
-            p.drawRoundedRect(r, 2, 2)
+            p.drawRoundedRect(r, 3, 3)
+            if r.width() >= 12:
+                p.setBrush(QColor(255, 255, 255, 170))
+                for ex in (r.left() + 2, r.right() - 4):
+                    p.drawRoundedRect(QRectF(ex, r.top() + 2, 2, r.height() - 4), 1, 1)
         # зумы и метки
         p.setPen(QPen(ZOOM, 1))
         for z in self.zooms:
@@ -194,12 +200,23 @@ class Timeline(QWidget):
             return "start"
         if abs(x - self.x_of(self.e)) <= HANDLE + 2:
             return "end"
-        if self.hook and y < 18 and self.x_of(self.hook[0]) <= x <= self.x_of(self.hook[1]):
-            return "hook"
-        if y > self.height() - 14:
-            for a, b, _ in self.bleeps:
-                if self.x_of(a) - 3 <= x <= self.x_of(b) + 3:
-                    return ("bleep", a)
+        if self.hook and y < 18:
+            ha, hb = self.x_of(self.hook[0]), self.x_of(self.hook[1])
+            if abs(x - ha) <= 5:
+                return "hook_a"
+            if abs(x - hb) <= 5:
+                return "hook_b"
+            if ha <= x <= hb:
+                return "hook"
+        if y > self.height() - 16:
+            for i, bl in enumerate(self.bleeps):
+                xa, xb = self.x_of(bl[0]), self.x_of(bl[1])
+                if abs(x - xa) <= 4:
+                    return ("bleep_a", i)
+                if abs(x - xb) <= 4:
+                    return ("bleep_b", i)
+                if xa - 2 <= x <= xb + 2:
+                    return ("bleep", bl[0])
         return None
 
     def mousePressEvent(self, ev):
@@ -207,9 +224,20 @@ class Timeline(QWidget):
         hit = self._hit(x, y)
         t = self.t_of(x)
         if isinstance(hit, tuple):
-            self.bleep_clicked.emit(hit[1])
+            if ev.button() == Qt.RightButton:                       # правой — убрать/вернуть писк
+                bl = self.bleeps[hit[1]] if hit[0] != "bleep" else None
+                self.bleep_clicked.emit(bl[0] if bl else hit[1])
+                return
+            if hit[0] in ("bleep_a", "bleep_b"):                     # тянем край — длина писка
+                self._drag = (hit[0], t, hit[1])
+                return
+            self._drag = ("seek", t, None)                           # клик по писку — просто перемотка
+            self.seek.emit(t)
+            self.update()
             return
-        if hit == "hook":
+        if hit in ("hook_a", "hook_b"):
+            self._drag = (hit, t, self.hook)
+        elif hit == "hook":
             self._drag = ("hook", t, self.hook)
         elif hit in ("start", "end"):
             self._drag = (hit, t, None)
@@ -226,8 +254,9 @@ class Timeline(QWidget):
     def mouseMoveEvent(self, ev):
         x = ev.position().x()
         hit = self._hit(x, ev.position().y())
-        self.setCursor(Qt.SizeHorCursor if hit in ("start", "end") else
-                       Qt.OpenHandCursor if hit == "hook" else Qt.ArrowCursor)
+        edge = hit in ("start", "end", "hook_a", "hook_b") or (
+            isinstance(hit, tuple) and hit[0] in ("bleep_a", "bleep_b"))
+        self.setCursor(Qt.SizeHorCursor if edge else Qt.OpenHandCursor if hit == "hook" else Qt.ArrowCursor)
         if not self._drag:
             return
         kind, t0, extra = self._drag
@@ -236,6 +265,20 @@ class Timeline(QWidget):
             self.s = min(t, self.e - 3.0)
         elif kind == "end":
             self.e = max(t, self.s + 3.0)
+        elif kind in ("hook_a", "hook_b") and extra:           # длина хука: 0,5–6 с, внутри клипа
+            a, b = extra
+            if kind == "hook_a":
+                a = max(self.s, min(t, b - 0.5), b - 6.0)
+            else:
+                b = min(self.e, max(t, a + 0.5), a + 6.0)
+            self.hook = (a, b)
+        elif kind in ("bleep_a", "bleep_b"):
+            bl = list(self.bleeps[extra])
+            if kind == "bleep_a":
+                bl[0] = max(self.s, min(t, bl[1] - 0.1))
+            else:
+                bl[1] = min(self.e, max(t, bl[0] + 0.1))
+            self.bleeps[extra] = tuple(bl)
         elif kind == "hook" and extra:
             d = t - t0
             a, b = extra
@@ -255,12 +298,16 @@ class Timeline(QWidget):
     def mouseReleaseEvent(self, ev):
         if not self._drag:
             return
-        kind = self._drag[0]
+        kind, extra = self._drag[0], self._drag[2]
         self._drag = None
         if kind in ("start", "end"):
             self.bounds_changed.emit(round(self.s, 2), round(self.e, 2))
-        elif kind == "hook" and self.hook:
+        elif kind in ("hook", "hook_a", "hook_b") and self.hook:
             self.hook_changed.emit(round(self.hook[0], 2), round(self.hook[1], 2))
+        elif kind in ("bleep_a", "bleep_b"):
+            bl = self.bleeps[extra]
+            key = bl[3] if len(bl) > 3 else bl[0]
+            self.bleep_resized.emit(key, round(bl[0], 2), round(bl[1], 2))
         elif kind == "sel" and self.sel:
             a, b = sorted(self.sel)
             if b - a >= 0.1:
