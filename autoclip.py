@@ -1005,10 +1005,10 @@ def _asr_collect(segments, spk, progress, cancel, dur, part, alive):
     return out
 
 
-def _refine_segments(segments, audio):
+def _refine_segments(segments, audio, regions=None):
     """Уточнить время слов по звуку — по всем словам сразу, чтобы слово не заехало на
     первое слово следующего куска Whisper."""
-    regions = speech_regions(audio)
+    regions = speech_regions(audio) if regions is None else regions
     flat = [(k, j, w) for k, sg in enumerate(segments) for j, w in enumerate(sg["words"])]
     order = sorted(range(len(flat)), key=lambda n: flat[n][2]["s"])
     refined = refine_words([dict(flat[n][2], _n=n) for n in order], regions)
@@ -1087,6 +1087,154 @@ def fill_holes(model, audio, segments, spk="me", regions=None, cancel=None):
     new = drop_hallucinations(new, regions)
     n = sum(len(sg["words"]) for sg in new)
     return sorted(segments + new, key=lambda sg: sg["s"]), n
+
+
+MAT_RECHECK = True     # второй проход по мату в клипах (тесты выключают — там нет Whisper)
+MAT_PAD = 8.0          # перепроверяется клип и столько секунд с каждой стороны (на сдвиг границ)
+MAT_PIECE = 40.0       # кусками не длиннее этого, с нахлёстом MAT_OVERLAP
+MAT_OVERLAP = 3.0
+
+
+def _merge_ranges(ranges, gap=0.0):
+    out = []
+    for a, b in sorted([float(a), float(b)] for a, b in ranges if b > a):
+        if out and a <= out[-1][1] + gap:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _uncovered(ranges, covered):
+    """Части ranges, которых нет в covered."""
+    out = []
+    for a, b in _merge_ranges(ranges):
+        t = a
+        for x, y in _merge_ranges(covered):
+            if y <= t or x >= b:
+                continue
+            if x > t:
+                out.append([t, x])
+            t = max(t, y)
+        if b - t > 0.5:
+            out.append([t, b])
+    return out
+
+
+def mat_merge(segments, fresh, spk, lo, hi):
+    """Свежая расшифровка куска [lo, hi] одной дорожки против общей. Если в свежей есть мат,
+    которого в общей нет (на длинной записи Whisper выкидывает «блядь» и подобное: на записи
+    06.11 в одном клипе пропали все пять), слова этой дорожки в куске заменяются свежими —
+    они точнее. → (сегменты, сколько мата добавилось)."""
+    old = [w for sg in segments for w in sg.get("words", [])
+           if w.get("spk", "me") == spk and lo <= (w["s"] + w["e"]) / 2 < hi]
+    new = [w for sg in fresh for w in sg["words"] if lo <= (w["s"] + w["e"]) / 2 < hi]
+    old_mat = [(w["s"] + w["e"]) / 2 for w in old if is_profane(w["w"])]
+    added = sum(1 for w in new if is_profane(w["w"])
+                and not any(abs((w["s"] + w["e"]) / 2 - t) < 0.6 for t in old_mat))
+    if not added:
+        return segments, 0
+    out = []
+    for sg in segments:
+        ws = [w for w in sg.get("words", []) if not (w.get("spk", "me") == spk and lo <= (w["s"] + w["e"]) / 2 < hi)]
+        if len(ws) == len(sg.get("words", [])):
+            out.append(sg)
+        elif ws:
+            out.append(dict(sg, words=ws, text=" ".join(w["w"] for w in ws),
+                            s=min(w["s"] for w in ws), e=max(w["e"] for w in ws)))
+    for sg in fresh:
+        ws = [w for w in sg["words"] if lo <= (w["s"] + w["e"]) / 2 < hi]
+        if ws:
+            out.append({"s": ws[0]["s"], "e": ws[-1]["e"], "spk": spk, "rechecked": True,
+                        "text": " ".join(w["w"] for w in ws), "words": ws})
+    return sorted(out, key=lambda sg: sg["s"]), added
+
+
+def _slice_audio(video, track, lo, hi, cancel=None):
+    """Кусок одной дорожки записи [lo, hi] для Whisper — как есть, без ASR_FILTER: на записи 06.11
+    с выравниванием громкости мат пропадал и на коротком куске, без него — слышен весь."""
+    with tempfile.TemporaryDirectory(prefix="autoclip_m_") as tmp:
+        out = os.path.join(tmp, "a.wav")
+        p = run(["ffmpeg", "-y", "-v", "error", "-ss", f"{lo:.3f}", "-t", f"{hi - lo:.3f}", "-i", video,
+                 "-map", f"0:a:{track}", "-vn", "-ac", "1", "-ar", "16000",
+                 "-c:a", "pcm_s16le", out], cancel=cancel)
+        if p.returncode != 0 or not os.path.isfile(out):
+            return None
+        return _read_wav(out)
+
+
+def _fresh_words(model, audio, lo, spk):
+    """Расшифровка короткого куска → сегменты со словами во времени записи (время — по звуку)."""
+    got, _ = model.transcribe(audio, language=CONFIG["language"], word_timestamps=True,
+                              vad_filter=True, beam_size=5, condition_on_previous_text=False)
+    segs = []
+    for sg in got:
+        ws = [{"s": round(lo + w.start, 2), "e": round(lo + w.end, 2), "w": w.word.strip(), "spk": spk}
+              for w in (sg.words or []) if w.word.strip()]
+        if ws:
+            segs.append({"s": ws[0]["s"], "e": ws[-1]["e"], "text": sg.text.strip(), "words": ws, "spk": spk})
+    regions = [(lo + a, lo + b) for a, b in speech_regions(audio)]
+    return _refine_segments(segs, None, regions) if segs else []
+
+
+def mat_recheck(video, segments, cache, ranges, cancel=None, on_frac=None):
+    """Второй проход по мату: куски записи, где будут клипы, Whisper слушает ещё раз — коротко
+    он слышит мат, который на всей записи пропустил. Проверенные куски помнятся в кэше
+    расшифровки (mat_checked) — второй раз не слушаются. → сегменты (новые — и в кэше)."""
+    if not MAT_RECHECK or not cache or not os.path.isfile(cache) or not os.path.isfile(video):
+        return segments
+    try:
+        with open(cache, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return segments
+    if not isinstance(data, dict):
+        return segments
+    done = data.get("mat_checked") or []
+    dur = probe(video)["dur"] if ranges else 0
+    want = _uncovered([(max(0.0, a - MAT_PAD), min(dur, b + MAT_PAD)) for a, b in ranges], done)
+    if not want:
+        return segments
+    tracks = audio_tracks(video)
+    plan = [(1, "me"), (2, "team")] if tracks >= 3 else [(0, "me")]
+    try:
+        model = _load_whisper()
+    except AutoClipError as e:
+        log(f"   мат не перепроверил: {e}")
+        return segments
+    log(f"🔎 Перепроверяю мат в клипах ({sum(b - a for a, b in want) / 60:.1f} мин записи)...")
+    added, total, heard = 0, sum(b - a for a, b in want), 0.0
+    try:
+        for a, b in want:
+            t = a
+            while t < b - 0.5:                            # кусками по MAT_PIECE с нахлёстом
+                lo, hi = max(0.0, t - MAT_OVERLAP), min(dur, t + MAT_PIECE + MAT_OVERLAP)
+                end = min(b, t + MAT_PIECE)
+                for track, spk in plan:
+                    check_cancel(cancel)
+                    audio = _slice_audio(video, track, lo, hi, cancel)
+                    if audio is None or len(audio) < 1600:
+                        continue
+                    try:
+                        fresh = _fresh_words(model, audio, lo, spk)
+                    except Exception as e:
+                        log(f"   кусок {fmt_time(lo)} не перепроверил: {e}")
+                        continue
+                    segments, n = mat_merge(segments, fresh, spk, t, end)
+                    added += n
+                done.append([round(t, 2), round(end, 2)])
+                heard += end - t
+                if on_frac:
+                    on_frac(min(1.0, heard / total))
+                t = end
+    finally:
+        import health
+        health.free_whisper(model)
+    data["segments"] = segments
+    data["mat_checked"] = _merge_ranges(done)
+    write_json(cache, data, indent=None)
+    log(f"   мата нашлось ещё: {added}" if added else "   пропущенного мата нет")
+    return segments
 
 
 def _cache_filled(path):
@@ -4796,6 +4944,7 @@ def add_clip(path, c, origin, progress=None, cancel=None):
     if not os.path.isfile(src):
         raise AutoClipError(f"❌ Не найдена исходная запись: {src}")
     segments = load_segments(proj)
+    segments = recheck_clip_mat(proj, segments, c["s"], c["e"], dict(CONFIG, **proj.get("settings", {})), cancel)
     out_dir = cut_root(proj)
     if not c.get("hook"):
         c["hook"] = decide_hook(c["s"], c["e"], proj.get("reaction") or [], segments, voice=clip_voice(src, c["s"], c["e"]),
@@ -4903,6 +5052,21 @@ def load_segments(proj):
     if not os.path.isfile(path):
         raise AutoClipError(f"❌ Нет расшифровки: {path}\n   Нарежь запись заново.")
     return drop_hallucinations(read_transcript(path))
+
+
+def recheck_clip_mat(proj, segments, s, e, cfg, cancel=None):
+    """Перед сборкой клипа: его кусок записи перепроверен на мат (второй проход)? Нет — перепроверить.
+    Старые нарезки (до 0.1.6) так получают пропущенный мат при пересборке."""
+    if not cfg.get("bleep", True):
+        return segments
+    try:
+        got = mat_recheck(proj["source"], segments, proj.get("transcript"), [(s, e)], cancel)
+    except Cancelled:
+        raise
+    except Exception as ex:                            # клип всё равно соберётся — с тем матом, что был
+        log(f"   мат не перепроверил: {ex}")
+        return segments
+    return drop_hallucinations(got) if got is not segments else segments
 
 
 PAUSE_MIN = 1.5        # «Сжать паузы»: паузы без речи длиннее этого…
@@ -5109,6 +5273,7 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
 
     segments = load_segments(proj)
     cfg = clip_config(proj, clip)
+    segments = recheck_clip_mat(proj, segments, s, e, cfg, cancel)
     cuts = clip_cuts(clip, cfg)
     if timeline_len(clip_timeline(s, e, cuts)) < 3:
         raise AutoClipError("❌ После вырезок клип короче 3 секунд.")
@@ -5854,6 +6019,9 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
     clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
+    if CONFIG.get("bleep", True) and clips:              # кандидаты — когда из них сделают клип (add_clip)
+        segments = drop_hallucinations(mat_recheck(video, segments, cache, [(c["s"], c["e"]) for c in clips], cancel,
+                                                    lambda f: prog("поиск", f * 50, "перепроверяю мат")))
     proj["candidates"] = [candidate_record(c, i, segments) for i, c in enumerate(cands, 1)]
     if CONFIG.get("clips_mode") == "auto":
         log(f"   режим «Авто»: оценка от {thr:g}, не больше {CONFIG['auto_max']}")
