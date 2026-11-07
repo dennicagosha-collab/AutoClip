@@ -1164,17 +1164,37 @@ def _slice_audio(video, track, lo, hi, cancel=None):
 
 
 def _fresh_words(model, audio, lo, spk):
-    """Расшифровка короткого куска → сегменты со словами во времени записи (время — по звуку)."""
-    got, _ = model.transcribe(audio, language=CONFIG["language"], word_timestamps=True,
-                              vad_filter=True, beam_size=5, condition_on_previous_text=False)
-    segs = []
-    for sg in got:
-        ws = [{"s": round(lo + w.start, 2), "e": round(lo + w.end, 2), "w": w.word.strip(), "spk": spk}
-              for w in (sg.words or []) if w.word.strip()]
-        if ws:
-            segs.append({"s": ws[0]["s"], "e": ws[-1]["e"], "text": sg.text.strip(), "words": ws, "spk": spk})
+    """Расшифровка короткого куска → сегменты со словами во времени записи (время — по звуку).
+    Кусок слушается дважды — с VAD и без: каждый способ иногда теряет своё «блядь». Основа —
+    способ, где мата больше; мат, который услышал только другой, добавляется к ней."""
     regions = [(lo + a, lo + b) for a, b in speech_regions(audio)]
-    return _refine_segments(segs, None, regions) if segs else []
+    variants = []
+    for vad in (True, False):
+        got, _ = model.transcribe(audio, language=CONFIG["language"], word_timestamps=True,
+                                  vad_filter=vad, beam_size=5, condition_on_previous_text=False)
+        segs = []
+        for sg in got:
+            ws = [{"s": round(lo + w.start, 2), "e": round(lo + w.end, 2), "w": w.word.strip(), "spk": spk}
+                  for w in (sg.words or []) if w.word.strip()]
+            if ws:
+                segs.append({"s": ws[0]["s"], "e": ws[-1]["e"], "text": sg.text.strip(), "words": ws, "spk": spk})
+        variants.append(_refine_segments(segs, None, regions) if segs else [])
+    return _union_mat(*variants)
+
+
+def _union_mat(a, b):
+    """Две расшифровки одного куска → основа, где мата больше, плюс мат, который есть только в другой."""
+    def mats(segs):
+        return [w for sg in segs for w in sg["words"] if is_profane(w["w"])]
+    if len(mats(b)) > len(mats(a)):
+        a, b = b, a
+    have = [(w["s"] + w["e"]) / 2 for w in mats(a)]
+    extra = [w for w in mats(b) if not any(abs((w["s"] + w["e"]) / 2 - t) < 0.6 for t in have)]
+    out = list(a)
+    for w in extra:
+        out.append({"s": w["s"], "e": w["e"], "text": w["w"], "words": [w], "spk": w.get("spk", "me"),
+                    "mat_only": True})
+    return sorted(out, key=lambda sg: sg["s"])
 
 
 def mat_recheck(video, segments, cache, ranges, cancel=None, on_frac=None):
@@ -1560,6 +1580,7 @@ _HARD = [
     re.compile(r"пизд"),
     re.compile(r"^" + _PFX + r"еб"),             # ебать, заебал, долбоеб, съебал (но не «себе»)
     re.compile(r"^(?:вы|рас|раз)?бля"),          # бля, блять, выблядок (но не «оскорблять»)
+    re.compile(r"^епт"),                         # ёпт, ёпта, ёпты, ёптыть (ё → е в clean_word)
 ]
 _HARD_EXCEPT = re.compile(r"страху|психу|^хуа|хунт")
 _SOFT = [
@@ -2832,6 +2853,7 @@ _MASKS = [
     re.compile(r"^г(?P<x>[ао])ндон"),                 # гондон → г*ндон
     re.compile(r"шл(?P<x>ю)х"),                       # шлюха → шл*ха
     re.compile(r"^м(?P<x>а)нд"),                      # манда → м*нда
+    re.compile(r"^е(?P<x>п)т"),                       # ёпта → ё*та
 ]
 
 
