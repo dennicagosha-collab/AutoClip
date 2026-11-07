@@ -258,6 +258,13 @@ WEAK = 0.5        # кандидат: «Собрать» / «Удалить» �
 OK_LIKE = 0.5     # «Норм» — между «Выложу» и «Не то» (5.3)
 
 
+def taste_bad(k=3):
+    """Что Гоша выкинул («Не то») — самые свежие тексты: модели-судье для низких оценок."""
+    items = [r for r in load()["items"].values() if r.get("rating") == "bad" and r.get("text")]
+    items.sort(key=lambda r: r.get("date") or "", reverse=True)
+    return [r["text"][:300] for r in items[:k]]
+
+
 def taste(k=TASTE_MAX):
     """Образцы вкуса для модели: клипы «Выложу» и с лучшими просмотрами — (тексты, всего оценок)."""
     items = load()["items"].values()

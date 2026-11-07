@@ -61,7 +61,7 @@ DEFAULTS = {
     "sub_pos": autoclip.sub_position_name(autoclip.CONFIG["sub_y"]), "safe_zone": True,
     "nick_corner": autoclip.CONFIG["nick_corner"], "nick_size": "Средний",
     "nick_opacity": autoclip.CONFIG["nick_opacity"],
-    "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"],
+    "preset": autoclip.CONFIG["preset"], "llm": "auto", "ollama_model": autoclip.CONFIG["ollama_model"], "anthropic_key": "",
     "nick_text": "", "hashtags": "", "obs_dir": "", "recent": [],
     "platform_tags": dict(autoclip.CONFIG["platform_tags"]),
     "watch": False, "min_minutes": 5, "watch_since": 0.0, "tray_hint_shown": False,
@@ -2318,6 +2318,7 @@ class CutPage(QWidget):
         c["preset"] = s["preset"]
         c["llm"] = s["llm"]
         c["ollama_model"] = s["ollama_model"] or DEFAULTS["ollama_model"]
+        c["anthropic_key"] = s.get("anthropic_key", "")
         c["whisper_device"] = "cpu" if s.get("whisper_device") == "cpu" else "auto"
         if s.get("whisper_model") in ("large-v3", "medium", "small"):
             c["whisper_model"] = s["whisper_model"]
@@ -3910,15 +3911,19 @@ class ClipsPage(QWidget):
         fc = None
         if feats:
             fc = c.get("forecast") or forecast.predict(feats, c.get("score", 0),
-                                                       forecast.load_model())
+                                                       forecast.load_model(),
+                                                       (c.get("judge") or {}).get("value"))
             lines.append(f"Прогноз: <b>{fc['value']:.1f} из 10</b> "
                          f"<span style='color:{MUTED}'>· {fc['note']}</span>")
             notes = forecast.retention_notes(c, feats)
             lines.append("&nbsp;&nbsp;".join(
                 f"<span style='color:{NOTE_MARK[ok][1]}'>{NOTE_MARK[ok][0]} {t}</span>"
                 for ok, t in notes))
+        if c.get("judge"):
+            import judge
+            lines.append(f"Модель: {judge.judge_line(c['judge'])}")
         lines += [f"<span style='color:{MUTED}'>Оценка моментов {c['score']:.1f}"
-                  + (f" — {parts}" if parts else "") + "</span>",
+                  + (f" — {parts}" if parts and not c.get("judge") else "") + "</span>",
                   f"Запикано: {c['bleeps'] if c['bleeps'] is not None else '-'}; "
                   + autoclip.clip_zooms(c, autoclip.clip_config(self.proj, c))[1]]
         if c.get("marks"):
@@ -6129,8 +6134,9 @@ class SettingsPage(QWidget):
         self.refresh_presets()
 
         # --- языковая модель ---
-        box, v = card("Языковая модель", "Авто: Ollama, если запущена; иначе Claude API, если "
-                                         "задан ключ ANTHROPIC_API_KEY; иначе только по звуку и речи.")
+        box, v = card("Языковая модель", "Модель оценивает каждое место как ролик: цепляет ли начало, "
+                                         "есть ли развязка, понятно ли без стрима. Авто: Claude API, если "
+                                         "вставлен ключ; иначе Ollama, если запущена; иначе только по звуку.")
         self.llm = QComboBox()
         self.llm.addItems(list(LLM_MODES))
         cur = next((k for k, val in LLM_MODES.items() if val == self.s["llm"]), "Авто")
@@ -6141,6 +6147,14 @@ class SettingsPage(QWidget):
         self.ollama.setMinimumWidth(220)
         self.ollama.textChanged.connect(lambda t: self._set("ollama_model", t.strip()))
         v.addWidget(option_row("Модель Ollama", self.ollama))
+        self.api_key = QLineEdit("")
+        self.api_key.setEchoMode(QLineEdit.Password)
+        self.api_key.setMinimumWidth(220)
+        self.api_key.setPlaceholderText("ключ есть" if self.s.get("anthropic_key") else "sk-ant-…")
+        self.api_key.setToolTip("Ключ с console.anthropic.com → API Keys. Хранится зашифрованным, "
+                                "только на этом компьютере")
+        self.api_key.editingFinished.connect(self._save_api_key)
+        v.addWidget(option_row("Ключ Claude API", self.api_key))
         row = QHBoxLayout()
         b = QPushButton("Проверить")
         b.clicked.connect(self.check_llm)
@@ -6857,6 +6871,18 @@ class SettingsPage(QWidget):
         autoclip.prepare_sounds()
         open_path(autoclip.SOUNDS_DIR)
 
+    def _save_api_key(self):
+        """Ключ Claude API → настройки, зашифрованным (DPAPI). Пустое поле ключ не стирает."""
+        text = self.api_key.text().strip()
+        if not text:
+            return
+        import secret
+        self._set("anthropic_key", secret.protect(text))
+        autoclip.CONFIG["anthropic_key"] = self.s["anthropic_key"]
+        self.api_key.clear()
+        self.api_key.setPlaceholderText("ключ есть")
+        self.llm_state.setText("Ключ сохранён")
+
     def check_llm(self):
         autoclip.CONFIG["ollama_model"] = self.s["ollama_model"] or DEFAULTS["ollama_model"]
         if autoclip._ollama_alive():
@@ -6871,7 +6897,8 @@ class SettingsPage(QWidget):
                 ollama = f"Ollama работает, но {want} не скачана — возьму {got}"
         else:
             ollama = "Ollama не запущена"
-        key = "ключ Claude есть" if os.environ.get("ANTHROPIC_API_KEY") else "ключа Claude нет"
+        autoclip.CONFIG["anthropic_key"] = self.s.get("anthropic_key", "")
+        key = "ключ Claude есть" if autoclip.anthropic_key() else "ключа Claude нет"
         mode = autoclip.pick_llm(self.s["llm"])
         names = {"ollama": "Ollama", "anthropic": "Claude API", "none": "без модели"}
         self.llm_state.setText(f"{ollama}, {key}. Сейчас будет: {names.get(mode, mode)}.")

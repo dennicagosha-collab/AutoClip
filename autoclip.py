@@ -75,11 +75,15 @@ CONFIG = {
     "language": "ru",
 
     # --- языковая модель для оценки моментов ---
-    # auto = Ollama, если запущена; иначе Claude API, если задан ANTHROPIC_API_KEY; иначе без неё
+    # auto = Claude API, если есть ключ; иначе Ollama, если запущена; иначе без неё
     "llm": "auto",                  # auto / ollama / anthropic / none
     "ollama_model": "qwen3:14b",
     "ollama_url": "http://localhost:11434",
-    "anthropic_model": "claude-haiku-5-5",
+    "anthropic_model": "claude-haiku-5-5",      # поиск моментов по всей расшифровке — дёшево
+    "anthropic_judge_model": "claude-opus-5-5",  # судья клипов (judge.py) — умнее, клипов немного
+    "anthropic_key": "",            # ключ Claude API из «Настроек» (зашифрован DPAPI); ANTHROPIC_API_KEY главнее
+    "judge_max": 40,                # судья смотрит столько лучших мест по звуку
+    "judge_min": 5.5,               # «Авто»: клипом становится место с оценкой судьи не ниже этой
 
     # --- субтитры ---
     "subs": True,
@@ -1699,6 +1703,8 @@ def remember_setting(key, value):
 def pick_llm(mode):
     """Какую модель звать: ollama / anthropic / none. Для Ollama заодно проверяет, что
     модель из настроек скачана, а если нет — берёт скачанную и говорит об этом."""
+    if mode == "auto" and anthropic_key():
+        return "anthropic"                      # ключ вставлен — Claude: русский юмор понимает лучше
     if mode in ("auto", "ollama"):
         if _ollama_alive():
             model = resolve_ollama_model()
@@ -1713,10 +1719,28 @@ def pick_llm(mode):
             log("   ⚠️  в Ollama нет ни одной модели — скачай: ollama pull qwen3:14b")
         elif mode == "ollama":
             log("   ⚠️  Ollama не запущена — ищу без модели")
-        if mode == "auto" and os.environ.get("ANTHROPIC_API_KEY"):
+        if mode == "auto" and anthropic_key():
             return "anthropic"
         return "none"
+    if mode == "anthropic" and not anthropic_key():
+        log("   ⚠️  ключа Claude API нет («Настройки» → «Языковая модель») — пробую Ollama")
+        return pick_llm("ollama")
     return mode
+
+
+def anthropic_key():
+    """Ключ Claude API: переменная ANTHROPIC_API_KEY или ключ из «Настроек» (на диске зашифрован)."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
+    raw = CONFIG.get("anthropic_key") or ""
+    if not raw:
+        return ""
+    try:
+        import secret
+        return (secret.unprotect(raw) or "").strip()
+    except Exception:
+        return ""
 
 
 _warned = set()
@@ -1844,7 +1868,7 @@ def _ask_llm(prompt, mode, max_tokens=2000, on_tokens=None, cancel=None):
         "model": CONFIG["anthropic_model"],
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
-    }, {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
+    }, {"x-api-key": anthropic_key(),
         "anthropic-version": "2023-06-01"}, timeout=180)
     return "".join(b.get("text", "") for b in r.get("content", []))
 
@@ -1951,7 +1975,8 @@ def score_timeline(loud, segments, moments):
         "модель": 3.0 * llm,
     }
     parts = {name: np.convolve(arr, k, mode="same") for name, arr in parts.items()}
-    smooth = sum(parts.values())
+    # мат — реакция (хук, зум), но в оценку места не идёт: громко материться ≠ смешно (0.1.7)
+    smooth = sum(v for name, v in parts.items() if name != "мат")
     return smooth, loud_z, parts
 
 
@@ -2442,6 +2467,7 @@ def candidate_record(c, num, segments):
             "score": round(c["score"], 2), "score_parts": c.get("parts", {}),
             "title": c["title"], "reason": c.get("reason", ""), "zooms": c["zooms"],
             "marks": c.get("marks", []),
+            **({"judge": c["judge"]} if c.get("judge") else {}),
             "text": " ".join(censor_word(w) for w in text_between(segments, c["s"], c["e"]).split())[:160],
             "created": now_iso()}
 
@@ -4538,6 +4564,7 @@ def make_clip_record(c, num, file):
         **({"bounds_why": c["bounds_why"]} if c.get("bounds_why") else {}),
         **({"zoom_auto": c["zoom_auto"]} if "zoom_auto" in c else {}),
         "marks": c.get("marks", []),           # метки из OBS, по которым найден клип
+        **({"judge": c["judge"], "sound_score": c.get("sound_score")} if c.get("judge") else {}),
         "meta": c.get("meta"),                 # название и хэштеги от языковой модели
         "desc_custom": None,                   # своё описание по площадкам, если поправил
         "hook": c.get("hook") or {"on": False, "auto": False, "start": None, "end": None,
@@ -4715,7 +4742,7 @@ def add_forecast(clip, segments):
         import forecast
         clip["features"] = forecast.clip_features(clip, segments)
         clip["forecast"] = forecast.predict(clip["features"], clip.get("score", 0),
-                                            forecast.load_model())
+                                            forecast.load_model(), (clip.get("judge") or {}).get("value"))
     except Exception as e:                       # прогноз не должен ломать нарезку
         log(f"   ⚠️  прогноз не посчитался: {e}")
 
@@ -6040,10 +6067,29 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                        story=story_fn,
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
+    judged = 0
+    if mode != "none" and found:
+        import judge                              # главный судья — модель (0.1.7)
+        log(f"🧑‍⚖️ Модель оценивает места как ролики ({min(len(found), int(CONFIG.get('judge_max', 40)))} шт.)...")
+        try:
+            import store
+            bad = store.taste_bad(3)
+        except Exception:
+            bad = []
+        judged = judge.judge_clips(found, segments, mode, (examples[:4], bad),
+                                   lambda f, msg: prog("поиск", f * 60, msg), cancel)
+        if judged:
+            thr = float(CONFIG.get("judge_min", 5.5))
+            for c in found:                       # без оценки модели — только в кандидаты
+                if not c.get("judge"):
+                    c["score"] = min(float(c["score"]), thr - 0.1)
+            log(f"   модель оценила {judged}; клипом станет оценка от {thr:g}")
+        else:
+            log("   модель не оценила ни одного места — отбираю по звуку")
     clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
     if CONFIG.get("bleep", True) and clips:              # кандидаты — когда из них сделают клип (add_clip)
         segments = drop_hallucinations(mat_recheck(video, segments, cache, [(c["s"], c["e"]) for c in clips], cancel,
-                                                    lambda f: prog("поиск", f * 50, "перепроверяю мат")))
+                                                    lambda f: prog("поиск", 60 + f * 30, "перепроверяю мат")))
     proj["candidates"] = [candidate_record(c, i, segments) for i, c in enumerate(cands, 1)]
     if CONFIG.get("clips_mode") == "auto":
         log(f"   режим «Авто»: оценка от {thr:g}, не больше {CONFIG['auto_max']}")
@@ -6061,13 +6107,16 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     proj["hook_threshold"] = round(thr, 2)
     for i, c in enumerate(clips, 1):
         check_cancel(cancel)
-        c["hook"] = decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice, peak=c["peak"])
+        import judge
+        c["hook"] = judge.decide_hook(c, segments) or             decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice, peak=c["peak"])
         c["zoom_auto"] = auto_zooms(c["s"], c["e"], reaction, parts, thr)
         h = c["hook"]
         # хук теперь сам кульминация (5.9) — проверка моделью «тизер раскроет развязку» снята:
         # она отклоняла почти каждую кульминацию, а Гоша хочет её в начале
+        if (c.get("judge") or {}).get("title"):
+            c["title"] = c["judge"]["title"]           # название судьи; ниже его может уточнить meta
         if mode != "none":
-            prog("поиск", i / len(clips) * 100, "название и хэштеги")
+            prog("поиск", 90 + i / len(clips) * 10, "название и хэштеги")
             text = text_between(segments, c["s"], c["e"])
             c["meta"] = llm_clip_meta(text, mode) if text.strip() else None
             if c["meta"] and c["meta"]["title"] and not title_fits(c["meta"]["title"], text):

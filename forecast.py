@@ -333,10 +333,14 @@ def model_share(model):
     return round(min(0.7, n / 200), 2)
 
 
-def predict(f, score, model=None):
+def predict(f, score, model=None, judge=None):
     """Итоговая оценка 0–10: смесь правил (эвристика) и модели, если она обучена.
+    judge — оценка языковой модели-судьи 0–10 (judge.py): если есть, она вместо правил.
     {"value", "heur", "model", "share", "note"}."""
-    heur = _sigmoid(float(score) - 2.0)              # оценка по правилам: 2 — средний клип
+    if judge is not None:
+        heur = max(0.0, min(1.0, float(judge) / 10.0))
+    else:
+        heur = _sigmoid(float(score) - 2.0)          # оценка по правилам: 2 — средний клип
     parts = []
     if model and model.get("views"):
         parts.append((0.6, _sigmoid(_apply(model["views"], f))))
@@ -355,6 +359,9 @@ def predict(f, score, model=None):
                 f"с досмотрами {(model or {}).get('n_retention', 0)} из {MIN_RETENTION})")
     else:
         note = f"правила + модель ({int(share * 100)}% от модели)"
+    if judge is not None:
+        note = note.replace("пока по правилам", "пока по оценке модели-судьи").replace(
+            "правила + модель", "судья + твой вкус")
     return {"value": round(10 * value, 1), "heur": round(heur, 3),
             "model": None if learned is None else round(learned, 3), "share": share, "note": note}
 
