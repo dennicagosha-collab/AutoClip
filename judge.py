@@ -19,7 +19,8 @@ NAMES = {"hook": "начало", "payoff": "развязка", "standalone": "п
 BATCH = 4                    # мест в одном запросе (Ollama — контекст 8 тыс. токенов)
 CONTEXT_BEFORE = 12.0        # столько секунд перед клипом — модели для понимания, не в оценку
 TEXT_MAX = 1400              # символов текста клипа в запросе
-HOOK_MAX_LEN = 3.0           # хук не длиннее этого, сек
+HOOK_MAX_LEN = 7.0           # хук — вся реакция кульминации, но не длиннее этого, сек (0.2.0)
+HOOK_GAP = 0.6               # реакция идёт, пока паузы между словами короче этого
 
 PROMPT = """Ты — редактор коротких вертикальных видео (TikTok, YouTube Shorts, Reels) для русскоязычного игрового стримера.
 Ниже фрагменты его стрима. Оцени каждый как ОТДЕЛЬНОЕ короткое видео для зрителя, который стрим не смотрел и в игру не играл.
@@ -32,7 +33,7 @@ PROMPT = """Ты — редактор коротких вертикальных 
 Мат сам по себе НЕ делает фрагмент смешным и не повышает оценки. Обычные игровые переговоры (куда идти, что купить, кто где) — низкие оценки.
 Ставь честно: большинство фрагментов стрима — средние или слабые, 8–10 — только то, что реально зайдёт.
 
-hook_quote — дословная цитата 2–6 слов из фрагмента (как в тексте), которую поставить в самое начало ролика как тизер: самая цепляющая фраза, которая НЕ раскрывает развязку. Пустая строка, если такой нет или фрагмент и так начинается сильно.
+hook_quote — кульминация фрагмента: дословная цитата 2–8 слов (как в тексте), с которой начинается самая яркая реакция или фраза. Её покажем в самом начале ролика как хук, потом ролик с начала. Пустая строка, если явной кульминации нет или фрагмент и так с неё начинается.
 why — одно короткое предложение по-русски: почему такие оценки (что цепляет или чего не хватает).
 title — название ролика 3–6 слов, без мата.
 
@@ -98,10 +99,10 @@ def _parse(text):
     return [x for x in items if isinstance(x, dict) and "id" in x]
 
 
-def _ask_claude(prompt):
+def _ask_claude(prompt, schema=None):
     """Судья через Claude API: ответ строго по схеме (structured outputs), отказ — пустой ответ."""
     body = {"model": A.CONFIG["anthropic_judge_model"], "max_tokens": 16000,
-            "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
+            "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": schema or SCHEMA}},
             "fallbacks": "default",
             "messages": [{"role": "user", "content": prompt}]}
     headers = {"x-api-key": A.anthropic_key(), "anthropic-version": "2023-06-01",
@@ -112,9 +113,9 @@ def _ask_claude(prompt):
     return "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
 
 
-def ask(prompt, mode, cancel=None):
+def ask(prompt, mode, cancel=None, schema=None):
     if mode == "anthropic":
-        return _ask_claude(prompt)
+        return _ask_claude(prompt, schema)
     return A._ask_llm(prompt, mode, cancel=cancel)
 
 
@@ -152,7 +153,7 @@ def judge_clips(found, segments, mode, examples=((), ()), progress=None, cancel=
             r["value"] = score_of(r)
             r["why"] = str(it.get("why", "")).strip()[:200]
             r["hook_quote"] = str(it.get("hook_quote", "")).strip()[:80]
-            r["title"] = str(it.get("title", "")).strip()[:60]
+            r["title"] = " ".join(A.censor_word(w) for w in str(it.get("title", "")).split())[:60]   # без мата в имени
             r["model"] = mode
             c["judge"] = r
             c["sound_score"] = round(float(c["score"]), 2)
@@ -192,6 +193,10 @@ def hook_from_quote(quote, s, e, segments):
     if best is None:
         return None
     _, i, win = best
+    j = i + len(win)                        # реакция продолжается — хук до паузы, а не 1–3 с
+    while j < len(words) and words[j]["s"] - words[j - 1]["e"] < HOOK_GAP and             words[j].get("spk") == win[-1].get("spk") and words[j]["e"] - win[0]["s"] <= HOOK_MAX_LEN:
+        win = win + [words[j]]
+        j += 1
     while len(win) > 1 and win[-1]["e"] - win[0]["s"] > HOOK_MAX_LEN:
         win = win[:-1]
     prev = words[i - 1] if i else None
@@ -222,6 +227,6 @@ def decide_hook(c, segments):
         rec["why"] = f"клип и так начинается с «{q}»"
         return rec
     rec.update(auto=True, start=span[0], end=span[1],
-               why=f"модель: «{q}» — цепляет и не раскрывает развязку",
+               why=f"модель: кульминация «{q}»",
                text=A.text_between(segments, span[0], span[1]))
     return rec

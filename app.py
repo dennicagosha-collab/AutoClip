@@ -50,7 +50,7 @@ LATER = "Появится в следующих версиях"
 NICK_SIZES = {"Маленький": 32, "Средний": 40, "Крупный": 52}
 
 DEFAULTS = {
-    "clips": 10, "clips_mode": "count", "auto_min_score": autoclip.CONFIG["auto_min_score"],
+    "clips": 10, "clips_mode": "count", "kind": "clips", "ui_font": "", "auto_min_score": autoclip.CONFIG["auto_min_score"],
     "auto_min_score_plain": autoclip.CONFIG["auto_min_score_plain"],
     "auto_max": autoclip.CONFIG["auto_max"], "build_mode": "auto", "game_processes": "",
     "sub_style": "Обычный", "sub_x": None, "sub_y_free": 0.6,
@@ -90,6 +90,7 @@ def tri_combo(value, tip=""):
 
 
 LENGTH_NAMES = {"Короче": "short", "Обычно": "normal", "Длиннее": "long"}
+KINDS = {"Клипы": "clips", "Нарезка": "story"}
 CENSOR = {"Частичная (е*ать)": "partial", "Полная (б****)": "full"}
 
 
@@ -2097,12 +2098,26 @@ class CutPage(QWidget):
             b.clicked.connect(lambda _, k=key: self.set_mode(k))
             cnt.addWidget(b)
             self.mode_btns[key] = b
-        row.addLayout(labeled("Клипов", cnt))
+        self.count_box = QWidget()                       # у «Нарезки» число не задаётся — прячем
+        cb = labeled("Клипов", cnt)
+        cb.setContentsMargins(0, 0, 0, 0)
+        self.count_box.setLayout(cb)
+        row.addWidget(self.count_box)
         self.preset = QComboBox()
         self.preset.setMinimumWidth(200)
         self.preset.setToolTip("Размер, кадры и битрейт клипов. Свой пресет — в «Настройках».")
         self.preset.currentTextChanged.connect(self._preset_changed)
         row.addLayout(labeled("Пресет", self.preset))
+        self.kind = QComboBox()
+        self.kind.setMinimumWidth(150)
+        for name, key in KINDS.items():
+            self.kind.addItem(name, key)
+        self.kind.setCurrentIndex(max(0, self.kind.findData(self.s.get("kind", "clips"))))
+        self.kind.setToolTip("Клипы — отдельные яркие моменты.\nНарезка — сюжетные ролики: модель собирает "
+                             "историю из кусков, которые привели к кульминации, остальное вырезает. "
+                             "Длина — по сюжету. Нужна языковая модель")
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        row.addLayout(labeled("Тип", self.kind))
         row.addStretch(1)
         self.btn = QPushButton("Нарезать")
         self.btn.setObjectName("accent")
@@ -2185,11 +2200,19 @@ class CutPage(QWidget):
         super().resizeEvent(e)
         center_content(self, self._lay)
 
+    def _kind_changed(self, *_):
+        self._set("kind", self.kind.currentData())
+        self.set_mode(self.s.get("clips_mode", "count"))
+
     def set_mode(self, key):
         key = "auto" if key == "auto" else "count"
+        story = self.s.get("kind") == "story"              # у «Нарезки» роликов столько, сколько сюжетов
         for k, b in self.mode_btns.items():
             b.setChecked(k == key)
-        self.count.setEnabled(key == "count")
+            b.setEnabled(not story)
+        self.count.setEnabled(key == "count" and not story)
+        if hasattr(self, "count_box"):
+            self.count_box.setVisible(not story)
         if self.s.get("clips_mode") != key:
             self._set("clips_mode", key)
 
@@ -2285,6 +2308,7 @@ class CutPage(QWidget):
         s = self.s
         c["clips"] = int(s["clips"])
         c["clips_mode"] = "auto" if s.get("clips_mode") == "auto" else "count"
+        c["kind"] = "story" if s.get("kind") == "story" else "clips"
         c["build_mode"] = s.get("build_mode") if s.get("build_mode") in autoclip.BUILD_MODES else "auto"
         c["game_processes"] = s.get("game_processes", "")
         c["auto_min_score"] = float(s.get("auto_min_score", DEFAULTS["auto_min_score"]))
@@ -6277,6 +6301,16 @@ class SettingsPage(QWidget):
         v.addLayout(row)
         lay.addWidget(box)
 
+        box, v = card("Шрифт окна", "Шрифт меню, кнопок и текста AutoClip. Свой шрифт добавляется в "
+                                    "«Субтитры» → «Свой файл шрифта…» и появится здесь. Меняется после перезапуска.")
+        self.ui_font = QComboBox()
+        self.ui_font.setMinimumWidth(220)
+        self.fill_ui_fonts()
+        self.ui_font.currentIndexChanged.connect(
+            lambda _: self._set("ui_font", self.ui_font.currentData() or ""))
+        v.addWidget(option_row("Шрифт", self.ui_font, "Обычный — Inter"))
+        lay.addWidget(box)
+
         # --- OBS ---
         box, v = card("Запуск", "AutoClip стартует вместе с Windows сразу в трей: окно не "
                                 "открывается, работают слежка за OBS, Telegram и проверка обновлений.")
@@ -6631,6 +6665,16 @@ class SettingsPage(QWidget):
         autoclip.delete_style(name)
         self.apply_style("Обычный")
 
+    def fill_ui_fonts(self):
+        cur = self.s.get("ui_font") or ""
+        self.ui_font.blockSignals(True)
+        self.ui_font.clear()
+        self.ui_font.addItem("Обычный", "")
+        for fam in sorted(autoclip.user_fonts()):
+            self.ui_font.addItem(fam, fam)
+        self.ui_font.setCurrentIndex(max(0, self.ui_font.findData(cur)))
+        self.ui_font.blockSignals(False)
+
     def pick_font_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Файл шрифта", "", "Шрифты (*.ttf *.otf)")
         if not path:
@@ -6644,6 +6688,7 @@ class SettingsPage(QWidget):
         QFontDatabase.addApplicationFont(os.path.join(autoclip.FONTS_DIR, os.path.basename(path)))
         self._set("sub_font", fam)
         self.fill_style_widgets()
+        self.fill_ui_fonts()
 
     def subs_moved(self, x, y):
         self.s["sub_x"] = round(x, 4)
@@ -8027,11 +8072,33 @@ def dark_palette(app):
     pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#5c606b"))
     app.setPalette(pal)
     fam = theme.load_fonts()                      # Inter из папки программы (2.3.0)
+    own = ui_font()                               # свой шрифт окна из «Настроек» (0.2.0)
+    if own:
+        fam = own
     if fam:
         f = QFont(fam)
         f.setPixelSize(13)
         app.setFont(f)
-    app.setStyleSheet(STYLE.replace("@ARROW@", arrow_icon()))
+    style = STYLE.replace("@ARROW@", arrow_icon())
+    if own:
+        style = style.replace('"Inter"', f'"{own}", "Inter"')
+    app.setStyleSheet(style)
+
+
+def ui_font():
+    """Шрифт окна, выбранный в «Настройках»: семейство из своих шрифтов (%APPDATA%\AutoClip\шрифты)
+    или None — обычный. Файлы шрифтов — только у пользователя, в программу и на GitHub не попадают."""
+    name = str(load_settings().get("ui_font") or "").strip()
+    if not name:
+        return None
+    from PySide6.QtGui import QFontDatabase
+    fams = set()
+    if os.path.isdir(autoclip.FONTS_DIR):
+        for f in sorted(os.listdir(autoclip.FONTS_DIR)):
+            if f.lower().endswith(autoclip.FONT_EXT):
+                fid = QFontDatabase.addApplicationFont(os.path.join(autoclip.FONTS_DIR, f))
+                fams.update(QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else [])
+    return name if name in fams else None
 
 
 ICON = os.path.join(HERE, "icon", "autoclip.ico")

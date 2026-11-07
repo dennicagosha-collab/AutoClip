@@ -47,6 +47,7 @@ CONFIG = {
     "build_mode": "auto",     # auto / full (несколько клипов сразу) / background (тихо, по одному)
     "parallel_clips": 3,      # сколько клипов собирать одновременно «на полную»
     "game_processes": "",     # свои игры через запятую: при них «Авто» собирает в фоне
+    "kind": "clips",          # тип: clips — клипы; story — «Нарезка», сюжетные ролики (0.2.0)
     "clips_mode": "count",    # count — ровно «clips»; auto — все выше порога, не больше потолка
     "auto_min_score": 2.5,    # порог «Авто» с языковой моделью: на 25-мин записи 11 клипов
     "auto_min_score_plain": 1.7,   # он же без модели (оценки ниже): на той же записи 9 клипов
@@ -4731,7 +4732,8 @@ def make_clip_record(c, num, file):
         "desc_custom": None,                   # своё описание по площадкам, если поправил
         "hook": c.get("hook") or {"on": False, "auto": False, "start": None, "end": None,
                                   "why": "нет данных для хука"},
-        "status": "new", "overrides": {}, "bleeps": None,
+        "status": "new", "overrides": dict(c.get("overrides") or {}), "bleeps": None,
+        **({"kind": c["kind"], "story": c.get("story")} if c.get("kind") else {}),
         "created": now_iso(), "rendered": None,
         "published": {},       # площадка → {"date", "url", "views": [...]}
         "origin": "auto",      # откуда клип: auto, search (поиск), candidate (кандидат)
@@ -4767,6 +4769,8 @@ def clip_tags(c):
         tags.append("метка")
     if c.get("origin") == "search":
         tags.append("из поиска")
+    if c.get("kind") == "story":
+        tags.append("сюжет")
     return tags
 
 
@@ -6289,6 +6293,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
                        limit=int(want) + int(CONFIG.get("max_candidates", 20)))
     thr = CONFIG["auto_min_score"] if mode != "none" else CONFIG.get("auto_min_score_plain", 1.7)
     judged = 0
+    bad = []
     if mode != "none" and found:
         import judge                              # главный судья — модель (0.1.7)
         log(f"🧑‍⚖️ Модель оценивает места как ролики ({min(len(found), int(CONFIG.get('judge_max', 40)))} шт.)...")
@@ -6307,10 +6312,24 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
             log(f"   модель оценила {judged}; клипом станет оценка от {thr:g}")
         else:
             log("   модель не оценила ни одного места — отбираю по звуку")
-    clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
+    stories = CONFIG.get("kind") == "story"
+    if stories and mode == "none":
+        log("⚠️  «Нарезка» (сюжетные ролики) работает только с языковой моделью — режу обычные клипы")
+        stories = False
+    if stories and found:
+        import montage                            # тип «Нарезка» (0.2.0): сюжетные ролики вместо клипов
+        log(f"🎞  Собираю сюжетные ролики из лучших моментов (до {min(len(found), montage.MAX_ANCHORS)})...")
+        clips, rest = montage.build_stories(found, segments, mode, vinfo["dur"], float(CONFIG.get("judge_min", 5.0)),
+                                            (examples[:4], bad), lambda f, msg: prog("поиск", 60 + f * 20, msg),
+                                            cancel)
+        cands = sorted(rest, key=lambda c: -c["score"])[:int(CONFIG.get("max_candidates", 20))]
+        log(f"   сюжетов: {len(clips)}" + ("" if clips else " — истории вокруг моментов не сложились"))
+    else:
+        clips, cands = split_clips(found, dict(CONFIG, auto_min_score=thr))
     if CONFIG.get("bleep", True) and clips:              # кандидаты — когда из них сделают клип (add_clip)
-        segments = drop_hallucinations(mat_recheck(video, segments, cache, [(c["s"], c["e"]) for c in clips], cancel,
-                                                    lambda f: prog("поиск", 60 + f * 30, "перепроверяю мат")))
+        ranges = [r for c in clips for r in keep_pieces(c["s"], c["e"], (c.get("overrides") or {}).get("cuts"))]
+        segments = drop_hallucinations(mat_recheck(video, segments, cache, ranges, cancel,
+                                                    lambda f: prog("поиск", 80 + f * 10, "перепроверяю мат")))
     proj["candidates"] = [candidate_record(c, i, segments) for i, c in enumerate(cands, 1)]
     if CONFIG.get("clips_mode") == "auto":
         log(f"   режим «Авто»: оценка от {thr:g}, не больше {CONFIG['auto_max']}")
@@ -6329,7 +6348,8 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
     for i, c in enumerate(clips, 1):
         check_cancel(cancel)
         import judge
-        c["hook"] = judge.decide_hook(c, segments) or             decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice, peak=c["peak"])
+        if c.get("kind") != "story":                   # у сюжета хук уже выбран — из кульминации
+            c["hook"] = judge.decide_hook(c, segments) or                 decide_hook(c["s"], c["e"], reaction, segments, parts, thr, voice=voice, peak=c["peak"])
         c["zoom_auto"] = auto_zooms(c["s"], c["e"], reaction, parts, thr)
         h = c["hook"]
         # хук теперь сам кульминация (5.9) — проверка моделью «тизер раскроет развязку» снята:
@@ -6338,10 +6358,13 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
             c["title"] = c["judge"]["title"]           # название судьи; ниже его может уточнить meta
         if mode != "none":
             prog("поиск", 90 + i / len(clips) * 10, "название и хэштеги")
-            text = text_between(segments, c["s"], c["e"])
+            text = " ".join(text_between(segments, a_, b_) for a_, b_ in
+                            keep_pieces(c["s"], c["e"], (c.get("overrides") or {}).get("cuts")))
             c["meta"] = llm_clip_meta(text, mode) if text.strip() else None
             if c["meta"] and c["meta"]["title"] and not title_fits(c["meta"]["title"], text):
                 c["meta"]["title"] = moment_title("", segments, c["s"], c["e"], c["peak"])
+            if c.get("kind") == "story" and c["meta"]:
+                c["meta"]["title"] = c["title"]          # у сюжета название — от сюжета
             if c["meta"] and c["meta"]["title"]:
                 c["title"] = c["meta"]["title"]          # и имя файла станет понятным
     if mode == "ollama":
