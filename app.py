@@ -3905,7 +3905,7 @@ class ClipsPage(QWidget):
         else:
             self.player.clear()
         parts = ", ".join(f"{k} {v:+.1f}" for k, v in c.get("score_parts", {}).items()
-                          if abs(v) >= 0.05)
+                          if abs(v) >= 0.05 and k != "мат")          # мат в оценку не идёт (0.1.7)
         lines = []
         feats = c.get("features") or self.features(c)
         fc = None

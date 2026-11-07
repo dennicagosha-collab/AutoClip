@@ -52,10 +52,12 @@ def test_score_parts_sum_to_score():
              "words": [{"s": 149.5, "e": 150.0, "w": "ахахаха"},
                        {"s": 150.2, "e": 150.6, "w": "блять!"}]}]
     smooth, loud_z, parts = autoclip.score_timeline(loud, segs, [])
-    assert np.allclose(smooth, sum(parts.values()))
+    # мат виден в разборе (реакция, признак для прогноза), но в оценку не идёт (0.1.7)
+    assert np.allclose(smooth, sum(v for k, v in parts.items() if k != "мат"))
     assert parts["смех"][150] > 0 and parts["мат"][150] > 0
     clips = autoclip.pick_clips(smooth, loud_z, segs, [], 300.0, parts)
-    assert clips and abs(sum(clips[0]["parts"].values()) - clips[0]["score"]) < 0.05
+    got = sum(v for k, v in clips[0]["parts"].items() if k != "мат")
+    assert clips and abs(got - clips[0]["score"]) < 0.05
 
 
 # ---------- границы клипа: не на полуслове, дать договорить ----------

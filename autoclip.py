@@ -83,7 +83,7 @@ CONFIG = {
     "anthropic_judge_model": "claude-opus-5-5",  # судья клипов (judge.py) — умнее, клипов немного
     "anthropic_key": "",            # ключ Claude API из «Настроек» (зашифрован DPAPI); ANTHROPIC_API_KEY главнее
     "judge_max": 40,                # судья смотрит столько лучших мест по звуку
-    "judge_min": 5.5,               # «Авто»: клипом становится место с оценкой судьи не ниже этой
+    "judge_min": 5.0,               # «Авто»: клипом становится место с оценкой судьи не ниже этой (по оценкам Гоши)
 
     # --- субтитры ---
     "subs": True,
@@ -6079,7 +6079,7 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         judged = judge.judge_clips(found, segments, mode, (examples[:4], bad),
                                    lambda f, msg: prog("поиск", f * 60, msg), cancel)
         if judged:
-            thr = float(CONFIG.get("judge_min", 5.5))
+            thr = float(CONFIG.get("judge_min", 5.0))
             for c in found:                       # без оценки модели — только в кандидаты
                 if not c.get("judge"):
                     c["score"] = min(float(c["score"]), thr - 0.1)
