@@ -3560,7 +3560,7 @@ def _bleep_gain(src, tl, bleep, snd, sdur, cfg):
     Потолок: пик звука не громче пика голоса рядом — никаких «скримеров»."""
     a, b, until = bleep
     rel = float(cfg.get("bleep_rel_db", 0.0))
-    L = max(0.05, min(sdur, until - a))                     # столько звука прозвучит
+    L = bleep_len(a, b, until, sdur)                        # столько звука прозвучит
     t = out_to_rec(a, tl)                                   # где это место в записи
     # громкая часть звука = громкая часть речи рядом (минус BLEEP_BELOW_DB), пик — не выше пика голоса
     v_level, v_peak = sound_levels(src, max(0.0, t - 1.5), (b - a) + 3.0, pct=90)
@@ -3722,6 +3722,135 @@ def bleep_spans(words, total, pad, partial=False):
     return [tuple(x) for x in spans]
 
 
+BLEEP_TAIL = 0.10           # звук на мат — не дольше закрытого места + столько (не наезжает на соседей)
+VOICE_MATCH = (0.85, 1.15)  # голос дорожки входит в общий звук с тем же уровнем — тогда его можно вычесть
+VOICE_RAMP = 0.015          # плавный край вычитания голоса, сек (без щелчка)
+TIGHT_DB = 22.0             # край мата по звуку: тише пика слова на столько — уже не это слово
+TIGHT_MIN = 0.3             # слово короче — время не трогаем
+
+
+def bleep_len(a, b, until, sdur):
+    """Сколько звучит звук на мат: не дольше самого звука, закрытого места + хвост и не дальше
+    следующего слова."""
+    return max(0.05, min(sdur, until - a, b - a + BLEEP_TAIL))
+
+
+def speaker_tracks(video, n=None):
+    """Чья речь на какой дорожке (OBS: 1 — общий звук, 2 — микрофон, 3 — Discord). Одна
+    дорожка — пусто: голоса отдельно не достать."""
+    n = audio_tracks(video) if n is None else n
+    return {"me": 1, "team": 2} if n >= 3 else {}
+
+
+def _pcm(path, track, start, dur, rate=16000, with_mix=False):
+    """Кусок дорожки моно (with_mix — ещё и общий звук рядом, отсчёт в отсчёт): numpy-массивы."""
+    import numpy as np
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{dur:.3f}", "-i", path, "-vn"]
+    one = f"aformat=sample_fmts=flt:sample_rates={rate}:channel_layouts=mono"
+    if with_mix:
+        cmd += ["-filter_complex", f"[0:a:0]{one}[m];[0:a:{track}]{one}[v];[m][v]amerge=inputs=2[o]",
+                "-map", "[o]"]
+    else:
+        cmd += ["-map", f"0:a:{track}", "-ac", "1", "-ar", str(rate)]
+    p = run(cmd + ["-f", "f32le", "-"], binary=True)
+    x = np.frombuffer(p.stdout or b"", dtype=np.float32)
+    if with_mix:
+        x = x[:len(x) // 2 * 2].reshape(-1, 2)
+        return x[:, 0], x[:, 1]
+    return x
+
+
+_voice_cache = {}
+
+
+def voice_in_mix(video, track, start, dur):
+    """Голос этой дорожки лежит в общем звуке с тем же уровнем? (Так в OBS, когда микрофон и
+    Discord идут и в дорожку 1, и в свою.) Тогда мат убирается вычитанием голоса: игра и второй
+    человек остаются слышны. Не так (поменяли OBS) — False, мат глушится по-старому."""
+    import numpy as np
+    key = (os.path.abspath(video), track, round(start, 1), round(dur, 1))
+    if key not in _voice_cache:
+        ok = False
+        try:
+            mix, v = _pcm(video, track, start, dur, with_mix=True)
+            den = float(np.dot(v, v))
+            if len(v) >= 1600 and den > len(v) * 1e-6:      # голос вообще есть
+                ok = VOICE_MATCH[0] <= float(np.dot(mix, v)) / den <= VOICE_MATCH[1]
+        except Exception:
+            ok = False
+        _voice_cache[key] = ok
+    return _voice_cache[key]
+
+
+def tighten_mat(video, words, tracks):
+    """Whisper часто ставит мату время шире самого слова (захватывает паузу рядом). Сужаем до того,
+    где на чистой дорожке этого человека реально звучит голос, — писк не наезжает на соседние
+    слова. Только сужаем, никогда не расширяем; без отдельной дорожки (одна дорожка) не трогаем:
+    там громкая игра сбила бы границы."""
+    import numpy as np
+    n = 160                                                  # 10 мс при 16 кГц
+    for w in words:
+        tr = tracks.get(w.get("spk"))                        # место писка, отмеченное руками, — без spk
+        if not tr or not is_mat_word(w) or w.get("bleep_ab") or w.get("added") or "src" not in w:
+            continue
+        s0, d = w["s"], w["e"] - w["s"]
+        if d < TIGHT_MIN:
+            continue
+        try:
+            x = _pcm(video, tr, w["src"], d)
+        except Exception:
+            continue
+        if len(x) < n * 3:
+            continue
+        fr = x[:len(x) // n * n].reshape(-1, n)
+        rms = 20 * np.log10(np.sqrt((fr ** 2).mean(1)) + 1e-9)
+        on = np.nonzero(rms > max(float(rms.max()) - TIGHT_DB, -60.0))[0]
+        if not len(on):
+            continue
+        a = max(0.0, float(on[0]) * 0.01 - 0.03)
+        b = min(d, float(on[-1] + 1) * 0.01 + 0.03)
+        if b - a < 0.12 or (a < 0.02 and b > d - 0.02):
+            continue
+        w["s"], w["e"] = round(s0 + a, 3), round(s0 + b, 3)
+        w["src"] = round(w["src"] + a, 3)
+    return words
+
+
+def span_tracks(words, bleeps, usable):
+    """Для каждого места мата — дорожки, голос с которых вычесть (кто матерился). Пусто —
+    глушить общий звук целиком (голос не на своей дорожке или говорили сразу двое без дорожки)."""
+    out = []
+    for a, b, _ in bleeps:
+        spk = {None if w.get("added") else w.get("spk")       # добавлено руками — чьё, не знаем
+               for w in words if is_mat_word(w) and w["s"] < b and w["e"] > a}
+        tr = [usable.get(x) for x in spk]
+        out.append(sorted(set(tr)) if spk and all(tr) else [])
+    return out
+
+
+VOICE_HEARD_DB = -45.0      # на дорожке в месте мата громче этого — голос правда там
+
+
+def voice_heard(video, track, rec_a, rec_b):
+    """На дорожке этого человека в этом месте записи правда звучит голос? Whisper иногда пишет
+    мат не тому (а звучал он в игре) — тогда вычитать нечего, место глушится целиком."""
+    import numpy as np
+    try:
+        x = _pcm(video, track, rec_a, max(0.05, rec_b - rec_a))
+    except Exception:
+        return False
+    n = 800
+    if len(x) < n:
+        return False
+    fr = x[:len(x) // n * n].reshape(-1, n)
+    return float(20 * np.log10(np.sqrt((fr ** 2).mean(1)).max() + 1e-9)) > VOICE_HEARD_DB
+
+
+def _gate(spans, r=VOICE_RAMP):
+    """Выражение ffmpeg: 1 внутри мест, 0 вне, плавный край r."""
+    return "+".join(f"clip(min(t-{a - r:.3f},{b + r:.3f}-t)/{r},0,1)" for a, b in spans)
+
+
 def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None,
                 on_frac=None):
     """clip: {'s', 'e', 'zooms', 'hook': (начало, конец) или None} во времени записи.
@@ -3772,10 +3901,27 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     if hook:
         zooms = [0.12] + zooms                      # хук — сразу крупно
 
+    # --- мат: где закрыть и чей голос вычесть (0.1.9) ---
+    src = os.path.abspath(video)
+    if cfg["bleep"]:
+        tracks = speaker_tracks(src) if any(is_mat_word(w) for w in words) else {}
+        tighten_mat(src, words, tracks)
+        bleeps = bleep_spans(words, total, cfg["bleep_pad"], cfg.get("censor") == "partial")
+        usable = {spk: k for spk, k in tracks.items()
+                  if bleeps and any(is_mat_word(w) and w.get("spk", "me") == spk for w in words)
+                  and voice_in_mix(src, k, s, dur)}
+        btracks = span_tracks(words, bleeps, usable)
+        for i, ((a, b, _), t) in enumerate(zip(bleeps, btracks)):
+            ra = out_to_rec(a, tl)
+            if t and (ra is None or not all(voice_heard(src, k, ra, ra + (b - a)) for k in t)):
+                btracks[i] = []                         # голоса на дорожке нет — глушим всё
+    else:
+        bleeps, btracks = [], []
+    vk = sorted({k for t in btracks for k in t})        # дорожки голосов, которые нужны для вычитания
+
     # --- склейка хука и кусков клипа ---
     pre = ",".join(frame_filters(vinfo, preset))
     fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
-    src = os.path.abspath(video)
     if len(tl) > 1:
         inputs, graph, cat = [], "", ""
         fade = 0.03                                 # без щелчка на склейке
@@ -3788,15 +3934,19 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
             if i:
                 af.append(f"afade=t=in:d={fade}")
             graph += (f"[{i}:v]{pre},setpts=PTS-STARTPTS[v{i}];"
-                      f"[{i}:a]{','.join(af)},asetpts=PTS-STARTPTS[a{i}];")
-            cat += f"[v{i}][a{i}]"
-        graph += f"{cat}concat=n={len(tl)}:v=1:a=1[vc][ac];"
+                      f"[{i}:a:0]{','.join(af)},asetpts=PTS-STARTPTS[a{i}];")
+            graph += "".join(f"[{i}:a:{k}]{','.join(af)},asetpts=PTS-STARTPTS[a{i}t{k}];" for k in vk)
+            cat += f"[v{i}][a{i}]" + "".join(f"[a{i}t{k}]" for k in vk)
+        graph += (f"{cat}concat=n={len(tl)}:v=1:a={1 + len(vk)}[vc][ac]"
+                  + "".join(f"[tv{k}]" for k in vk) + ";")
         vin, ain, snd_in = "[vc]", "[ac]", len(tl)
+        vlab = {k: f"[tv{k}]" for k in vk}
         vf = []
     else:
         inputs = ["-ss", f"{s:.3f}", "-t", f"{dur:.3f}", "-i", src]
         graph = ""
-        vin, ain, snd_in = "[0:v]", "[0:a]", 1
+        vin, ain, snd_in = "[0:v]", "[0:a:0]", 1
+        vlab = {k: f"[0:a:{k}]" for k in vk}
         vf = [pre]
 
     # --- видео ---
@@ -3823,7 +3973,6 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     graph += vin + ",".join(vf) + "[vout]"
 
     # --- звук и бип ---
-    bleeps = bleep_spans(words, total, cfg["bleep_pad"], cfg.get("censor") == "partial") if cfg["bleep"] else []
     # звуки «Случайного» фиксированы у клипа: от его пика (не меняется при сдвиге границ)
     seed = cfg.get("bleep_seed") if cfg.get("bleep_seed") is not None else int(clip.get("peak", s) * 1000)
     names = bleep_sequence(cfg, len(bleeps), seed)
@@ -3831,8 +3980,21 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     paths = [sound_path(x) for x in names]
     extra_in, n_snd = [], 0
     if bleeps:
-        E = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in bleeps)
-        agraph = f"{ain}{fmt},volume=0:enable='{E}'[am]"
+        # мат с микрофона — вычитаем микрофон, из Discord — Discord: игра и второй остаются.
+        # Голос не на своей дорожке — глушим общий звук, как раньше
+        mute = [(a, b) for (a, b, _), t in zip(bleeps, btracks) if not t]
+        agraph = f"{ain}{fmt}" + (",volume=0:enable='" + "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in mute) + "'"
+                                     if mute else "")
+        if vk:
+            agraph += "[mx]"
+            for k in vk:
+                g = _gate([(a, b) for (a, b, _), t in zip(bleeps, btracks) if k in t])
+                agraph += f";{vlab[k]}{fmt},aeval=exprs='-val(0)*({g})|-val(1)*({g})'[nv{k}]"
+            agraph += ";[mx]" + "".join(f"[nv{k}]" for k in vk) + \
+                      f"amix=inputs={1 + len(vk)}:duration=first:normalize=0[am]"
+        else:
+            agraph += "[am]"
+        clip["bleep_voice"] = sum(1 for t in btracks if t)
         used = [i for i, x in enumerate(paths) if x]          # «тишина» — только заглушить
         if used:
             files = sorted({paths[i] for i in used})
@@ -3848,8 +4010,8 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
                 if i not in used:
                     continue
                 sdur = sdurs[paths[i]]
-                # звук не дольше, чем до следующего слова без мата
-                L = max(0.05, min(sdur, until - a))
+                # звук не дольше закрытого места (+ хвост) и не дальше следующего слова
+                L = bleep_len(a, b, until, sdur)
                 fd = min(0.06, L / 3)
                 ms = int(a * 1000)
                 agraph += (f";[s{i}]atrim=0:{L:.3f},volume={gains[i]:.2f}dB,"
