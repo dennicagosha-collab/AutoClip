@@ -368,9 +368,62 @@ def test_context_menu(win, cut, monkeypatch):
     assert not acts["Отправить в Telegram"].isEnabled()                # бот не подключён
     acts["Показать в папке"].trigger()
     assert shown == [os.path.join(cut, c["file"])]                     # именно этот файл
+    from PySide6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Понятное имя", True))
     acts["Переименовать"].trigger()
-    assert page.ed_stack.currentIndex() == 1
+    c = page.current_clip()
+    assert c["title"] == "Понятное имя" and "Понятное_имя" in c["file"]
+    assert os.path.isfile(os.path.join(cut, c["file"]))                 # сразу, без пересборки
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     n = page.list.count()
     acts["Удалить (без оценки)"].trigger()
     assert page.list.count() == n - 1
+
+
+def test_rename_without_rebuild(cut, fake_trash, monkeypatch, tmp_path):
+    """0.1.8: переименование — сразу: файл и обложка переезжают, видео не пересобирается, ничего в корзину."""
+    import forecast
+    hist_path = str(tmp_path / "история.json")
+    monkeypatch.setattr(forecast, "HISTORY_PATH", hist_path)
+    proj = autoclip.load_project(cut)
+    c = proj["clips"][0]
+    c["desc_custom"] = {"tiktok": autoclip.clip_title(c) + " #смешно"}
+    autoclip.save_project(proj)
+    forecast._write_json(hist_path, [{"project": proj["_path"], "id": c["id"], "title": "старое"}])
+    cover = autoclip.cover_path_for(cut, c["file"])
+    open(cover, "wb").close()
+    before = os.path.getmtime(os.path.join(cut, c["file"]))
+    got = autoclip.rename_clip(cut, c["id"], "  Сосед   спалил  ")
+    assert got["title"] == "Сосед спалил" and got["file"] == f"{c['num']:02d}_Сосед_спалил.mp4"
+    assert os.path.getmtime(os.path.join(cut, got["file"])) == before          # тот же файл, не пересобран
+    assert not os.path.exists(os.path.join(cut, c["file"])) and not os.listdir(fake_trash)
+    assert os.path.isfile(autoclip.cover_path_for(cut, got["file"])) and not os.path.exists(cover)
+    again = autoclip.find_clip(autoclip.load_project(cut), c["id"])
+    assert again["title"] == "Сосед спалил" and autoclip.clip_title(again) == "Сосед спалил"
+    assert again["desc_custom"]["tiktok"] == "Сосед спалил #смешно"
+    assert forecast.load_history()[0]["title"] == "Сосед спалил"
+    rb = autoclip.rebuild_clip(cut, c["id"])                                     # пересборка имя помнит
+    assert rb["file"] == got["file"] and rb["title"] == "Сосед спалил"
+    with pytest.raises(autoclip.AutoClipError):
+        autoclip.rename_clip(cut, c["id"], "   ")
+
+
+def test_title_field_saves_on_enter(win, cut):
+    page = win.clips
+    page.load(cut)
+    c = page.current_clip()
+    page.e_start.setText(autoclip.fmt_time(c["start"] + 1))              # другая правка — ждёт «Пересобрать»
+    page._changed()
+    page.e_title.setText("Сразу новое")
+    page.e_title.textEdited.emit("Сразу новое")
+    page.e_title.editingFinished.emit()
+    c2 = autoclip.find_clip(autoclip.load_project(cut), c["id"])
+    assert c2["title"] == "Сразу новое" and os.path.isfile(os.path.join(cut, c2["file"]))
+    assert page.current_clip()["title"] == "Сразу новое"
+    assert set(page.pending()) == {"start"}                              # правка начала не потерялась
+    assert "Сразу новое" in page.list.currentItem().data(A_CARD())["title"]
+
+
+def A_CARD():
+    import app
+    return app.CARD

@@ -3117,6 +3117,8 @@ class ClipsPage(QWidget):
         self.e_title = QLineEdit()
         self.e_title.setPlaceholderText("Название клипа")
         self.e_title.textEdited.connect(self._title_edited)
+        self.e_title.editingFinished.connect(self.apply_title)
+        self.e_title.setToolTip("Enter — сохранить название (и имя файла) сразу, без пересборки")
         row.addWidget(self.e_title, 1)
         self.btn_rebuild = QPushButton("Пересобрать")
         self.btn_rebuild.setObjectName("primary")
@@ -3837,6 +3839,7 @@ class ClipsPage(QWidget):
         if row == self._row:
             return
         self.save_desc()
+        self.apply_title()                                  # название — сразу, не ждёт «Пересобрать»
         ans = self.ask_edits() if self._row >= 0 else "discard"
         if ans != "discard":
             self.list.blockSignals(True)
@@ -4108,9 +4111,71 @@ class ClipsPage(QWidget):
         return menu
 
     def rename_clip(self):
-        self.show_tab(1)                                    # «Текст» — там название
-        self.t_title.setFocus()
-        self.t_title.selectAll()
+        from PySide6.QtWidgets import QInputDialog
+        c = self.current_clip()
+        if not c:
+            return
+        text, ok = QInputDialog.getText(self, "AutoClip", "Название клипа:", text=c["title"])
+        if ok and text.strip():
+            self._title_for = c["id"]
+            self.t_title.setText(text)
+            self.e_title.setText(text)
+            self.apply_title()
+
+    def _title_typed(self, text):
+        c = self.current_clip()
+        self._title_for = c["id"] if c else None
+        self.e_title.setText(text)
+        self._changed()
+
+    def apply_title(self):
+        """Новое название — сразу в файл, обложку, описание и оценки, без пересборки клипа."""
+        cid = getattr(self, "_title_for", None)
+        self._title_for = None
+        if not cid or not self.proj or self.busy:
+            return
+        c = next((x for x in self.proj["clips"] if x["id"] == cid), None)
+        new = " ".join(self.t_title.text().split())
+        if not c or not new or new == c["title"]:
+            return
+        cur = self.current_clip()
+        playing = cur is not None and cur["id"] == cid
+        if playing:
+            self._free_files()
+        else:
+            self.cards.stop_preview()
+        try:
+            got = autoclip.rename_clip(self.proj["_path"], cid, new)
+        except autoclip.AutoClipError as e:
+            QMessageBox.warning(self, "AutoClip", str(e))
+            got = None
+        if got:
+            old_title = c["title"]
+            c.update(title=got["title"], file=got["file"], meta=got.get("meta"), cover=got.get("cover"),
+                     overrides=got.get("overrides", c.get("overrides")))
+            for i in range(self.list.count()):
+                it = self.list.item(i)
+                if it.data(Qt.UserRole) != cid:
+                    continue
+                it.setText(it.text().replace(old_title, c["title"], 1))
+                d = dict(it.data(CARD) or {})
+                d["title"] = c["title"]
+                if d.get("cover"):
+                    d["cover"] = autoclip.cover_path_for(autoclip.cut_root(self.proj), c["file"])
+                it.setData(CARD, d)
+                it.setData(CLIP_PATH, self.clip_path(c))
+            if self.base and playing:
+                self.base["title"] = c["title"]
+        if playing:
+            self.t_title.setText(c["title"])
+            self.e_title.setText(c["title"])
+            path = self.clip_path(c)
+            if os.path.isfile(path):
+                self.player.open(path)
+            self._changed()
+            self.refresh_desc()
+            if got:
+                self.state.setText("Название сохранено ✓")
 
     def remove_clip(self):
         c = self.current_clip()
@@ -4159,8 +4224,10 @@ class ClipsPage(QWidget):
         row = QHBoxLayout()
         row.addWidget(QLabel("Название"))
         self.t_title = QLineEdit()
-        self.t_title.setPlaceholderText("Название клипа — оно же в имени файла после «Пересобрать»")
-        self.t_title.textEdited.connect(self._changed)
+        self.t_title.setPlaceholderText("Название клипа — оно же в имени файла")
+        self.t_title.textEdited.connect(self._title_typed)
+        self.t_title.editingFinished.connect(self.apply_title)
+        self.t_title.setToolTip("Enter — сохранить название (и имя файла) сразу, без пересборки")
         row.addWidget(self.t_title, 1)
         tl.addLayout(row)
         tl.addWidget(hint("Двойной клик по слову — исправить. Галочка «мат» — закрыть звуком; "
@@ -5009,6 +5076,8 @@ class ClipsPage(QWidget):
         self.tl_refresh()
 
     def _title_edited(self, text):
+        c = self.current_clip()
+        self._title_for = c["id"] if c else None
         self.t_title.setText(text)
         self._changed()
 

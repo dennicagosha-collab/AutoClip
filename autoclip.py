@@ -4664,6 +4664,65 @@ def remove_clip(path, ref):
     return clip
 
 
+def rename_clip(path, ref, title):
+    """Новое название клипа — сразу, без пересборки: имя файла и обложки, описание, общее
+    хранилище оценок, история просмотров. Видео внутри не меняется (название в кадр не вшито)."""
+    title = " ".join(str(title or "").split())[:80]
+    if not title:
+        raise AutoClipError("❌ Название не может быть пустым.")
+    proj = load_project(path)
+    clip = find_clip(proj, ref)
+    old = clip_title(clip)
+    clip["title"] = title
+    if clip.get("meta"):
+        clip["meta"]["title"] = title
+    (clip.get("overrides") or {}).pop("title", None)
+    new = clip_title(clip)
+    for k, text in list((clip.get("desc_custom") or {}).items()):
+        if old and isinstance(text, str) and old in text:      # своё описание — со старым названием внутри
+            clip["desc_custom"][k] = text.replace(old, new)
+    if clip.get("status") != "rejected":
+        root = cut_root(proj)
+        stem = f"{clip['num']:02d}_{safe_name(title)}"
+        want = clip_rel(proj, clip["status"], stem + ".mp4")
+        if os.path.dirname(clip["file"]) and not os.path.dirname(want):
+            want = os.path.join(os.path.dirname(clip["file"]), want).replace("\\", "/")
+        n = 2
+        while want.lower() != clip["file"].lower() and os.path.exists(os.path.join(root, want)):
+            want = os.path.join(os.path.dirname(want), f"{stem}_{n}.mp4").replace("\\", "/")
+            n += 1
+        if want != clip["file"]:
+            src, dst = os.path.join(root, clip["file"]), os.path.join(root, want)
+            try:
+                if os.path.isfile(src):
+                    _before_move(src)
+                    _replace_retry(src, dst)
+                csrc = cover_path_for(root, clip["file"])
+                if os.path.isfile(csrc):
+                    _replace_retry(csrc, cover_path_for(root, want))
+            except PermissionError:
+                raise AutoClipError("❌ Файл клипа открыт в другой программе — закрой его там "
+                                    "и переименуй ещё раз.")
+            clip["file"] = want
+            if clip.get("cover"):
+                clip["cover"]["file"] = os.path.splitext(want)[0] + ".jpg"
+    save_project(proj)
+    write_report(proj)
+    try:
+        import forecast                                  # история просмотров — тоже с новым названием
+        hist = forecast.load_history()
+        hit = False
+        for h in hist:
+            if h.get("project") == proj["_path"] and h.get("id") == clip["id"]:
+                h["title"] = clip_title(clip)
+                hit = True
+        if hit:
+            forecast._write_json(forecast.HISTORY_PATH, hist)
+    except Exception as e:
+        warn_once(f"   ⚠️  историю просмотров не обновил: {e}")
+    return clip
+
+
 TG_LIMIT_MB = 50          # Telegram Bot API: файл от бота — не больше 50 МБ
 
 
