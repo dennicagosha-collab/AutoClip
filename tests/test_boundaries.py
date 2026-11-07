@@ -19,7 +19,16 @@ def test_shift_only_after_ten_edits():
     ss, se, n = boundaries.default_shift([_item(i) for i in range(10)])
     assert (ss, se, n) == (-2.0, 1.0, 10)
     assert boundaries.default_shift([_item(i, 0.2, 0.1) for i in range(12)])[:2] == (None, None)   # незаметно
-    assert boundaries.default_shift([_item(i, -30, 0) for i in range(12)])[0] == -boundaries.MAX_SHIFT
+    assert boundaries.default_shift([_item(i, -30, 0) for i in range(12)])[0] is None   # другой кусок — не сдвиг
+
+
+def test_reselection_is_not_shift():
+    """Запись 27.10: из клипа 2061–2106 Гоша оставил 2083–2095 — это выбор куска, не «конец на 4 с раньше»."""
+    pick = {"program": [2061.08, 2106.01], "gosha": [2083.7, 2095.9]}
+    assert not boundaries.is_shift(pick)
+    assert boundaries.is_shift({"program": [748.2, 778.1], "gosha": [742.2, 771.1]})
+    items = [dict(pick, project=f"p{i}") for i in range(12)] + [_item(i) for i in range(3)]
+    assert boundaries.default_shift(items)[:2] == (None, None)
 
 
 def test_apply_shift_keeps_words_and_peak():

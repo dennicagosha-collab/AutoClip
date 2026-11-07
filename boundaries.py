@@ -72,12 +72,27 @@ def golden_from_edits(recording, fp=None, tol=1.5):
     return out
 
 
+MIN_OVERLAP = 0.6       # правка — сдвиг, если старый и новый клип совпадают хотя бы на столько
+
+
+def is_shift(x):
+    """Правка — настоящий сдвиг границ, а не выбор другого куска. Из 45-секундного клипа Гоша
+    оставлял 12 с середины — это не «конец раньше на 4 с для всех» (так было до 0.1.7: поправка
+    резала концовки у всех клипов)."""
+    if not (x.get("program") and x.get("gosha")):
+        return False
+    (ps, pe), (gs, ge) = x["program"], x["gosha"]
+    ov = max(0.0, min(pe, ge) - max(ps, gs))
+    return (pe > ps and ge > gs and ov / (pe - ps) >= MIN_OVERLAP and ov / (ge - gs) >= MIN_OVERLAP
+            and abs(gs - ps) <= MAX_SHIFT and abs(ge - pe) <= MAX_SHIFT)
+
+
 def default_shift(items=None):
     """Поправка по правкам Гоши: (сдвиг начала, сдвиг конца, сколько правок). Сдвиги — None, пока
-    правок меньше MIN_EDITS или сдвиг незаметный."""
-    items = load() if items is None else items
-    ds = [x["gosha"][0] - x["program"][0] for x in items if x.get("program") and x.get("gosha")]
-    de = [x["gosha"][1] - x["program"][1] for x in items if x.get("program") and x.get("gosha")]
+    настоящих сдвигов (is_shift) меньше MIN_EDITS или сдвиг незаметный."""
+    items = [x for x in (load() if items is None else items) if is_shift(x)]
+    ds = [x["gosha"][0] - x["program"][0] for x in items]
+    de = [x["gosha"][1] - x["program"][1] for x in items]
     if len(ds) < MIN_EDITS:
         return None, None, len(ds)
 
