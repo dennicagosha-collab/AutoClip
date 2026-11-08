@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -3716,8 +3717,8 @@ def bleep_spans(words, total, pad, partial=False):
             a = max(0.0, wd["s"] + d * x / n - PARTIAL_PAD)
             b = min(total, wd["s"] + d * y / n + PARTIAL_PAD)
             until = b
-        if spans and a <= spans[-1][1]:
-            spans[-1][1:] = [b, until]
+        if spans and a <= spans[-1][1]:                # вместе с предыдущим — не короче его
+            spans[-1][1:] = [max(spans[-1][1], b), max(spans[-1][2], until)]
         else:
             spans.append([a, b, until])
     return [tuple(x) for x in spans]
@@ -3792,7 +3793,8 @@ def tighten_mat(video, words, tracks):
     n = 160                                                  # 10 мс при 16 кГц
     for w in words:
         tr = tracks.get(w.get("spk"))                        # место писка, отмеченное руками, — без spk
-        if not tr or not is_mat_word(w) or w.get("bleep_ab") or w.get("added") or "src" not in w:
+        if not tr or not is_mat_word(w) or w.get("bleep_ab") or w.get("added") or w.get("heard") \
+                or "src" not in w:
             continue
         s0, d = w["s"], w["e"] - w["s"]
         if d < TIGHT_MIN:
@@ -3852,8 +3854,266 @@ def _gate(spans, r=VOICE_RAMP):
     return "+".join(f"clip(min(t-{a - r:.3f},{b + r:.3f}-t)/{r},0,1)" for a, b in spans)
 
 
+WIDEN_MAX = 0.15           # край мата по голосу двигается наружу не дальше этого, сек
+
+
+def _rms_db(x, n=160):
+    """Громкость кусочками по n отсчётов (10 мс при 16 кГц), дБ."""
+    import numpy as np
+    fr = x[:len(x) // n * n].reshape(-1, n)
+    return 20 * np.log10(np.sqrt((fr ** 2).mean(1)) + 1e-9)
+
+
+def _dip(rms):
+    """Где голос стихает: первый кусочек, тихий почти как самый тихий в окне. None — провала нет."""
+    import numpy as np
+    if not len(rms):
+        return None
+    lo = float(rms.min())
+    if lo > float(rms[0]) - 6.0:                             # голос ровный — границы не видно
+        return None
+    return int(np.nonzero(rms <= lo + 3.0)[0][0])
+
+
+def widen_mat(video, words, tracks):
+    """Whisper ставит мату время на 0,1–0,3 с не там: хвост «...ть» остаётся слышен (запись
+    07.11). Если на чистой дорожке этого человека голос на краю мата ещё звучит — край
+    сдвигается наружу до места, где голос стихает (не дальше WIDEN_MAX)."""
+    step = 0.01
+    for w in words:
+        tr = tracks.get(w.get("spk"))
+        if not tr or not is_mat_word(w) or w.get("bleep_ab") or w.get("added") or w.get("heard") \
+                or "src" not in w:
+            continue
+        d = w["e"] - w["s"]
+        lo = max(0.0, w["src"] - WIDEN_MAX)
+        pre = w["src"] - lo
+        try:
+            rms = _rms_db(_pcm(video, tr, lo, pre + d + WIDEN_MAX))
+        except Exception:
+            continue
+        i0, i1 = int(round(pre / step)), int(round((pre + d) / step))
+        if i1 <= i0 or i1 >= len(rms):
+            continue
+        quiet = max(float(rms[i0:i1].max()) - TIGHT_DB, -60.0)
+        da = db = 0.0
+        if rms[i0] > quiet and i0 > 0:                       # начало мата — уже голос
+            k = _dip(rms[i0::-1])
+            if k:
+                da = k * step
+        if rms[i1 - 1] > quiet:                              # конец мата — ещё голос
+            k = _dip(rms[i1 - 1:])
+            if k:
+                db = k * step
+        if da or db:
+            w["s"], w["e"] = round(max(0.0, w["s"] - da), 3), round(w["e"] + db, 3)
+            w["src"] = round(w["src"] - da, 3)
+    return words
+
+
+def add_heard_mats(words, heard, tl):
+    """Мат, который проверка услышала в готовом клипе (clip["mat_heard"]: [начало, конец, чей]
+    во времени записи; чей — «me» / «team» или None — глушить всё), — в слова клипа."""
+    if not heard:
+        return words
+    out = list(words)
+    for item in heard:
+        a, b = float(item[0]), float(item[1])
+        spk = item[2] if len(item) > 2 else None
+        for ra, rb, o, part in tl:
+            x, y = max(a, ra), min(b, rb)
+            if y - x > 0.02:
+                out.append({"s": round(o + x - ra, 3), "e": round(o + y - ra, 3), "w": "", "mat": True,
+                            "part": part, "src": x, "spk": spk, "heard": True})
+    return sorted(out, key=lambda w: w["s"])
+
+
+MAT_VERIFY = True          # готовый клип слушается ещё раз (тесты выключают — там нет Whisper)
+MAT_VERIFY_ROUNDS = 2      # сколько раз пересобрать, если мат всё ещё слышно
+VERIFY_PIECE = 10.0        # готовый клип слушается и кусками по столько секунд
+VERIFY_OVERLAP = 3.0
+VERIFY_TOKENS = 160        # на тишине Whisper может «зациклиться» — больше слов в куске не бывает
+HEARD_FRAME = 0.02         # проверка голоса в готовом клипе — кусочками по столько секунд
+_verify = {"model": None, "failed": False}
+_verify_load = threading.Lock()
+_verify_lock = threading.Lock()        # клипы собираются параллельно — Whisper слушает по одному
+
+
+def _verify_whisper():
+    """Whisper для проверки готовых клипов: один на всю нарезку."""
+    with _verify_load:
+        if _verify["model"] is None and not _verify["failed"]:
+            try:
+                _verify["model"] = _load_whisper()
+            except AutoClipError:
+                _verify["failed"] = True
+                raise
+        if _verify["model"] is None:
+            raise AutoClipError("Whisper не запустился")
+        return _verify["model"]
+
+
+def free_verify_whisper():
+    """После нарезки — отдать видеопамять."""
+    m, _verify["model"], _verify["failed"] = _verify["model"], None, False
+    if m is not None:
+        import health
+        health.free_whisper(m)
+
+
+def _who_heard(src, out, rec_a, tracks):
+    """Чей голос из записи звучит в этом куске готового клипа: [начало, конец, чей] во времени
+    записи (чей — «me» / «team», None — звук игры: глушить всё) или None — уже не слышно."""
+    import numpy as np
+    dur = len(out) / 16000
+    mix = _pcm(src, 0, rec_a, dur)
+    voices = {spk: _pcm(src, k, rec_a, dur) for spk, k in tracks.items()}
+    n = min([len(out), len(mix)] + [len(v) for v in voices.values()])
+    out, mix = out[:n], mix[:n]
+    voices = {k: v[:n] for k, v in voices.items()}
+    rest = mix - sum(voices.values()) if voices else mix
+    f = int(HEARD_FRAME * 16000)
+    for who, v in list(voices.items()) + [(None, rest)]:
+        hits = []
+        for i in range(0, n - f + 1, f):
+            vv, oo = v[i:i + f], out[i:i + f]
+            den = float(np.dot(vv, vv))
+            if den <= 0 or 10 * np.log10(den / f + 1e-12) < VOICE_HEARD_DB:
+                continue
+            if float(np.dot(oo, vv)) / den > 0.5:                # этот голос в клипе не убран
+                hits.append(i)
+        if len(hits) * HEARD_FRAME >= 0.06:
+            a = rec_a + hits[0] / 16000 - 0.03
+            b = rec_a + (hits[-1] + f) / 16000 + 0.03
+            return [round(max(0.0, float(a)), 2), round(float(b), 2), who]
+    return None
+
+
+def _verify_words(model, audio):
+    """Мат, который Whisper слышит в готовом клипе: два прохода (с VAD и без — каждый иногда
+    теряет своё), без отбора по речи (друзья в голосовом чате игры звучат тихо, запись 07.11)
+    и без случайности — одно и то же каждый раз."""
+    out = []
+    rate, n = 16000, len(audio)
+    step = int((VERIFY_PIECE - VERIFY_OVERLAP) * rate)
+    # целиком с VAD + кусками по VERIFY_PIECE без него: на целом клипе Whisper бывает не дослушивает
+    # конец (клип 04 записи 07.11 — мат друга в последних секундах)
+    parts = [(0, n, True)] + [(i, min(n, i + int(VERIFY_PIECE * rate)), False)
+                              for i in range(0, max(1, n - int(VERIFY_OVERLAP * rate)), step)]
+    for i, j, vad in parts:
+        if j - i < rate // 4:
+            continue
+        got, _ = model.transcribe(audio[i:j], language=CONFIG["language"], word_timestamps=True,
+                                  vad_filter=vad, beam_size=5, condition_on_previous_text=False,
+                                  temperature=0.0, max_new_tokens=VERIFY_TOKENS)
+        for sg in got:
+            for w in sg.words or []:
+                a, b = i / rate + float(w.start), i / rate + float(w.end)
+                t = (a + b) / 2
+                if is_profane(w.word.strip()) and not any(abs((x["s"] + x["e"]) / 2 - t) < 0.3 for x in out):
+                    out.append({"s": a, "e": b, "w": w.word.strip()})
+    return out
+
+
+def heard_mats(out_path, src, tl, cancel=None):
+    """Слушает готовый клип: где Whisper слышит мат и в этом месте правда звучит не убранный
+    голос (или игра) — [начало, конец, чей] во времени записи. Писк Whisper за мат не считает:
+    место, где голос уже убран, не трогается."""
+    if not tl or not os.path.isfile(out_path) or not os.path.isfile(src):
+        return []
+    total = timeline_len(tl)
+    audio = _slice_audio(out_path, 0, 0.0, total, cancel)
+    if audio is None or len(audio) < 1600:
+        return []
+    model = _verify_whisper()
+    tracks = speaker_tracks(src)
+    found = []
+    with _verify_lock:
+        for w in _verify_words(model, audio):
+            check_cancel(cancel)
+            x, y = max(0.0, w["s"]), min(total, w["e"])
+            for ra, rb, o, _part in tl:
+                a, b = max(x, o), min(y, o + rb - ra)
+                if b - a < 0.06:
+                    continue
+                got = _who_heard(src, audio[int(a * 16000):int(b * 16000)], ra + a - o, tracks)
+                if got and not any(g[2] == got[2] and g[0] < got[1] and got[0] < g[1] for g in found):
+                    got = _confirm_mat(model, src, got, tracks)
+                    if got:
+                        found.append(got)
+    return sorted(found, key=lambda g: g[0])
+
+
+CONFIRM_PAD = 1.0          # второе мнение: чистая дорожка слушается с таким запасом вокруг
+
+
+def _confirm_mat(model, src, got, tracks):
+    """Второе мнение: мат, услышанный в готовом клипе, ищется на чистой дорожке того, кто его
+    сказал (или в звуке игры без голосов). Нет его там — Whisper показалось (смех, шум), место
+    не трогаем. Есть — время берётся оттуда и сужается до самого голоса."""
+    import numpy as np
+    a, b, who = got
+    lo = max(0.0, a - CONFIRM_PAD)
+    dur = b - lo + CONFIRM_PAD
+    if who in tracks:
+        x = _pcm(src, tracks[who], lo, dur)
+    else:
+        x = _pcm(src, 0, lo, dur)
+        for k in tracks.values():
+            v = _pcm(src, k, lo, dur)
+            n = min(len(x), len(v))
+            x = x[:n] - v[:n]
+    x = np.ascontiguousarray(x, dtype=np.float32)
+    if len(x) < 1600:
+        return None
+    hit = [w for w in _verify_words(model, x)
+           if lo + w["s"] < b + 0.2 and lo + w["e"] > a - 0.2]
+    if not hit:
+        return None
+    s0 = max(a - 0.2, lo + min(w["s"] for w in hit))
+    e0 = min(b + 0.2, lo + max(w["e"] for w in hit))
+    rms = _rms_db(x[int((s0 - lo) * 16000):int((e0 - lo) * 16000)])
+    if len(rms):
+        on = np.nonzero(rms > max(float(rms.max()) - TIGHT_DB, -60.0))[0]
+        if len(on):
+            s0, e0 = s0 + max(0.0, on[0] * 0.01 - 0.03), s0 + min(len(rms), on[-1] + 1) * 0.01 + 0.03
+    return [round(float(s0), 2), round(float(e0), 2), who]
+
+
 def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None,
                 on_frac=None):
+    """Собрать клип, затем прослушать готовый (0.2.1): мат, который всё ещё слышно (Whisper
+    пропустил слово или дал ему не то время), закрыть и пересобрать. Найденное помнится в
+    clip["mat_heard"] — пересборка закрывает его сразу. → число запиканных мест или None."""
+    cfg = cfg or CONFIG
+    n = _render_pass(video, clip, segments, vinfo, out_path, tmpdir, cfg, cancel, on_frac)
+    if n is None or not cfg.get("bleep") or not MAT_VERIFY:
+        return n
+    for _ in range(MAT_VERIFY_ROUNDS):
+        try:
+            found = heard_mats(out_path, video, clip.get("timeline") or [], cancel)
+        except Cancelled:
+            raise
+        except Exception as e:
+            log(f"   ⚠️  готовый клип на мат не проверил: {e}")
+            break
+        have = [tuple(x[:2]) for x in clip.get("mat_heard") or []]
+        found = [x for x in found if not any(min(x[1], b) - max(x[0], a) > 0.5 * (x[1] - x[0])
+                                             for a, b in have)]
+        if not found:
+            break
+        clip["mat_heard"] = list(clip.get("mat_heard") or []) + [list(x) for x in found]
+        log(f"   🔇 {os.path.basename(out_path)}: в готовом клипе слышно мат ({len(found)}) — "
+            "закрываю и пересобираю")
+        again = _render_pass(video, clip, segments, vinfo, out_path, tmpdir, cfg, cancel)
+        if again is None:
+            break
+        n = again
+    return n
+
+
+def _render_pass(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None,
+                 on_frac=None):
     """clip: {'s', 'e', 'zooms', 'hook': (начало, конец) или None} во времени записи.
     Хук — кусок этого же клипа, ставится в самое начало, затем клип с начала.
     Возвращает число запиканных мест или None. Клип собирается во временной папке
@@ -3893,6 +4153,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     words = mark_manual_bleeps(words, cfg, tl)
     words = apply_word_edits(words, cfg)
     words = apply_bleep_spans(words, cfg)
+    words = add_heard_mats(words, clip.get("mat_heard"), tl)
     zooms = []
     pts, _ = clip_zooms(dict(clip, start=s, end=e, overrides={}), cfg)
     for z in pts:
@@ -3907,6 +4168,7 @@ def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel
     if cfg["bleep"]:
         tracks = speaker_tracks(src) if any(is_mat_word(w) for w in words) else {}
         tighten_mat(src, words, tracks)
+        widen_mat(src, words, tracks)
         bleeps = bleep_spans(words, total, cfg["bleep_pad"], cfg.get("censor") == "partial")
         usable = {spk: k for spk, k in tracks.items()
                   if bleeps and any(is_mat_word(w) and w.get("spk", "me") == spk for w in words)
@@ -5239,10 +5501,15 @@ def add_clip(path, c, origin, progress=None, cancel=None):
         progress("рендер", 0, name)
     job = dict(c, hook=span)
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        rec["bleeps"] = render_clip(src, job, segments, proj["source_info"],
-                                    os.path.join(out_dir, name), tmp, cfg, cancel)
+        try:
+            rec["bleeps"] = render_clip(src, job, segments, proj["source_info"],
+                                        os.path.join(out_dir, name), tmp, cfg, cancel)
+        finally:
+            free_verify_whisper()
     rec["timeline"] = job.get("timeline")
     rec["bleep_seq"] = job.get("bleep_seq")
+    if job.get("mat_heard"):
+        rec["mat_heard"] = job["mat_heard"]
     if rec["bleeps"] is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     rec["rendered"] = now_iso()
@@ -5586,11 +5853,15 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
         progress("рендер", 0, clip["file"])
     t0 = time.time()
     job = {"s": s, "e": e, "zooms": clip["zooms"], "hook": span, "peak": clip.get("peak", s),
-           **({"zoom_auto": clip["zoom_auto"]} if "zoom_auto" in clip else {})}
+           **({"zoom_auto": clip["zoom_auto"]} if "zoom_auto" in clip else {}),
+           **({"mat_heard": clip["mat_heard"]} if clip.get("mat_heard") else {})}
     with tempfile.TemporaryDirectory(prefix="autoclip_r_") as tmp:
-        bl = render_clip(src, job, segments,
-                         proj["source_info"], out, tmp, cfg, cancel,
-                         on_frac=(lambda f: progress("рендер", f * 95, clip["file"])) if progress else None)
+        try:
+            bl = render_clip(src, job, segments,
+                             proj["source_info"], out, tmp, cfg, cancel,
+                             on_frac=(lambda f: progress("рендер", f * 95, clip["file"])) if progress else None)
+        finally:
+            free_verify_whisper()
     if bl is None:
         raise AutoClipError("❌ ffmpeg не смог собрать клип.")
     if (round(s, 2), round(e, 2)) != (round(clip["start"], 2), round(clip["end"], 2)) or             "cuts" in (overrides or {}):
@@ -5601,6 +5872,8 @@ def rebuild_clip(path, ref, start=None, end=None, overrides=None, progress=None,
             log(f"   ⚠️  правку границ не запомнил: {ex}")
     clip.update(start=round(s, 2), end=round(e, 2), bleeps=bl, rendered=now_iso(),
                 quiet_start=quiet_start(out), timeline=job.get("timeline"), bleep_seq=job.get("bleep_seq"))
+    if job.get("mat_heard"):
+        clip["mat_heard"] = job["mat_heard"]
     if clip["file"] != old_file:                       # переименовали: прежний файл и обложку — в корзину
         try:
             trash(os.path.join(folder, old_file))
@@ -6428,20 +6701,23 @@ def _process(video, analyze_only=False, progress=None, cancel=None, workers=1):
         return rec
 
     prog("рендер", 0)
-    if workers <= 1:
-        for num, c in enumerate(clips, 1):
-            build(num, c)
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(build, num, c) for num, c in enumerate(clips, 1)]
-            try:
-                for f in futures:
-                    f.result()                   # ошибка или остановка — сразу наверх
-            except BaseException:
-                for f in futures:
-                    f.cancel()                   # ещё не начатые — не начинать
-                raise                            # начатые сами остановятся по cancel
+    try:
+        if workers <= 1:
+            for num, c in enumerate(clips, 1):
+                build(num, c)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = [ex.submit(build, num, c) for num, c in enumerate(clips, 1)]
+                try:
+                    for f in futures:
+                        f.result()                   # ошибка или остановка — сразу наверх
+                except BaseException:
+                    for f in futures:
+                        f.cancel()                   # ещё не начатые — не начинать
+                    raise                            # начатые сами остановятся по cancel
+    finally:
+        free_verify_whisper()                        # Whisper проверки мата — из видеопамяти
     prog("рендер", 100)
 
     mark("рендер клипов", t)
@@ -6471,6 +6747,8 @@ def render_planned(proj, video, vinfo, segments, reaction, num, c, total, cancel
         rec["bleeps"] = render_clip(video, job, segments, vinfo, os.path.join(out_dir, name), tmp, cfg, cancel,
                                     on_frac=on_frac)
     rec["bleep_seq"] = job.get("bleep_seq")
+    if job.get("mat_heard"):
+        rec["mat_heard"] = job["mat_heard"]
     if rec["bleeps"] is None:
         return None
     rec["rendered"] = now_iso()
