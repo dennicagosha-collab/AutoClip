@@ -30,17 +30,15 @@ def _main_freq(x):
 
 
 def _fake_whisper(monkeypatch, heard, who=ME):
-    """Whisper проверки: в готовом клипе «слышит» мат в heard; на чистой дорожке — только если
-    это дорожка того, кто правда матерился (частота who; None — нигде)."""
+    """Whisper проверки: мат в heard слышит только на дорожке того, кто правда матерился
+    (частота who; None — нигде)."""
     calls = {"n": 0}
 
     def words(model, audio):
         calls["n"] += 1
-        if len(audio) > 16000 * 4:                       # весь клип
-            return [dict(s=heard[0], e=heard[1], w="блять")]
         if who is None or abs(_main_freq(audio) - who) > 50:
             return []
-        return [dict(s=autoclip.CONFIRM_PAD, e=autoclip.CONFIRM_PAD + heard[1] - heard[0], w="блять")]
+        return [dict(s=heard[0], e=heard[1], w="блять")]
     monkeypatch.setattr(autoclip, "MAT_VERIFY", True)
     monkeypatch.setattr(autoclip, "_verify_whisper", lambda: object())
     monkeypatch.setattr(autoclip, "_verify_words", words)
@@ -89,3 +87,42 @@ def test_add_heard_mats_maps_to_hook_and_body():
     w = autoclip.add_heard_mats([], [[10.2, 10.5, "me"]], tl)
     assert [(x["s"], x["e"]) for x in w] == [(0.2, 0.5), (3.2, 3.5)]
     assert all(x["heard"] and x["spk"] == "me" for x in w)
+
+
+class _W:
+    def __init__(self, s, e, w):
+        self.start, self.end, self.word = s, e, w
+
+
+class _Seg:
+    def __init__(self, words):
+        self.words = words
+
+
+def test_verify_words_takes_time_from_middle_of_piece(monkeypatch):
+    """У края куска Whisper ошибается во времени: из двух кусков берётся тот, где слово дальше
+    от края. Два разных мата рядом не склеиваются в один."""
+    monkeypatch.setattr(autoclip, "VERIFY_PIECE", 10.0)
+    monkeypatch.setattr(autoclip, "VERIFY_OVERLAP", 5.0)
+    said = {0: [(8.9, 9.3, "блять")],                        # кусок 0–10: у края, время сбито
+            5: [(9.2, 9.6, "блять"), (10.2, 10.6, "сука")],  # кусок 5–15: в середине
+            10: [(10.2, 10.6, "сука")]}
+    seen = []
+
+    class M:
+        def transcribe(self, audio, **kw):
+            i = [0, 5, 10][len(seen)]
+            seen.append(i)
+            return [_Seg([_W(a - i, b - i, w) for a, b, w in said[i]])], None
+    got = autoclip._verify_words(M(), np.zeros(16000 * 20, dtype=np.float32))
+    assert [(round(w["s"], 2), w["w"]) for w in got] == [(9.2, "блять"), (10.2, "сука")]
+
+
+def test_out_lag_finds_shift(monkeypatch):
+    """Звук готового клипа сдвинут на 3,5 мс — сдвиг находится, и голос узнаётся."""
+    rng = np.random.default_rng(1)
+    src = rng.standard_normal(16000 * 10).astype(np.float32)
+    monkeypatch.setattr(autoclip, "_pcm", lambda path, track, start, dur, **k:
+                        src[int(round(start * 16000)):int(round((start + dur) * 16000))])
+    out = src[56:]                                           # клип на 56 отсчётов «раньше»
+    assert abs(autoclip._out_lag(out, "x", 0.0, 10.0, 0.0) - 56 / 16000) < 1e-4

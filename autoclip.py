@@ -3929,9 +3929,12 @@ def add_heard_mats(words, heard, tl):
 
 
 MAT_VERIFY = True          # готовый клип слушается ещё раз (тесты выключают — там нет Whisper)
-MAT_VERIFY_ROUNDS = 2      # сколько раз пересобрать, если мат всё ещё слышно
+MAT_VERIFY_ROUNDS = 3      # сколько раз пересобрать, если мат всё ещё слышно
 VERIFY_PIECE = 10.0        # готовый клип слушается и кусками по столько секунд
-VERIFY_OVERLAP = 3.0
+VERIFY_OVERLAP = 5.0       # куски внахлёст наполовину: каждое слово где-то не у края
+VERIFY_SAME = 0.5         # то же слово из соседнего куска: время расходится не больше
+VERIFY_PAD = 1.0           # дорожка слушается с запасом вокруг клипа
+FIT_MAX = 0.3              # край мата по голосу двигается наружу не дальше
 VERIFY_TOKENS = 160        # на тишине Whisper может «зациклиться» — больше слов в куске не бывает
 HEARD_FRAME = 0.02         # проверка голоса в готовом клипе — кусочками по столько секунд
 _verify = {"model": None, "failed": False}
@@ -3961,148 +3964,206 @@ def free_verify_whisper():
         health.free_whisper(m)
 
 
-def _who_heard(src, out, rec_a, tracks):
-    """Чей голос из записи звучит в этом куске готового клипа: [начало, конец, чей] во времени
-    записи (чей — «me» / «team», None — звук игры: глушить всё) или None — уже не слышно."""
+def _streams(src, lo, dur, tracks):
+    """Чистые дорожки куска записи: мой микрофон, Discord и «остальное» — общий звук без этих
+    голосов (игра и друзья в голосовом чате игры). {чей: звук}, чей None — остальное."""
     import numpy as np
-    dur = len(out) / 16000
-    mix = _pcm(src, 0, rec_a, dur)
-    voices = {spk: _pcm(src, k, rec_a, dur) for spk, k in tracks.items()}
-    n = min([len(out), len(mix)] + [len(v) for v in voices.values()])
-    out, mix = out[:n], mix[:n]
-    voices = {k: v[:n] for k, v in voices.items()}
-    rest = mix - sum(voices.values()) if voices else mix
-    f = int(HEARD_FRAME * 16000)
-    for who, v in list(voices.items()) + [(None, rest)]:
-        hits = []
-        for i in range(0, n - f + 1, f):
-            vv, oo = v[i:i + f], out[i:i + f]
-            den = float(np.dot(vv, vv))
-            if den <= 0 or 10 * np.log10(den / f + 1e-12) < VOICE_HEARD_DB:
-                continue
-            if float(np.dot(oo, vv)) / den > 0.5:                # этот голос в клипе не убран
-                hits.append(i)
-        if len(hits) * HEARD_FRAME >= 0.06:
-            a = rec_a + hits[0] / 16000 - 0.03
-            b = rec_a + (hits[-1] + f) / 16000 + 0.03
-            return [round(max(0.0, float(a)), 2), round(float(b), 2), who]
-    return None
-
-
-def _verify_words(model, audio):
-    """Мат, который Whisper слышит в готовом клипе: два прохода (с VAD и без — каждый иногда
-    теряет своё), без отбора по речи (друзья в голосовом чате игры звучат тихо, запись 07.11)
-    и без случайности — одно и то же каждый раз."""
-    out = []
-    rate, n = 16000, len(audio)
-    step = int((VERIFY_PIECE - VERIFY_OVERLAP) * rate)
-    # целиком с VAD + кусками по VERIFY_PIECE без него: на целом клипе Whisper бывает не дослушивает
-    # конец (клип 04 записи 07.11 — мат друга в последних секундах)
-    parts = [(0, n, True)] + [(i, min(n, i + int(VERIFY_PIECE * rate)), False)
-                              for i in range(0, max(1, n - int(VERIFY_OVERLAP * rate)), step)]
-    for i, j, vad in parts:
-        if j - i < rate // 4:
-            continue
-        got, _ = model.transcribe(audio[i:j], language=CONFIG["language"], word_timestamps=True,
-                                  vad_filter=vad, beam_size=5, condition_on_previous_text=False,
-                                  temperature=0.0, max_new_tokens=VERIFY_TOKENS)
-        for sg in got:
-            for w in sg.words or []:
-                a, b = i / rate + float(w.start), i / rate + float(w.end)
-                t = (a + b) / 2
-                if is_profane(w.word.strip()) and not any(abs((x["s"] + x["e"]) / 2 - t) < 0.3 for x in out):
-                    out.append({"s": a, "e": b, "w": w.word.strip()})
+    mix = _pcm(src, 0, lo, dur)
+    voices = {spk: _pcm(src, k, lo, dur) for spk, k in tracks.items()}
+    n = min([len(mix)] + [len(v) for v in voices.values()])
+    out = {spk: np.ascontiguousarray(v[:n], dtype=np.float32) for spk, v in voices.items()}
+    rest = mix[:n] - sum(v[:n] for v in voices.values()) if voices else mix[:n]
+    out[None] = np.ascontiguousarray(rest, dtype=np.float32)
     return out
 
 
-def heard_mats(out_path, src, tl, cancel=None):
-    """Слушает готовый клип: где Whisper слышит мат и в этом месте правда звучит не убранный
-    голос (или игра) — [начало, конец, чей] во времени записи. Писк Whisper за мат не считает:
-    место, где голос уже убран, не трогается."""
-    if not tl or not os.path.isfile(out_path) or not os.path.isfile(src):
-        return []
-    total = timeline_len(tl)
-    audio = _slice_audio(out_path, 0, 0.0, total, cancel)
-    if audio is None or len(audio) < 1600:
-        return []
-    model = _verify_whisper()
-    tracks = speaker_tracks(src)
-    found = []
-    with _verify_lock:
-        for w in _verify_words(model, audio):
-            check_cancel(cancel)
-            x, y = max(0.0, w["s"]), min(total, w["e"])
-            for ra, rb, o, _part in tl:
-                a, b = max(x, o), min(y, o + rb - ra)
-                if b - a < 0.06:
+def _verify_words(model, audio):
+    """Мат на одной чистой дорожке: кусками по VERIFY_PIECE внахлёст, без отбора по речи (друзья
+    в чате игры звучат тихо) и без случайности. Время слова берётся из того куска, где оно дальше
+    от края: у края куска Whisper ошибается до 1,5 с (запись 08.11)."""
+    rate, n = 16000, len(audio)
+    piece, step = int(VERIFY_PIECE * rate), int((VERIFY_PIECE - VERIFY_OVERLAP) * rate)
+    out = []                                                 # {s, e, w, far, p}
+    for p, i in enumerate(range(0, max(1, n - int(VERIFY_OVERLAP * rate)), step)):
+        j = min(n, i + piece)
+        if j - i < rate // 4:
+            continue
+        got, _ = model.transcribe(audio[i:j], language=CONFIG["language"], word_timestamps=True,
+                                  vad_filter=False, beam_size=5, condition_on_previous_text=False,
+                                  temperature=0.0, max_new_tokens=VERIFY_TOKENS)
+        for sg in got:
+            for w in sg.words or []:
+                if not is_profane(w.word.strip()):
                     continue
-                got = _who_heard(src, audio[int(a * 16000):int(b * 16000)], ra + a - o, tracks)
-                if got and not any(g[2] == got[2] and g[0] < got[1] and got[0] < g[1] for g in found):
-                    got = _confirm_mat(model, src, got, tracks)
-                    if got:
-                        found.append(got)
+                a, b = i / rate + float(w.start), i / rate + float(w.end)
+                far = min(a - i / rate if i > 0 else 99.0, j / rate - b if j < n else 99.0)
+                near = [x for x in out if x["p"] != p and abs(x["s"] - a) < VERIFY_SAME]
+                if near:                                     # то же слово из соседнего куска
+                    x = min(near, key=lambda x: abs(x["s"] - a))
+                    if far > x["far"]:
+                        x.update(s=a, e=b, w=w.word.strip(), far=far, p=p)
+                    continue
+                out.append({"s": a, "e": b, "w": w.word.strip(), "far": far, "p": p})
+    return [{"s": x["s"], "e": x["e"], "w": x["w"]} for x in sorted(out, key=lambda x: x["s"])]
+
+
+def _fit_mat(x, lo, a, b):
+    """Края мата по звуку его дорожки: если голос на краю ещё звучит — до места, где стихает
+    (не дальше FIT_MAX). Не сужает: лишняя тишина на чистой дорожке не слышна."""
+    step = 0.01
+    rms = _rms_db(x)
+    i0, i1 = max(0, int((a - lo) / step)), min(len(rms), int(round((b - lo) / step)))
+    if i1 <= i0:
+        return a, b
+    quiet = max(float(rms[i0:i1].max()) - TIGHT_DB, -60.0)
+    k = int(FIT_MAX / step)
+    if rms[i0] > quiet and i0 > 0:
+        d = _dip(rms[max(0, i0 - k):i0 + 1][::-1])
+        if d:
+            a -= d * step
+    if rms[i1 - 1] > quiet:
+        d = _dip(rms[i1 - 1:i1 + k])
+        if d:
+            b += d * step
+    return a - 0.03, b + 0.03
+
+
+def _merge_ranges(rs):
+    out = []
+    for a, b in sorted(rs):
+        if out and a <= out[-1][1] + 1.0:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def find_mats(src, tl, cancel=None):
+    """Мат в местах записи, из которых собран клип. Каждая дорожка слушается отдельно (мой
+    микрофон, Discord, игра без голосов): так Whisper не путает, кто сказал, и не теряет тихих
+    друзей за громким голосом. → [начало, конец, чей] во времени записи."""
+    tracks = speaker_tracks(src)
+    model = _verify_whisper()
+    found = []
+    for ra, rb in _merge_ranges([(r[0], r[1]) for r in tl]):
+        check_cancel(cancel)
+        lo = max(0.0, ra - VERIFY_PAD)
+        for who, x in _streams(src, lo, rb + VERIFY_PAD - lo, tracks).items():
+            if len(x) < 1600 or float(_rms_db(x, 800).max()) < VOICE_HEARD_DB:
+                continue                                     # на дорожке тишина (Discord не подключён)
+            with _verify_lock:
+                words = _verify_words(model, x)
+            for w in words:
+                a, b = _fit_mat(x, lo, lo + w["s"], lo + w["e"])
+                if b > ra and a < rb:
+                    found.append([round(max(0.0, a), 2), round(b, 2), who])
     return sorted(found, key=lambda g: g[0])
 
 
-CONFIRM_PAD = 1.0          # второе мнение: чистая дорожка слушается с таким запасом вокруг
+HEARD_GAIN = (0.4, 1.6)    # голос в готовом клипе звучит с такой долей громкости — не убран
+LAG_MAX = 0.05            # готовый клип сдвинут относительно записи не больше, сек
 
 
-def _confirm_mat(model, src, got, tracks):
-    """Второе мнение: мат, услышанный в готовом клипе, ищется на чистой дорожке того, кто его
-    сказал (или в звуке игры без голосов). Нет его там — Whisper показалось (смех, шум), место
-    не трогаем. Есть — время берётся оттуда и сужается до самого голоса."""
+def _out_lag(out_audio, src, ra, rb, o):
+    """На сколько звук куска клипа сдвинут относительно записи (склейка и сжатие звука сдвигают
+    на несколько тысячных — запись 08.11: 3,5 мс; голос при таком сдвиге уже не узнать)."""
     import numpy as np
-    a, b, who = got
-    lo = max(0.0, a - CONFIRM_PAD)
-    dur = b - lo + CONFIRM_PAD
-    if who in tracks:
-        x = _pcm(src, tracks[who], lo, dur)
-    else:
-        x = _pcm(src, 0, lo, dur)
-        for k in tracks.values():
-            v = _pcm(src, k, lo, dur)
-            n = min(len(x), len(v))
-            x = x[:n] - v[:n]
-    x = np.ascontiguousarray(x, dtype=np.float32)
-    if len(x) < 1600:
-        return None
-    hit = [w for w in _verify_words(model, x)
-           if lo + w["s"] < b + 0.2 and lo + w["e"] > a - 0.2]
-    if not hit:
-        return None
-    s0 = max(a - 0.2, lo + min(w["s"] for w in hit))
-    e0 = min(b + 0.2, lo + max(w["e"] for w in hit))
-    rms = _rms_db(x[int((s0 - lo) * 16000):int((e0 - lo) * 16000)])
-    if len(rms):
-        on = np.nonzero(rms > max(float(rms.max()) - TIGHT_DB, -60.0))[0]
-        if len(on):
-            s0, e0 = s0 + max(0.0, on[0] * 0.01 - 0.03), s0 + min(len(rms), on[-1] + 1) * 0.01 + 0.03
-    return [round(float(s0), 2), round(float(e0), 2), who]
+    d = min(4.0, rb - ra)
+    if d < 0.5:
+        return 0.0
+    mid = ra + (rb - ra - d) / 2
+    m = int(LAG_MAX * 16000)
+    x = out_audio[int((o + mid - ra) * 16000):][:int(d * 16000)]
+    y = _pcm(src, 0, mid - LAG_MAX, d + 2 * LAG_MAX)
+    if len(x) < 8000 or len(y) < len(x) + 2 * m or float(np.dot(x, x)) <= 0:
+        return 0.0
+    best, lag = None, m
+    for k in sorted(range(0, 2 * m + 1), key=lambda k: abs(k - m)):   # от нуля в стороны
+        yy = y[k:k + len(x)]
+        r = float(np.dot(x, yy)) / (float(np.linalg.norm(yy)) + 1e-9)
+        if best is None or r > best + 0.01 * abs(best):       # ровный звук (тон) — сдвига нет
+            best, lag = r, k
+    return (lag - m) / 16000
+
+
+def still_heard(out_audio, src, tl, mats, tracks=None):
+    """Какие места мата в готовом клипе всё ещё слышно: голос этой дорожки звучит и в клипе
+    не убран. → [начало, конец, чей] во времени записи — где именно слышно."""
+    import numpy as np
+    tracks = speaker_tracks(src) if tracks is None else tracks
+    f = int(HEARD_FRAME * 16000)
+    res, lags = [], {}
+    for a, b, who in mats:
+        for i, (ra, rb, o, _part) in enumerate(tl):
+            x, y = max(a, ra), min(b, rb)
+            if y - x < 0.04:
+                continue
+            if i not in lags:
+                lags[i] = _out_lag(out_audio, src, ra, rb, o)
+            k0 = int(round((o + x - ra - lags[i]) * 16000))
+            out = out_audio[max(0, k0):max(0, k0) + int((y - x) * 16000)]
+            v = _streams(src, x, y - x, tracks).get(who)
+            if v is None:
+                continue
+            n = min(len(out), len(v))
+            hits = []
+            for k in range(0, n - f + 1, f):
+                vv, oo = v[k:k + f], out[k:k + f]
+                den = float(np.dot(vv, vv))
+                oe = float(np.dot(oo, oo))
+                if den <= 0 or oe <= 0 or 10 * np.log10(den / f + 1e-12) < VOICE_HEARD_DB:
+                    continue
+                g = float(np.dot(oo, vv)) / den
+                # голос не убран: он в клипе почти с той же громкостью (громкий писк поверх
+                # даёт случайные числа — не голос)
+                if HEARD_GAIN[0] < g < HEARD_GAIN[1] and g * np.sqrt(den / oe) > 0.3:
+                    hits.append(k)
+            if len(hits) * HEARD_FRAME >= 0.04:
+                res.append([round(float(x + hits[0] / 16000 - 0.03), 2),
+                            round(float(x + (hits[-1] + f) / 16000 + 0.03), 2), who])
+    return res
+
+
+def heard_mats(out_path, src, tl, cancel=None, mats=None):
+    """Мат, который слышно в готовом клипе → (где слышно, все найденные места), всё —
+    [начало, конец, чей] во времени записи. mats — места, уже найденные раньше (пересборка:
+    Whisper второй раз не нужен)."""
+    if not tl or not os.path.isfile(out_path) or not os.path.isfile(src):
+        return [], mats or []
+    if mats is None:
+        mats = find_mats(src, tl, cancel)
+    if not mats:
+        return [], mats
+    audio = _slice_audio(out_path, 0, 0.0, timeline_len(tl), cancel)
+    if audio is None or len(audio) < 1600:
+        return [], mats
+    return still_heard(audio, src, tl, mats), mats
 
 
 def render_clip(video, clip, segments, vinfo, out_path, tmpdir, cfg=None, cancel=None,
                 on_frac=None):
-    """Собрать клип, затем прослушать готовый (0.2.1): мат, который всё ещё слышно (Whisper
-    пропустил слово или дал ему не то время), закрыть и пересобрать. Найденное помнится в
-    clip["mat_heard"] — пересборка закрывает его сразу. → число запиканных мест или None."""
+    """Собрать клип, затем проверить на мат (0.2.1): каждая дорожка записи слушается отдельно,
+    и если мат в готовом клипе всё ещё слышно — место закрывается и клип пересобирается.
+    Найденное помнится в clip["mat_heard"] — пересборка закрывает его сразу.
+    → число запиканных мест или None."""
     cfg = cfg or CONFIG
     n = _render_pass(video, clip, segments, vinfo, out_path, tmpdir, cfg, cancel, on_frac)
     if n is None or not cfg.get("bleep") or not MAT_VERIFY:
         return n
+    mats = None
     for _ in range(MAT_VERIFY_ROUNDS):
         try:
-            found = heard_mats(out_path, video, clip.get("timeline") or [], cancel)
+            found, mats = heard_mats(out_path, video, clip.get("timeline") or [], cancel, mats)
         except Cancelled:
             raise
         except Exception as e:
             log(f"   ⚠️  готовый клип на мат не проверил: {e}")
             break
-        have = [tuple(x[:2]) for x in clip.get("mat_heard") or []]
-        found = [x for x in found if not any(min(x[1], b) - max(x[0], a) > 0.5 * (x[1] - x[0])
-                                             for a, b in have)]
         if not found:
             break
-        clip["mat_heard"] = list(clip.get("mat_heard") or []) + [list(x) for x in found]
+        # место целиком (каким его нашла проверка) + где именно слышно
+        add = [m for m in mats if any(m[2] == g[2] and m[0] < g[1] and g[0] < m[1] for g in found)]
+        clip["mat_heard"] = list(clip.get("mat_heard") or []) + [list(x) for x in add + found]
         log(f"   🔇 {os.path.basename(out_path)}: в готовом клипе слышно мат ({len(found)}) — "
             "закрываю и пересобираю")
         again = _render_pass(video, clip, segments, vinfo, out_path, tmpdir, cfg, cancel)
